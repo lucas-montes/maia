@@ -1,4 +1,6 @@
 use clap::{Args, Subcommand};
+use serde::{Deserialize, Serialize};
+use shared::protocol::MessageProtocol;
 
 use crate::utils::Priority;
 
@@ -10,8 +12,14 @@ pub struct Cli {
     command: Commands,
 }
 
-#[derive(Debug, Subcommand)]
-enum Commands {
+impl Cli {
+    pub fn message(self) -> Vec<u8> {
+        self.command.to_bytes().expect("msgage serialization failed")
+    }
+}
+
+#[derive(Debug, Subcommand, Serialize, Deserialize)]
+pub enum Commands {
     /// Create a new object
     #[command(arg_required_else_help = true)]
     Create(Create),
@@ -28,7 +36,10 @@ enum Commands {
     #[command(arg_required_else_help = true)]
     Read(Read),
 }
-#[derive(Debug, Args, Clone)]
+
+impl MessageProtocol for Commands {}
+
+#[derive(Debug, Args, Clone, Serialize, Deserialize)]
 struct Create {
     #[arg(short, long)]
     title: String,
@@ -50,14 +61,14 @@ struct Create {
     #[arg(short = 'f', long)]
     horizon: i8,
 }
-#[derive(Debug, Args, Clone)]
+#[derive(Debug, Args, Clone, Serialize, Deserialize)]
 struct Delete {
     #[arg(short, long)]
     id: Option<i16>,
     #[arg(short, long)]
     title: Option<String>,
 }
-#[derive(Debug, Args, Clone)]
+#[derive(Debug, Args, Clone, Serialize, Deserialize)]
 struct Read {
     #[arg(short, long, default_value_t = true, required = false)]
     all: bool,
@@ -68,7 +79,7 @@ struct Read {
     #[arg(short, long, value_enum, required = false)]
     priority: Option<Priority>,
 }
-#[derive(Debug, Args, Clone)]
+#[derive(Debug, Args, Clone, Serialize, Deserialize)]
 struct Update {
     #[arg(short, long)]
     id: i16,

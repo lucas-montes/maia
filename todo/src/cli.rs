@@ -8,8 +8,18 @@ pub struct Cli {
     command: Commands,
 }
 
+impl Cli {
+    pub fn message(self) -> Vec<u8> {
+        match self.command {
+            Commands::Goal(cmd) => cmd.message(),
+            Commands::Task(cmd) => cmd.message(),
+            Commands::Free { text } => text.into_bytes(),
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
-enum Commands {
+pub enum Commands {
     Goal(goals::Cli),
     Task(tasks::Cli),
     Free { text: String },

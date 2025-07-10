@@ -6,14 +6,14 @@ use std::{
 mod cli;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = cli::Cli::handle();
+    let message = cli::Cli::handle().message();
 
     let mut stream = UnixStream::connect("/tmp/maia.sock").expect("Failed to open socket");
 
     loop {
         // Try to write data, this may still fail with `WouldBlock`
         // if the readiness event is a false positive.
-        match stream.write(cli.message()) {
+        match stream.write(&message) {
             Ok(n) => {
                 println!("Wrote {} bytes", n);
                 break;

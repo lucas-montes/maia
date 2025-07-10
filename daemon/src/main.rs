@@ -1,16 +1,26 @@
-use std::{
-    fs::{self, File, Permissions},
-    os::unix::fs::PermissionsExt,
-    path::Path,
-};
+use std::{fs, path::Path};
 
+use serde::{Deserialize, Serialize};
+use shared::protocol::MessageProtocol;
 use tokio::{
-    io::{self, AsyncReadExt, AsyncWriteExt},
-    net::{UnixListener, UnixStream},
+    io::{self, AsyncWriteExt},
+    net::UnixListener,
 };
 
 // mod databse;
 mod notifications;
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(untagged)]
+enum Message {
+    Goal(todo::goals::Commands),
+    Task(todo::tasks::Commands),
+    Ai(ai::cli::Commands),
+    Finance(finance::cli::Commands),
+    Food(food::cli::Commands),
+    Knowledge(knowledge::cli::Commands),
+}
+impl MessageProtocol for Message {}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -20,12 +30,10 @@ async fn main() {
     let socket_path = "/tmp/maia.sock";
     let path = Path::new(socket_path);
 
-
     if path.exists() {
         fs::remove_file(path).expect("Failed to remove existing socket");
     }
 
-    tracing::info!("Creating socket at {}", socket_path);
     let listener = UnixListener::bind(socket_path).expect("Failed to open socket");
     tracing::info!("Socket bound to {}", socket_path);
     loop {
@@ -42,19 +50,20 @@ async fn main() {
                     match stream.try_read_buf(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
+                            let response = match Message::from_bytes(&buf) {
+                                Ok(message) => format!("Daemon got: {:?}", message),
+                                Err(err) => {
+                                    tracing::error!(err=%err, "Failed to parse message");
+                                    "error".into()
+                                }
+                            };
 
-                            if let Ok(message) = String::from_utf8(buf) {
-
-                                let response = format!("Daemon got: {}", message);
-                                if let Err(err) = stream.write_all(response.as_bytes()).await {
-                                    tracing::error!(err=%err, "Stream is not ready");
-                                };
-                                if let Err(err) = stream.flush().await {
-                                    tracing::error!(err=%err, "Stream is not ready");
-                                };
-                            } else {
-                                tracing::error!("Received invalid UTF-8 data");
-                            }
+                            if let Err(err) = stream.write_all(response.as_bytes()).await {
+                                tracing::error!(err=%err, "Stream is not ready");
+                            };
+                            if let Err(err) = stream.flush().await {
+                                tracing::error!(err=%err, "Stream is not ready");
+                            };
                         }
                         Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                             continue;

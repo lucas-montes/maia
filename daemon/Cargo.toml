@@ -17,3 +17,4 @@ todo = { path = "../todo" }
 finance = { path = "../finance" }
 food = { path = "../food" }
 knowledge = { path = "../knowledge" }
+shared.workspace = true
