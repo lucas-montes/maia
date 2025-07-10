@@ -9,7 +9,8 @@ use tokio::{
     net::{UnixListener, UnixStream},
 };
 
-mod model;
+// mod databse;
+mod notifications;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
