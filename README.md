@@ -218,3 +218,18 @@ cargo build --release
 The compiled binaries will be in `target/release/`:
 - `target/release/daemon` - The daemon server
 - `target/release/maia` - The CLI client
+
+
+## TODO
+[ ] Add config for the daemon
+[ ] Add state for the daemon
+[ ] Add streaming request/respone for interactive visualization
+[ ] Finish receipts reader
+[ ] Add connection to remote storage
+[ ] Finish logic for finance
+[ ] Finish logic for calories counting
+[ ] Better protocol format
+[ ] Add format to use with waybar
+
+## Notes
+[chrome api](https://developer.chrome.com/docs/extensions/reference/api/sidePanel#type-Side)

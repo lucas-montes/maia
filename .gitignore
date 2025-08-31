@@ -1,6 +1,7 @@
 /target
 .env
 .direnv
+result
 
 # Added by cargo
 #
@@ -8,3 +9,4 @@
 
 #/target
 *.db*
+/data

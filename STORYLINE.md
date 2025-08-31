@@ -19,3 +19,6 @@ It didn't reuse existing code. Maybe is on my fault, but it ignored some instruc
 It did whatever the fuck it wanted.
 
 I didn't like the experience, the code is awfull, I don't even want to touch it. Everything is good to trowh away.
+
+
+finally managed to make the chrome extension work. debuging it is a pita, you need to open a special console to debug the background js.

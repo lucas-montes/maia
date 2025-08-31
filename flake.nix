@@ -25,27 +25,24 @@
           extensions = ["rust-src"];
         };
 
-        #TODO: point to the correct cargo file
-        cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+        readCargoToml = path: builtins.fromTOML (builtins.readFile path);
 
-        # Build the Maia CLI package
-        maia-cli = pkgs.rustPlatform.buildRustPackage {
-          pname = "maia-cli";
-          version = cargoToml.package.version;
+        packageData = name: cargoPath: pkgs.rustPlatform.buildRustPackage {
+          pname = name;
+          version = (readCargoToml cargoPath).package.version;
           src = ./.;
 
           cargoLock = {
             lockFile = ./Cargo.lock;
           };
 
-          # Only build the CLI binary
           buildPhase = ''
-            cargo build --release --bin maia-cli
+            cargo build --release -p ${name}
           '';
 
           installPhase = ''
             mkdir -p $out/bin
-            cp target/release/maia-cli $out/bin/maia
+            cp target/release/${name} $out/bin/${name}
           '';
 
           nativeBuildInputs = with pkgs; [pkg-config];
@@ -53,32 +50,25 @@
           doCheck = false;
         };
 
-        # Build the Maia daemon package
-        maia-daemon = pkgs.rustPlatform.buildRustPackage {
-          pname = "maia-daemon";
-          version = cargoToml.package.version;
-          src = ./.;
+        maia-cli = packageData "maia" ./Cargo.toml;
+        maia-daemon = packageData "daemon" ./daemon/Cargo.toml;
+        maia-chrome = packageData "chrome" ./chrome/Cargo.toml;
 
-          cargoLock = {
-            lockFile = ./Cargo.lock;
+        # Native Messaging manifest generator
+        nativeMessageManifest = { hostPath, allowedOrigins ? [] }:
+          pkgs.writeTextFile {
+            name = "maia.chrome.json";
+            text = builtins.toJSON {
+              name = "maia.chrome";
+              description = "Maia Native Messaging Host";
+              path = hostPath;
+              type = "stdio";
+              allowed_origins = allowedOrigins;
+            };
           };
 
-          # Only build the daemon binary
-          buildPhase = ''
-            cargo build --release --bin maia-daemon
-          '';
-
-          installPhase = ''
-            mkdir -p $out/bin
-            cp target/release/maia-daemon $out/bin/maia-daemon
-          '';
-
-          nativeBuildInputs = with pkgs; [pkg-config];
-          buildInputs = with pkgs; [openssl];
-          doCheck = false;
-        };
         maia-full = pkgs.symlinkJoin {
-          name = "maia-full-${cargoToml.package.version}";
+          name = "maia-full";
           paths = [maia-cli maia-daemon];
           meta = {
             description = "Maia - Personal management tool with AI-powered features (CLI + daemon)";
@@ -101,6 +91,7 @@
           daemon = maia-daemon;
           full = maia-full; # Combined package
           default = maia-full; # Make CLI the default
+          chrome = maia-chrome;
         };
 
         # Apps
@@ -155,7 +146,7 @@
                 };
 
                 serviceConfig = {
-                  ExecStart = "${self.packages.${pkgs.system}.daemon}/bin/maia-daemon";
+                  ExecStart = "${self.packages.${pkgs.system}.daemon}/bin/daemon";
                   Restart = "on-failure";
                   User = "maia";
                   Group = "maia";

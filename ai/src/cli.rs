@@ -10,17 +10,19 @@ pub struct Cli {
 
 impl Cli {
     pub fn message(self) -> Vec<u8> {
-        self.command.to_bytes().expect("msgage serialization failed")
+        self.command
+            .to_bytes()
+            .expect("message serialization failed")
     }
 }
 #[derive(Debug, Subcommand, Serialize, Deserialize)]
 pub enum Commands {
     Chat(Chat),
-    OneShot {message: String}
+    OneShot { message: String },
 }
 impl MessageProtocol for Commands {}
 
 #[derive(Debug, Args, Serialize, Deserialize)]
-struct Chat{
+pub struct Chat {
     message: String,
 }

@@ -22,10 +22,7 @@ enum Message {
 }
 impl MessageProtocol for Message {}
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    tracing_subscriber::fmt::init();
-
+async fn listen_socket() {
     tracing::info!("Maia daemon started");
     let socket_path = "/tmp/maia.sock";
     let path = Path::new(socket_path);
@@ -37,6 +34,7 @@ async fn main() {
     let listener = UnixListener::bind(socket_path).expect("Failed to open socket");
     tracing::info!("Socket bound to {}", socket_path);
     loop {
+        tracing::info!("ready ");
         match listener.accept().await {
             Ok((mut stream, _addr)) => {
                 loop {
@@ -76,5 +74,13 @@ async fn main() {
             }
             Err(err) => tracing::error!(err=%err, "Connection failed "),
         }
+        tracing::info!("ready ");
     }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    tracing_subscriber::fmt::init();
+
+   listen_socket().await;
 }

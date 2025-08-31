@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Maia",
+  "version": "1.0",
+  "description": "Your assistant in the browser",
+  "permissions": ["contextMenus", "nativeMessaging", "activeTab", "scripting", "notifications", "sidePanel", "bookmarks", "readingList"],
+  "omnibox": { "keyword" : "maia" },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+     "default_title": "Click to open panel"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "commands": {
+    "send-url": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "Command+Shift+Y"
+      },
+      "description": "Send page URL to daemon"
+    },
+    "send-url-and-content": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+U",
+        "mac": "Command+Shift+U"
+      },
+      "description": "Send page URL and content to daemon"
+    }
+  }
+}

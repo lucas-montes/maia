@@ -23,4 +23,4 @@ food = { path = "food", features = ["cli"] }
 knowledge = { path = "knowledge", features = ["cli"] }
 
 [workspace]
-members = ["todo", "daemon", "ai", "finance", "food", "knowledge", "shared"]
+members = ["todo", "daemon", "ai", "finance", "food", "knowledge", "shared", "chrome"]
