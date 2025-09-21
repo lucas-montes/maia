@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 
-use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use shared::protocol::MessageProtocol;
 
-#[derive(Debug, Args)]
+/// Knowledge CLI
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Debug)]
 pub struct Cli {
+    /// Knowledge command group
     #[command(subcommand)]
     command: Commands,
 }
@@ -15,15 +17,22 @@ impl Cli {
     }
 }
 
-#[derive(Debug, Subcommand, Serialize, Deserialize)]
+/// Knowledge commands
+#[cfg_attr(feature = "cli", derive(clap::Subcommand))]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Commands {
+    /// Add a file to knowledge
     Add(Add)
 }
 
 impl MessageProtocol for Commands {}
 
-#[derive(Debug, Args, Serialize, Deserialize)]
-struct Add{
-    file: PathBuf,
-    symlink: bool
+/// Add a file to knowledge
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Add{
+    /// File to add
+    pub file: PathBuf,
+    /// Create a symlink
+    pub symlink: bool
 }

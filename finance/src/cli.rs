@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 
-use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use shared::protocol::MessageProtocol;
 
-#[derive(Debug, Args)]
+/// Finance CLI
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Debug)]
 pub struct Cli {
+    /// Finance command group
     #[command(subcommand)]
     command: Commands,
 }
@@ -16,13 +18,20 @@ impl Cli {
     }
 }
 
-#[derive(Debug, Subcommand, Serialize, Deserialize)]
+/// Finance commands
+#[cfg_attr(feature = "cli", derive(clap::Subcommand))]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Commands {
+    /// Add an expense from a ticket/receipt
     Expense(Expense)
 }
-impl MessageProtocol for Commands {}
-#[derive(Debug, Args, Serialize, Deserialize)]
-struct Expense{
-    ticket: PathBuf,
 
+impl MessageProtocol for Commands {}
+
+/// Expense command
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Expense{
+    /// Path to the ticket/receipt image
+    pub ticket: PathBuf,
 }

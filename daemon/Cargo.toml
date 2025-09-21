@@ -12,9 +12,11 @@ tracing-appender.workspace = true
 tokio = { version = "1.46.1", features = ["macros", "rt", "net", "io-util"] }
 base64 = "0.22.1"
 notify-rust = "4.5.0"
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono"] }
+chrono = { version = "0.4", features = ["serde"] }
 ai = { path = "../ai" }
 todo = { path = "../todo" }
 finance = { path = "../finance" }
-food = { path = "../food" }
+health = { path = "../health" }
 knowledge = { path = "../knowledge" }
 shared.workspace = true

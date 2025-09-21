@@ -2,8 +2,10 @@ use clap::{Args, Subcommand};
 
 use crate::{goals, tasks};
 
+/// To-do CLI
 #[derive(Debug, Args)]
 pub struct Cli {
+    /// To-do command group
     #[command(subcommand)]
     command: Commands,
 }
@@ -18,9 +20,16 @@ impl Cli {
     }
 }
 
+/// To-do commands
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// Manage goals
     Goal(goals::Cli),
+    /// Manage tasks
     Task(tasks::Cli),
-    Free { text: String },
+    /// Free-form text
+    Free {
+        /// Free-form text
+        text: String,
+    },
 }

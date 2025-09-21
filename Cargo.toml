@@ -11,6 +11,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 tracing-appender = "0.2"
 shared = { path = "shared" }
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono"] }
+chrono = { version = "0.4", features = ["serde"] }
 
 [dependencies]
 serde.workspace = true
@@ -19,8 +21,8 @@ clap.workspace = true
 ai = { path = "ai", features = ["cli"] }
 todo = { path = "todo", features = ["cli"] }
 finance = { path = "finance", features = ["cli"] }
-food = { path = "food", features = ["cli"] }
+health = { path = "health", features = ["cli"] }
 knowledge = { path = "knowledge", features = ["cli"] }
 
 [workspace]
-members = ["todo", "daemon", "ai", "finance", "food", "knowledge", "shared", "chrome"]
+members = ["todo", "daemon", "ai", "finance", "health", "knowledge", "shared", "chrome"]
