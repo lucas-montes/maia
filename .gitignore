@@ -10,3 +10,4 @@ result
 #/target
 *.db*
 /data
+/test_dir

@@ -11,18 +11,27 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 tracing-appender = "0.2"
 shared = { path = "shared" }
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-clap.workspace = true
-ai = { path = "ai", features = ["cli"] }
-todo = { path = "todo", features = ["cli"] }
-finance = { path = "finance", features = ["cli"] }
-health = { path = "health", features = ["cli"] }
-knowledge = { path = "knowledge", features = ["cli"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+chrono.workspace = true
+
+tokio = { version = "1.46.1", features = ["macros", "rt", "net", "io-util", "rt-multi-thread"] }
+base64 = "0.22.1"
+notify-rust = "4.5.0"
+inotify = "0.11.0"
+
+ai = { path = "ai" }
+todo = { path = "todo" }
+outils = { path = "outils" }
+knowledge = { path = "knowledge" }
+shared = { path = "shared" }
+
 
 [workspace]
-members = ["todo", "daemon", "ai", "finance", "health", "knowledge", "shared", "chrome"]
+members = ["todo", "ai", "knowledge", "shared", "chrome", "cli", "outils"]

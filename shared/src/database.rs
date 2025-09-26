@@ -1,0 +1,20 @@
+use rusqlite::{params, Connection, Result as SqlResult};
+use std::path::Path;
+
+#[derive(Clone)]
+pub struct Database {
+    conn: std::sync::Arc<Connection>,
+}
+
+impl Database {
+    pub fn new(db_path: &Path) -> SqlResult<Self> {
+        let conn = Connection::open(db_path)?;
+
+        if !db_path.exists() {
+            println!("Creating database at {:?}", db_path);
+        }
+
+
+        Ok(Self { conn: std::sync::Arc::new(conn) })
+    }
+}

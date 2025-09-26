@@ -88,8 +88,7 @@ pub trait MessageProtocol where Self: Sized {
         let len = json_bytes.len() as u32;
 
         // Prevent extremely large messages (64MB limit)
-        const MAX_MESSAGE_SIZE: u32 = 64 * 1024 * 1024;
-        if len > MAX_MESSAGE_SIZE {
+        if len > u32::MAX {
             return Err(ProtocolError::MessageTooLarge(len));
         }
 
@@ -109,13 +108,14 @@ pub trait MessageProtocol where Self: Sized {
         }
 
         let len_bytes: [u8; 4] = bytes[0..4].try_into()?;
-        let expected_len = u32::from_le_bytes(len_bytes) as usize;
+        let expected_len = u32::from_le_bytes(len_bytes);
 
         // Validate message length
-        const MAX_MESSAGE_SIZE: u32 = 64 * 1024 * 1024;
-        if expected_len as u32 > MAX_MESSAGE_SIZE {
-            return Err(ProtocolError::MessageTooLarge(expected_len as u32));
+        if expected_len > u32::MAX {
+            return Err(ProtocolError::MessageTooLarge(expected_len));
         }
+
+        let expected_len = expected_len as usize;
 
         if bytes.len() < 4 + expected_len {
             return Err(ProtocolError::IncompleteMessage {

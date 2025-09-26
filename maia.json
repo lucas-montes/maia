@@ -1,0 +1,6 @@
+{
+  "receipts_path": "test_dir",
+  "bank_statements_path": null,
+  "investments_statements_path": null,
+  "database": "maia.db"
+}

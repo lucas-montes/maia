@@ -1,52 +1,29 @@
-use std::{
-    io::{self, Read, Write},
-    os::unix::net::UnixStream,
-};
+use std::pin::Pin;
 
-mod cli;
+use socket::listen_socket;
+use state::State;
+use watcher::monitor_dirs;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let message = cli::Cli::handle().message();
+mod config;
+mod notifications;
+mod socket;
+mod state;
+mod watcher;
 
-    let mut stream = UnixStream::connect("/tmp/maia.sock").expect("Failed to open socket");
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt().json().init();
 
-    loop {
-        // Try to write data, this may still fail with `WouldBlock`
-        // if the readiness event is a false positive.
-        match stream.write(&message) {
-            Ok(n) => {
-                println!("Wrote {} bytes", n);
-                break;
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                continue;
-            }
-            Err(err) => {
-                eprintln!("Stream is not ready {}", err);
-            }
-        }
-    }
+    let state = State::initialize();
 
-    stream.flush().expect("msg");
-    println!("Sent");
+    let monitor_task: Pin<Box<dyn Future<Output = ()> + Send>> = if state.config().needs_to_listen()
+    {
+        Box::pin(monitor_dirs(state.config().paths_to_watch()))
+    } else {
+        Box::pin(tokio::task::yield_now())
+    };
 
-    // // Shutdown the write half to signal end of input (optional, helps daemon detect EOF)
-    // stream.shutdown(std::net::Shutdown::Write)?;
+    let (_monitor_dirs_task, _listen_socket_task) = tokio::join!(monitor_task, listen_socket());
 
-    // Wait for and read the response
-    let mut response = [0; 1024]; // Buffer for response
-    match stream.read(&mut response) {
-        Ok(_) => {
-            if response.is_empty() {
-                println!("No response received from daemon");
-            } else {
-                println!("Received: {}", String::from_utf8_lossy(&response));
-            }
-        }
-        Err(e) => {
-            eprintln!("Error reading response: {}", e);
-        }
-    }
-
-    Ok(())
+    tracing::info!("Shutting down");
 }
