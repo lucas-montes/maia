@@ -1,0 +1,7 @@
+[package]
+name = "finances"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rust_decimal = { version = "1.38.0", features = ["macros"] }
