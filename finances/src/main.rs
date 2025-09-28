@@ -7,6 +7,7 @@ use std::fmt;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
+use std::cmp::Ordering;
 
 fn write_totals_csv(
     filename: &str,
@@ -24,79 +25,230 @@ fn write_totals_csv(
     Ok(())
 }
 
-#[derive(Debug)]
-struct SimulationResult {
-    best: ScenarioSummary,
-    worst: ScenarioSummary,
-    average_final_total: f64,
-    median_final_total: f64,
-    stddev_final_total: f64,
-    time_to_million_best: Option<u32>,
-    time_to_million_worst: Option<u32>,
-    time_to_million_average: Option<f64>,
-    count_reached_million: usize,
-    total_scenarios: usize,
-}
-
-impl fmt::Display for SimulationResult {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "\n{:-^80}", " Simulation Summary ")?;
-        writeln!(
-            f,
-            "{:<20} {:>15} {:>15} {:>15}",
-            "Metric", "Value", "Best", "Worst"
-        )?;
-        writeln!(f, "{:-<80}", "")?;
-
-        writeln!(
-            f,
-            "{:<20} {:>15.2} {:>15.2} {:>15.2}",
-            "Final Total", self.average_final_total, self.best.final_total, self.worst.final_total
-        )?;
-        writeln!(
-            f,
-            "{:<20} {:>15.2} {:>15.2} {:>15.2}",
-            "Median Total", self.median_final_total, self.best.final_total, self.worst.final_total
-        )?;
-        writeln!(
-            f,
-            "{:<20} {:>15.2}",
-            "Stddev Total", self.stddev_final_total
-        )?;
-        writeln!(
-            f,
-            "{:<20} {:>15}",
-            "Scenarios ≥ $1M", self.count_reached_million
-        )?;
-        writeln!(f, "{:<20} {:>15}", "Total Scenarios", self.total_scenarios)?;
-        writeln!(
-            f,
-            "{:<20} {:>15.2} {:>15} {:>15}",
-            "Years to $1M",
-            self.time_to_million_average.unwrap_or(0.0),
-            self.time_to_million_best.unwrap_or(0),
-            self.time_to_million_worst.unwrap_or(0)
-        )?;
-        writeln!(f, "{:-<80}", "")?;
-        writeln!(
-            f,
-            "Best scenario: {:<20} \nWorst scenario: {:<20}",
-            self.best.name, self.worst.name
-        )
-    }
+#[derive(Debug, Clone)]
+struct ScenarioParams {
+    portfolio: PortfolioParams,
+    expenses: Expenses,
 }
 
 #[derive(Debug, Clone)]
 struct ScenarioSummary {
+    params: ScenarioParams,
     name: String,
     final_total: f64,
     years_to_million: Option<u32>,
 }
 
-fn analyze_scenarios(scenarios: &[ScenarioResult]) -> SimulationResult {
+#[derive(Debug)]
+struct SimulationResult {
+    simulation_name: String,
+    best: ScenarioSummary,
+    worst: ScenarioSummary,
+    median: ScenarioSummary,
+    q1: ScenarioSummary,
+    q3: ScenarioSummary,
+    average_final_total: f64,
+    median_final_total: f64,
+    stddev_final_total: f64,
+    time_to_million_best: Option<u32>,
+    time_to_million_worst: Option<u32>,
+    time_to_million_median: Option<u32>,
+    time_to_million_q1: Option<u32>,
+    time_to_million_q3: Option<u32>,
+    time_to_million_average: Option<f64>,
+    count_reached_million: usize,
+    total_scenarios: usize,
+    duration_secs: f64,
+}
+
+impl fmt::Display for SimulationResult {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "\n{:-^172}", format!(" Simulation Summary [{}] ", self.simulation_name))?;
+        writeln!(f, "{:<8} {:>13} {:>10} {:>8} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
+            "Type", "Final Total", "Years $1M", "Thresh", "FixedPct", "Inflation", "FixRet", "VarRet", "Rent", "Food", "Transp", "Util", "Entmt", "Others")?;
+        writeln!(f, "{:-<172}", "")?;
+        let em_dash = "—";
+        let mut print_row = |label: &str, s: &ScenarioSummary| {
+            let p = &s.params.portfolio;
+            let e = &s.params.expenses;
+            writeln!(f, "{:<8} {:>13.2} {:>10} {:>8.0} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>9.2}",
+                label,
+                s.final_total,
+                s.years_to_million.map_or(em_dash.to_string(), |y| y.to_string()),
+                p.savings_threshold,
+                p.fixed_pct,
+                p.inflation,
+                p.fixed_return,
+                p.variable_return,
+                e.rent,
+                e.food,
+                e.transport,
+                e.utilities,
+                e.entertainment,
+                e.others
+            )
+        };
+        print_row("Best", &self.best)?;
+        print_row("Worst", &self.worst)?;
+        print_row("Median", &self.median)?;
+        print_row("Q1", &self.q1)?;
+        print_row("Q3", &self.q3)?;
+        writeln!(f, "{:-<172}", "")?;
+        writeln!(f, "{:<8} {:>13.2} {:>10} {:>8} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
+            "Avg", self.average_final_total, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash)?;
+        writeln!(f, "{:<8} {:>13.2} {:>10} {:>8} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
+            "Stddev", self.stddev_final_total, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash)?;
+        writeln!(f, "Scenarios ≥ $1M: {:<5}   Total: {:<5}   Duration (s): {:.2}", self.count_reached_million, self.total_scenarios, self.duration_secs)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct ScenarioResult {
+    params: ScenarioParams,
+    results: Vec<YearResult>,
+}
+
+impl ScenarioResult {
+    fn new(params: ScenarioParams) -> Self {
+        Self {
+            params,
+            results: Vec::new(),
+        }
+    }
+    fn add_year_result(&mut self, year_result: YearResult) {
+        self.results.push(year_result);
+    }
+}
+
+struct StreamingStats {
+    count: usize,
+    mean: f64,
+    m2: f64,
+    min: f64,
+    max: f64,
+    sum: f64,
+}
+
+impl StreamingStats {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            mean: 0.0,
+            m2: 0.0,
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+            sum: 0.0,
+        }
+    }
+    fn update(&mut self, value: f64) {
+        self.count += 1;
+        let delta = value - self.mean;
+        self.mean += delta / self.count as f64;
+        let delta2 = value - self.mean;
+        self.m2 += delta * delta2;
+        self.sum += value;
+        if value < self.min { self.min = value; }
+        if value > self.max { self.max = value; }
+    }
+    fn stddev(&self) -> f64 {
+        if self.count < 2 { 0.0 } else { (self.m2 / (self.count as f64 - 1.0)).sqrt() }
+    }
+}
+
+struct Histogram {
+    bins: Vec<usize>,
+    min: f64,
+    max: f64,
+}
+
+impl Histogram {
+    fn new(min: f64, max: f64, num_bins: usize) -> Self {
+        Self {
+            bins: vec![0; num_bins],
+            min,
+            max,
+        }
+    }
+    fn add(&mut self, value: f64) {
+        let num_bins = self.bins.len();
+        let idx = if self.max == self.min {
+            0
+        } else {
+            let pos = ((value - self.min) / (self.max - self.min) * (num_bins as f64)).floor() as usize;
+            pos.min(num_bins - 1)
+        };
+        self.bins[idx] += 1;
+    }
+    fn quantile(&self, q: f64) -> usize {
+        let total: usize = self.bins.iter().sum();
+        let target = (q * total as f64).ceil() as usize;
+        let mut acc = 0;
+        for (i, &count) in self.bins.iter().enumerate() {
+            acc += count;
+            if acc >= target {
+                return i;
+            }
+        }
+        self.bins.len() - 1
+    }
+    fn value_at_bin(&self, bin: usize) -> f64 {
+        let num_bins = self.bins.len();
+        self.min + (self.max - self.min) * (bin as f64 + 0.5) / num_bins as f64
+    }
+}
+
+fn analyze_histogram(
+    stats: &StreamingStats,
+    histogram: &Histogram,
+    best: &ScenarioSummary,
+    worst: &ScenarioSummary,
+    count_reached_million: usize,
+    total_scenarios: usize,
+    duration_secs: f64,
+) -> SimulationResult {
+    let median_bin = histogram.quantile(0.5);
+    let q1_bin = histogram.quantile(0.25);
+    let q3_bin = histogram.quantile(0.75);
+    let median_total = histogram.value_at_bin(median_bin);
+    let q1_total = histogram.value_at_bin(q1_bin);
+    let q3_total = histogram.value_at_bin(q3_bin);
+    SimulationResult {
+        simulation_name: String::from("Simulation"),
+        best: best.clone(),
+        worst: worst.clone(),
+        median: ScenarioSummary {
+            final_total: median_total,
+            ..best.clone()
+        },
+        q1: ScenarioSummary {
+            final_total: q1_total,
+            ..best.clone()
+        },
+        q3: ScenarioSummary {
+            final_total: q3_total,
+            ..best.clone()
+        },
+        average_final_total: stats.mean,
+        median_final_total: median_total,
+        stddev_final_total: stats.stddev(),
+        time_to_million_best: best.years_to_million,
+        time_to_million_worst: worst.years_to_million,
+        time_to_million_median: None,
+        time_to_million_q1: None,
+        time_to_million_q3: None,
+        time_to_million_average: None,
+        count_reached_million,
+        total_scenarios,
+        duration_secs,
+    }
+}
+
+fn analyze_scenarios(scenarios: &[ScenarioResult], duration_secs: f64) -> SimulationResult {
     let mut summaries = Vec::new();
     let mut totals = Vec::new();
     let mut years_to_million = Vec::new();
+    let mut years_to_million_vec = Vec::new();
 
     for scenario in scenarios {
         let final_total = scenario
@@ -106,96 +258,109 @@ fn analyze_scenarios(scenarios: &[ScenarioResult]) -> SimulationResult {
             .unwrap_or_default()
             .to_f64()
             .unwrap_or(0.0);
-        let name = scenario.name.clone();
         let year_million = scenario
             .results
             .iter()
             .find(|y| y.total >= dec!(1_000_000.0))
             .map(|y| y.year);
-
         if let Some(y) = year_million {
             years_to_million.push(y);
+            years_to_million_vec.push(y as f64);
+        } else {
+            years_to_million_vec.push(0.0);
         }
-
         summaries.push(ScenarioSummary {
-            name,
+            params: scenario.params.clone(),
+            name: format!("{}", scenario.params.portfolio),
             final_total,
             years_to_million: year_million,
         });
         totals.push(final_total);
     }
-
-    // Sort summaries for best/worst
-    let best = summaries
-        .iter()
-        .max_by(|a, b| a.final_total.partial_cmp(&b.final_total).unwrap())
-        .unwrap()
-        .to_owned();
-    let worst = summaries
-        .iter()
-        .min_by(|a, b| a.final_total.partial_cmp(&b.final_total).unwrap())
-        .unwrap()
-        .to_owned();
-
-    // Average, median, stddev
+    let mut sorted = summaries.clone();
+    sorted.sort_by(|a, b| a.final_total.partial_cmp(&b.final_total).unwrap());
+    let mid = sorted.len() / 2;
+    let q1_idx = sorted.len() / 4;
+    let q3_idx = 3 * sorted.len() / 4;
+    let median = if sorted.is_empty() {
+        summaries[0].clone()
+    } else {
+        sorted[mid].clone()
+    };
+    let q1 = if sorted.is_empty() {
+        summaries[0].clone()
+    } else {
+        sorted[q1_idx].clone()
+    };
+    let q3 = if sorted.is_empty() {
+        summaries[0].clone()
+    } else {
+        sorted[q3_idx].clone()
+    };
+    let best = sorted.last().cloned().unwrap_or_else(|| summaries[0].clone());
+    let worst = sorted.first().cloned().unwrap_or_else(|| summaries[0].clone());
     let average_final_total = totals.iter().sum::<f64>() / totals.len().max(1) as f64;
-    let median_final_total = {
-        let mut sorted = totals.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let mid = sorted.len() / 2;
-        if sorted.is_empty() {
-            0.0
-        } else if sorted.len() % 2 == 0 {
-            (sorted[mid - 1] + sorted[mid]) / 2.0
-        } else {
-            sorted[mid]
-        }
+    let median_final_total = if sorted.is_empty() {
+        0.0
+    } else if sorted.len() % 2 == 0 {
+        (sorted[mid - 1].final_total + sorted[mid].final_total) / 2.0
+    } else {
+        sorted[mid].final_total
     };
     let stddev_final_total = {
         let mean = average_final_total;
-        let var =
-            totals.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / totals.len().max(1) as f64;
+        let var = totals.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / totals.len().max(1) as f64;
         var.sqrt()
     };
-
-    let count_reached_million = years_to_million.len();
-    let time_to_million_best = years_to_million.iter().min().copied();
-    let time_to_million_worst = years_to_million.iter().max().copied();
+    let mut years_sorted = years_to_million_vec.clone();
+    years_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mid_y = years_sorted.len() / 2;
+    let q1_y = years_sorted.len() / 4;
+    let q3_y = 3 * years_sorted.len() / 4;
+    let time_to_million_median = if years_sorted.is_empty() {
+        None
+    } else if years_sorted.len() % 2 == 0 {
+        Some((years_sorted[mid_y - 1] + years_sorted[mid_y]) as u32 / 2)
+    } else {
+        Some(years_sorted[mid_y] as u32)
+    };
+    let time_to_million_q1 = if years_sorted.is_empty() {
+        None
+    } else {
+        Some(years_sorted[q1_y] as u32)
+    };
+    let time_to_million_q3 = if years_sorted.is_empty() {
+        None
+    } else {
+        Some(years_sorted[q3_y] as u32)
+    };
+    let time_to_million_best = years_sorted.iter().cloned().filter(|&y| y > 0.0).min_by(|a, b| a.partial_cmp(b).unwrap()).map(|y| y as u32);
+    let time_to_million_worst = years_sorted.iter().cloned().filter(|&y| y > 0.0).max_by(|a, b| a.partial_cmp(b).unwrap()).map(|y| y as u32);
     let time_to_million_average = if !years_to_million.is_empty() {
         Some((years_to_million.iter().sum::<u32>() as f64) / years_to_million.len() as f64)
     } else {
         None
     };
-
+    let count_reached_million = years_to_million.len();
     SimulationResult {
+        simulation_name: String::from("Simulation"),
         best,
         worst,
+        median,
+        q1,
+        q3,
         average_final_total,
         median_final_total,
         stddev_final_total,
         time_to_million_best,
         time_to_million_worst,
+        time_to_million_median,
+        time_to_million_q1,
+        time_to_million_q3,
         time_to_million_average,
         count_reached_million,
         total_scenarios: scenarios.len(),
-    }
-}
-
-#[derive(Debug)]
-struct ScenarioResult {
-    name: String,
-    results: Vec<YearResult>,
-}
-
-impl ScenarioResult {
-    fn new(name: String) -> Self {
-        Self {
-            name,
-            results: Vec::new(),
-        }
-    }
-    fn add_year_result(&mut self, year_result: YearResult) {
-        self.results.push(year_result);
+        duration_secs,
     }
 }
 
@@ -554,7 +719,7 @@ fn print_progress_bar(progress: usize, total: usize, width: usize) {
 }
 
 fn main() {
-    let n_sim = 3000;
+    let n_sim = 5000;
     let expenses_dist = ExpensesDistribution::new(
         NormalDist::new(1000.0, 200.0), // rent
         NormalDist::new(400.0, 100.0),  // food
@@ -576,21 +741,33 @@ fn main() {
     let revenue_iter = RevenueIterator::new(vec![dec!(6700), dec!(7258.33)]);
     let expenses_iter = ExpensesIterator::new(expenses_dist, n_sim);
     let portfolio_param_iter = PortfolioParamIterator::new(portfolio_dist, n_sim);
-    let mut all_results = Vec::new();
 
     let total = revenue_iter.incomes.len() * n_sim * n_sim;
     let mut progress = 0;
+    let start = std::time::Instant::now();
 
+    let mut stats = StreamingStats::new();
+    let mut best: Option<ScenarioSummary> = None;
+    let mut worst: Option<ScenarioSummary> = None;
+    let mut count_reached_million = 0;
+    let mut min_total = f64::INFINITY;
+    let mut max_total = f64::NEG_INFINITY;
+
+    // First pass: find min/max for histogram
     for revenue in revenue_iter {
         for expenses in expenses_iter.clone() {
             let net_income = calculate_net_income(revenue.annual_income(), &expenses);
             for params in portfolio_param_iter.clone() {
-                let scenario_name = params.to_string();
-                let mut scenario = ScenarioResult::new(scenario_name);
+                let mut scenario = ScenarioResult::new(ScenarioParams {
+                    portfolio: params.clone(),
+                    expenses: expenses.clone(),
+                });
                 for year_result in simulate_portfolio(&params, net_income) {
                     scenario.add_year_result(year_result);
                 }
-                all_results.push(scenario);
+                let final_total = scenario.results.last().map(|y| y.total).unwrap_or_default().to_f64().unwrap_or(0.0);
+                if final_total < min_total { min_total = final_total; }
+                if final_total > max_total { max_total = final_total; }
                 progress += 1;
                 if progress % 1000 == 0 || progress == total {
                     print_progress_bar(progress, total, 40);
@@ -598,6 +775,62 @@ fn main() {
             }
         }
     }
-    let sim_result = analyze_scenarios(&all_results);
+    let num_bins = 100;
+    let mut histogram = Histogram::new(min_total, max_total, num_bins);
+    let revenue_iter = RevenueIterator::new(vec![dec!(6700), dec!(7258.33)]);
+    let mut progress = 0;
+    println!("\nStarting second pass for stats and histogram...");
+    // Second pass: stats and histogram
+    for revenue in revenue_iter {
+        for expenses in expenses_iter.clone() {
+            let net_income = calculate_net_income(revenue.annual_income(), &expenses);
+            for params in portfolio_param_iter.clone() {
+                let mut scenario = ScenarioResult::new(ScenarioParams {
+                    portfolio: params.clone(),
+                    expenses: expenses.clone(),
+                });
+                for year_result in simulate_portfolio(&params, net_income) {
+                    scenario.add_year_result(year_result);
+                }
+                let final_total = scenario.results.last().map(|y| y.total).unwrap_or_default().to_f64().unwrap_or(0.0);
+                let year_million = scenario.results.iter().find(|y| y.total >= dec!(1_000_000.0)).map(|y| y.year);
+                let summary = ScenarioSummary {
+                    params: scenario.params.clone(),
+                    name: format!("{}", scenario.params.portfolio),
+                    final_total,
+                    years_to_million: year_million,
+                };
+                stats.update(final_total);
+                histogram.add(final_total);
+                if year_million.is_some() {
+                    count_reached_million += 1;
+                }
+                match &best {
+                    None => best = Some(summary.clone()),
+                    Some(b) if final_total > b.final_total => best = Some(summary.clone()),
+                    _ => {}
+                }
+                match &worst {
+                    None => worst = Some(summary.clone()),
+                    Some(w) if final_total < w.final_total => worst = Some(summary.clone()),
+                    _ => {}
+                }
+                progress += 1;
+                if progress % 1000 == 0 || progress == total {
+                    print_progress_bar(progress, total, 40);
+                }
+            }
+        }
+    }
+    let duration_secs = start.elapsed().as_secs_f64();
+    let sim_result = analyze_histogram(
+        &stats,
+        &histogram,
+        &best.unwrap(),
+        &worst.unwrap(),
+        count_reached_million,
+        total,
+        duration_secs,
+    );
     println!("{}", sim_result);
 }
