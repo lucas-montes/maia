@@ -11,3 +11,5 @@ result
 *.db*
 /data
 /test_dir
+/receips
+maia.json

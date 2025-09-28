@@ -34,4 +34,4 @@ shared = { path = "shared" }
 
 
 [workspace]
-members = ["todo", "ai", "knowledge", "shared", "chrome", "cli", "outils"]
+members = ["todo", "ai", "knowledge", "shared", "chrome", "cli", "outils", "finances"]

@@ -1,1 +1,5 @@
-pub mod google;
+mod google;
+
+mod model;
+
+pub use model::Model;

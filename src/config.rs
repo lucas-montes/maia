@@ -2,12 +2,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Serialize)]
+use crate::watcher::{WatchedDir, WatchedDirKind};
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     receipts_path: Option<PathBuf>,
     bank_statements_path: Option<PathBuf>,
     investments_statements_path: Option<PathBuf>,
     database: PathBuf,
+    model_api: Option<String>,
 }
 
 impl Default for Config {
@@ -17,6 +20,7 @@ impl Default for Config {
             bank_statements_path: None,
             investments_statements_path: None,
             database: PathBuf::from("maia.db"),
+            model_api: None,
         }
     }
 }
@@ -39,21 +43,25 @@ impl Config {
             || self.investments_statements_path.is_some()
     }
 
-    pub fn paths_to_watch(&self) -> Vec<&Path> {
-        let mut paths = Vec::with_capacity(3);
+    pub fn watched_dirs(&self) -> Vec<WatchedDir> {
+        let mut dirs = Vec::new();
         if let Some(ref path) = self.receipts_path {
-            paths.push(path.as_path());
+            dirs.push(WatchedDir::new(path.clone(), WatchedDirKind::Receipt));
         }
         if let Some(ref path) = self.bank_statements_path {
-            paths.push(path.as_path());
+            dirs.push(WatchedDir::new(path.clone(), WatchedDirKind::Bank));
         }
         if let Some(ref path) = self.investments_statements_path {
-            paths.push(path.as_path());
+            dirs.push(WatchedDir::new(path.clone(), WatchedDirKind::Investment));
         }
-        paths
+        dirs
     }
 
     pub fn database(&self) -> &Path {
         &self.database
+    }
+
+    pub fn model_api(&self) -> Option<String> {
+        self.model_api.to_owned()
     }
 }

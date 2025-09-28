@@ -1,17 +1,18 @@
-use std::{io::Error, path::Path};
-
+use ai::Model;
 use shared::database::Database;
 
 use crate::config::Config;
 
+#[derive(Clone)]
 pub struct State {
     db: Database,
     config: Config,
+    model: Option<Model>,
 }
 
 impl State {
-    pub fn new(db: Database, config: Config) -> Self {
-        Self { db, config }
+    pub fn new(db: Database, config: Config, model: Option<Model>) -> Self {
+        Self { db, config, model }
     }
 
     pub fn database(&self) -> &Database {
@@ -20,6 +21,10 @@ impl State {
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    pub fn model(&self) -> Option<&Model> {
+        self.model.as_ref()
     }
 
     pub fn initialize() -> Self {
@@ -41,6 +46,7 @@ impl State {
                 panic!("Cannot continue without a database");
             }
         };
-        Self::new(database, config)
+        let model = config.model_api().map(Model::new);
+        Self::new(database, config, model)
     }
 }
