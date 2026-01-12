@@ -1,9 +1,9 @@
 use rusqlite::{params, Connection, Result as SqlResult};
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 #[derive(Clone)]
 pub struct Database {
-    conn: std::sync::Arc<Connection>,
+    conn: Arc<Connection>,
 }
 
 impl Database {
@@ -15,6 +15,6 @@ impl Database {
         }
 
 
-        Ok(Self { conn: std::sync::Arc::new(conn) })
+        Ok(Self { conn: Arc::new(conn) })
     }
 }

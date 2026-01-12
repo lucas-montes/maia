@@ -1,5 +1,5 @@
 [package]
-name = "finances"
+name = "health"
 version = "0.1.0"
 edition = "2024"
 
@@ -14,7 +14,4 @@ serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true
 shared.workspace = true
-
-rust_decimal = { version = "1.38.0", features = ["macros"] }
-rand = "0.8"
-rand_distr = "0.4"
+chrono.workspace = true

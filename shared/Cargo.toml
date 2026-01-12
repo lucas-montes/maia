@@ -6,4 +6,6 @@ edition = "2024"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-rusqlite = { version = "0.37.0", features = ["bundled"] }
+chrono.workspace = true
+rusqlite = { version = "0.37.0", features = ["bundled", "chrono"] }
+maia-macros = { path = "../maia-macros" }

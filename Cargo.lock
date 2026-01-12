@@ -637,9 +637,14 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 name = "finances"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "rand",
  "rand_distr",
  "rust_decimal",
+ "serde",
+ "serde_json",
+ "shared",
+ "tracing",
 ]
 
 [[package]]
@@ -815,6 +820,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
 dependencies = [
  "hashbrown 0.15.4",
+]
+
+[[package]]
+name = "health"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "serde",
+ "serde_json",
+ "shared",
+ "tracing",
 ]
 
 [[package]]
@@ -1247,7 +1264,6 @@ dependencies = [
  "inotify",
  "knowledge",
  "notify-rust",
- "outils",
  "serde",
  "serde_json",
  "shared",
@@ -1256,6 +1272,18 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "maia-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "syn 2.0.104",
 ]
 
 [[package]]
@@ -1482,10 +1510,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
 ]
-
-[[package]]
-name = "outils"
-version = "0.1.0"
 
 [[package]]
 name = "overload"
@@ -1780,6 +1804,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
 dependencies = [
  "bitflags",
+ "chrono",
  "fallible-iterator",
  "fallible-streaming-iterator",
  "hashlink",
@@ -1984,6 +2009,8 @@ dependencies = [
 name = "shared"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "maia-macros",
  "rusqlite",
  "serde",
  "serde_json",

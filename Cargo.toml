@@ -10,8 +10,14 @@ clap = { version = "4.5.40", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 tracing-appender = "0.2"
-shared = { path = "shared" }
 chrono = { version = "0.4", features = ["serde"] }
+
+ai = { path = "ai" }
+todo = { path = "todo" }
+knowledge = { path = "knowledge" }
+shared = { path = "shared" }
+finances = { path = "finances" }
+health = { path = "health" }
 
 [dependencies]
 serde.workspace = true
@@ -26,12 +32,11 @@ base64 = "0.22.1"
 notify-rust = "4.5.0"
 inotify = "0.11.0"
 
-ai = { path = "ai" }
-todo = { path = "todo" }
-outils = { path = "outils" }
-knowledge = { path = "knowledge" }
-shared = { path = "shared" }
+ai.workspace = true
+todo.workspace = true
+knowledge.workspace = true
+shared.workspace = true
 
 
 [workspace]
-members = ["todo", "ai", "knowledge", "shared", "chrome", "cli", "outils", "finances"]
+members = ["todo", "ai", "knowledge", "shared", "chrome", "cli", "finances", "health", "maia-macros"]
