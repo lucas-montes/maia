@@ -7,5 +7,11 @@ edition = "2024"
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+ai.workspace = true
+tracing.workspace = true
 rusqlite = { version = "0.37.0", features = ["bundled", "chrono"] }
 maia-macros = { path = "../maia-macros" }
+base64 = "0.22.1"
+rust_decimal = { version = "1.38.0", features = ["macros"] }
+rand = "0.8"
+rand_distr = "0.4"

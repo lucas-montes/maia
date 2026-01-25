@@ -1,46 +1,47 @@
 use serde::{Deserialize, Serialize};
-use shared::GeminiSchema;
+
+use ai::StructuredOutput;
 
 /// Complete receipt information extracted from an image
-#[derive(GeminiSchema, Debug, Clone, Serialize, Deserialize)]
+#[derive(StructuredOutput, Debug, Clone, Serialize, Deserialize)]
 #[description = "Receipt information"]
 pub struct Receipt {
     #[description = "Store name"]
-    store: String,
+    pub store: String,
 
     #[description = "Purchase date"]
     #[gemini(format = "date-time")]
-    date: String,
+    pub date: String,
 
     #[description = "Total amount"]
-    total: f64,
+    pub total: f64,
 
     #[description = "Currency code"]
-    currency: String,
+    pub currency: String,
 
     #[description = "List of products"]
-    products: Vec<ReceiptProduct>,
+    pub products: Vec<ReceiptProduct>,
 
     #[description = "List of discounts"]
     discounts: Vec<Discount>,
 }
 
 /// A product from a receipt
-#[derive(GeminiSchema, Debug, Clone, Serialize, Deserialize)]
+#[derive(StructuredOutput, Debug, Clone, Serialize, Deserialize)]
 #[description = "A product from the receipt"]
 pub struct ReceiptProduct {
     #[description = "Product name"]
-    name: String,
+    pub name: String,
 
     #[description = "Product price"]
-    price: f64,
+    pub price: f64,
 
     #[description = "Currency code"]
-    currency: String,
+    pub currency: String,
 }
 
 /// A discount applied to a receipt
-#[derive(GeminiSchema, Debug, Clone, Serialize, Deserialize)]
+#[derive(StructuredOutput, Debug, Clone, Serialize, Deserialize)]
 #[description = "A discount applied"]
 pub struct Discount {
     #[description = "Discount description"]
@@ -52,6 +53,7 @@ pub struct Discount {
 
 #[cfg(test)]
 mod tests {
+    use ai::StructuredOutput;
     use serde_json::json;
 
     use super::Receipt;
@@ -59,7 +61,7 @@ mod tests {
     #[test]
     fn test_receipt_schema_matches_model_rs() {
         // Generate schema using the macro
-        let generated_schema = Receipt::json_schema();
+        let generated_schema = Receipt::to_schema();
 
         // Expected schema from model.rs
         let expected_schema = json!({

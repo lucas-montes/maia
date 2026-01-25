@@ -50,7 +50,7 @@
           doCheck = false;
         };
 
-        maia-cli = packageData "maia" ./Cargo.toml;
+        maia-ui = packageData "maia" ./Cargo.toml;
         maia-daemon = packageData "daemon" ./daemon/Cargo.toml;
         maia-chrome = packageData "chrome" ./chrome/Cargo.toml;
 
@@ -69,9 +69,9 @@
 
         maia-full = pkgs.symlinkJoin {
           name = "maia-full";
-          paths = [maia-cli maia-daemon];
+          paths = [maia-ui maia-daemon];
           meta = {
-            description = "Maia - Personal management tool with AI-powered features (CLI + daemon)";
+            description = "Maia - Personal management tool with AI-powered features (ui + daemon)";
             mainProgram = "maia";
           };
         };
@@ -87,24 +87,24 @@
           };
 
         packages = {
-          cli = maia-cli;
+          ui = maia-ui;
           daemon = maia-daemon;
           full = maia-full; # Combined package
-          default = maia-full; # Make CLI the default
+          default = maia-full; # Make ui the default
           chrome = maia-chrome;
         };
 
         # Apps
         apps = {
-          cli = flake-utils.lib.mkApp {
-            drv = maia-cli;
+          ui = flake-utils.lib.mkApp {
+            drv = maia-ui;
             name = "maia";
           };
           daemon = flake-utils.lib.mkApp {
             drv = maia-daemon;
             name = "maia-daemon";
           };
-          default = self.apps.${system}.cli;
+          default = self.apps.${system}.ui;
         };
 
         # NixOS module for system-wide installation

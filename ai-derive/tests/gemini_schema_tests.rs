@@ -1,11 +1,11 @@
-use maia_macros::GeminiSchema;
+use ai::StructuredOutput;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 #[test]
 fn test_receipt_schema_matches_model_rs() {
     // Define structures matching the model.rs receipt schema
-    #[derive(GeminiSchema, Debug, Clone, Serialize, Deserialize)]
+    #[derive(StructuredOutput, Debug, Clone, Serialize, Deserialize)]
     #[description = "A product from the receipt"]
     struct ReceiptProduct {
         #[description = "Product name"]
@@ -18,7 +18,7 @@ fn test_receipt_schema_matches_model_rs() {
         currency: String,
     }
 
-    #[derive(GeminiSchema, Debug, Clone, Serialize, Deserialize)]
+    #[derive(StructuredOutput, Debug, Clone, Serialize, Deserialize)]
     #[description = "A discount applied"]
     struct Discount {
         #[description = "Discount description"]
@@ -28,7 +28,7 @@ fn test_receipt_schema_matches_model_rs() {
         amount: f64,
     }
 
-    #[derive(GeminiSchema, Debug, Clone, Serialize, Deserialize)]
+    #[derive(StructuredOutput, Debug, Clone, Serialize, Deserialize)]
     #[description = "Receipt information"]
     struct Receipt {
         #[description = "Store name"]
@@ -52,7 +52,7 @@ fn test_receipt_schema_matches_model_rs() {
     }
 
     // Generate schema using the macro
-    let generated_schema = Receipt::json_schema();
+    let generated_schema = Receipt::to_schema();
 
     // Expected schema from model.rs
     let expected_schema = json!({

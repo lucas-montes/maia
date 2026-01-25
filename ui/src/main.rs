@@ -5,11 +5,15 @@ use std::{
 
 mod cli;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> io::Result<()> {
     let message = cli::Cli::handle().message();
 
     let mut stream = UnixStream::connect("/tmp/maia.sock").expect("Failed to open socket");
 
+    send_message(message, &mut stream)
+}
+
+fn send_message(message: Vec<u8>, stream: &mut UnixStream) -> io::Result<()> {
     loop {
         // Try to write data, this may still fail with `WouldBlock`
         // if the readiness event is a false positive.

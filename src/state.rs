@@ -3,7 +3,6 @@ use shared::database::Database;
 
 use crate::config::Config;
 
-#[derive(Clone)]
 pub struct State {
     db: Database,
     config: Config,

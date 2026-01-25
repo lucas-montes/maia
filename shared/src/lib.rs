@@ -1,6 +1,12 @@
 pub mod protocol;
 pub mod database;
-pub mod models;
+mod alimentation;
+mod exercise;
+mod finances;
+mod purchases;
+
 
 // Re-export derive macros
-pub use maia_macros::{Crud, GeminiSchema};
+pub use maia_macros::{Crud};
+
+pub use alimentation::{};

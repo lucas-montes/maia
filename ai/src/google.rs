@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{collections::HashMap, rc::Rc};
 
 #[derive(Debug, Serialize)]
 pub struct GeminiRequest {
@@ -32,11 +31,6 @@ pub struct SystemInstruction {
     parts: Vec<TextPart>,
 }
 
-impl SystemInstruction {
-    pub fn new(parts: Vec<TextPart>) -> Self {
-        Self { parts }
-    }
-}
 
 #[derive(Debug, Serialize)]
 pub struct TextPart {
