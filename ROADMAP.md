@@ -44,7 +44,7 @@ The idea is to have an assistant that keep tracks of important things for me, re
 
 ### Data Visualization
 - **UI/Streaming**
-  - Add a way to stream data (using ratatui or a web UI) to visualize calories, expenses, tasks, etc.
+  - Add a way to stream data (using tauri or a web UI) to visualize calories, expenses, tasks, etc.
 
 ### Knowledge Base & Browser Integration
 - **Chrome Integration**

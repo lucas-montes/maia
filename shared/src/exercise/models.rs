@@ -13,6 +13,7 @@ pub struct Exercise {
     name: String,
     created_at: NaiveDateTime,
     category: ExerciseCategory,
+    met: f32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -81,8 +82,8 @@ impl std::fmt::Display for ExerciseCategory {
 pub struct BodyWeight {
     id: Option<i64>,
     weight: f32,
-    fat: f32,
-    muscle: f32,
+    fat: Option<f32>,
+    muscle: Option<f32>,
     measured_at: NaiveDateTime,
 }
 
@@ -92,7 +93,7 @@ pub struct BodyWeight {
 pub struct Seance {
     id: Option<i64>,
     start_at: NaiveDateTime,
-    end_at: NaiveDateTime,
+    end_at: Option<NaiveDateTime>, //TOOD: not sure we need it to be optional
 }
 
 /// Database model representing a set within a seance, allowing to have a one to many relationship between seances and exercises
@@ -107,4 +108,5 @@ pub struct SeanceSet {
     weight: f32,
     rest_time: NaiveDateTime, //TODO: use Duration instead or something like this
     notes: Option<String>,
+    start_at: NaiveDateTime,
 }
