@@ -8,5 +8,3 @@ mod purchases;
 
 // Re-export derive macros
 pub use maia_macros::{Crud};
-
-pub use alimentation::{};

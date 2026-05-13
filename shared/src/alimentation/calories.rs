@@ -1,6 +1,3 @@
-use core::{marker::PhantomData, unreachable};
-
-
 struct Bmr {
     age: u32,
     weight: f32,

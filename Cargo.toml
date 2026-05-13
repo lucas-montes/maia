@@ -39,4 +39,4 @@ shared.workspace = true
 
 
 [workspace]
-members = ["todo", "ai", "knowledge", "shared", "chrome", "ui", "maia-macros"]
+members = ["todo", "ai", "knowledge", "shared", "chrome", "maia-macros"]
