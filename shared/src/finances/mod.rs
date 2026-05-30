@@ -1,5 +1,4 @@
 pub mod models;
-pub mod core;
 mod simulation;
 mod outils;
 

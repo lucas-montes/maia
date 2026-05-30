@@ -13,7 +13,6 @@ tracing-appender = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 
 ai = { path = "ai" }
-todo = { path = "todo" }
 knowledge = { path = "knowledge" }
 shared = { path = "shared" }
 finances = { path = "finances" }
@@ -33,10 +32,9 @@ notify-rust = "4.5.0"
 inotify = "0.11.0"
 
 ai.workspace = true
-todo.workspace = true
 knowledge.workspace = true
 shared.workspace = true
 
 
 [workspace]
-members = ["todo", "ai", "knowledge", "shared", "chrome", "maia-macros"]
+members = ["ai", "knowledge", "shared", "chrome", "maia-macros"]

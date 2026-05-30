@@ -10,9 +10,6 @@ use tokio::{
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
 enum Message {
-    //TODO: join those two together
-    Goal(todo::goals::Commands),
-    Task(todo::tasks::Commands),
     //TODO: maybe combine this one with AI to make it more general
     Knowledge(knowledge::cli::Commands),
     Chrome

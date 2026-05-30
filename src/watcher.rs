@@ -12,6 +12,7 @@ pub enum WatchedDirKind {
     Receipt,
     Bank,
     Investment,
+    ToDo
 }
 
 #[derive(Debug)]
@@ -76,6 +77,7 @@ pub async fn monitor_dirs(state: State) {
                                 WatchedDirKind::Receipt => {
                                     handle_receipt_file(&state, file_path).await
                                 }
+                                WatchedDirKind::ToDo => handle_todo_file(&state, file_path).await,
                                 WatchedDirKind::Bank => handle_bank_file(&state, file_path).await,
                                 WatchedDirKind::Investment => {
                                     handle_investment_file(&state, file_path).await
@@ -97,4 +99,8 @@ async fn handle_bank_file(state: &State, file: PathBuf) {
 async fn handle_investment_file(state: &State, file: PathBuf) {
     tracing::info!(file=?file, "Handling investment statement file");
     // TODO: implement investment statement parsing logic
+}
+
+async fn handle_todo_file(state: &State, file: PathBuf) {
+    tracing::info!(file=?file, "Handling todo file");
 }

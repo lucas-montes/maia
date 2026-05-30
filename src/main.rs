@@ -20,18 +20,9 @@ async fn main() {
 
 
     // handle_receipt_file(&state, PathBuf::from("receips/WhatsApp Image 2025-04-13 at 17.11.44.jpeg")).await;
-    handle_receipt_file(&state, PathBuf::from("receips/WhatsApp Image 2025-04-13 at 17.20.18.jpeg")).await;
 
 
-
-    // let monitor_task: Pin<Box<dyn Future<Output = ()> + Send>> = if state.config().needs_to_listen()
-    // {
-    //     Box::pin(monitor_dirs(state.clone()))
-    // } else {
-    //     Box::pin(tokio::task::yield_now())
-    // };
-
-    // let (_monitor_dirs_task, _listen_socket_task) = tokio::join!(monitor_task, listen_socket());
+    let (monitor_dirs_task, listen_socket_task) = tokio::join!(monitor_dirs(state), listen_socket());
 
     tracing::info!("Shutting down");
 }

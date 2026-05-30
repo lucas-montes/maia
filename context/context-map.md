@@ -21,6 +21,7 @@ This file indexes all durable context artifacts for the Maia project.
 | `system-waybar` | proposed | Waybar JSON output for tasks, calendar, calories, finance |
 | `system-remote-storage` | proposed | S3/local sync for DB and watched files |
 | `tasks-sqlite-port` | proposed | Replace JSON todo storage with SQLite, wire new CLI, notifications |
+| `todo-txt-import` | proposed | Watch todo.txt files, parse tasks, save them, and notify on due dates |
 | `calendar-google` | proposed | Google Calendar OAuth, event fetch/create, reminders |
 | `personal-meetings` | proposed | Meeting start/stop, notes, audio recording, markdown export |
 | `ui-visualization` | proposed | Embedded HTTP server + web dashboard with charts |
