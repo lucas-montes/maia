@@ -1,0 +1,421 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #app {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    @apply bg-slate-950 text-slate-100 antialiased;
+  }
+}
+
+@layer components {
+  .app-shell {
+    @apply h-screen w-screen overflow-hidden bg-slate-950 text-slate-100;
+  }
+
+  .app-shell-grid {
+    @apply grid h-full min-h-0 grid-cols-[auto,1fr];
+  }
+
+  .app-sidebar {
+    @apply flex h-screen shrink-0 flex-col gap-4 border-r border-slate-800 bg-slate-950 px-3 py-3 transition-[width,padding] duration-200;
+  }
+
+  .app-sidebar-expanded {
+    @apply w-56;
+  }
+
+  .app-sidebar-collapsed {
+    @apply w-16 px-2;
+  }
+
+  .app-sidebar-toggle {
+    @apply self-end inline-flex h-8 w-8 items-center justify-center border border-slate-700 text-slate-300 transition-colors hover:border-slate-500 hover:text-slate-100;
+  }
+
+  .app-sidebar-brand {
+    @apply flex items-start gap-3;
+  }
+
+  .app-sidebar-brand-collapsed {
+    @apply justify-center;
+  }
+
+  .app-sidebar-brand-mark {
+    @apply grid h-9 w-9 place-items-center bg-slate-800 font-semibold text-slate-100;
+  }
+
+  .app-sidebar-nav {
+    @apply flex flex-1 flex-col gap-1;
+  }
+
+  .app-sidebar-nav-button {
+    @apply flex w-full items-center gap-3 border px-3 py-2 text-left transition-colors;
+  }
+
+  .app-sidebar-nav-button-active {
+    @apply border-sky-500 bg-slate-800 text-slate-50;
+  }
+
+  .app-sidebar-nav-button-inactive {
+    @apply border-transparent text-slate-300 hover:border-slate-700 hover:bg-slate-900/70;
+  }
+
+  .app-sidebar-nav-button-collapsed {
+    @apply justify-center px-2;
+  }
+
+  .app-sidebar-nav-icon {
+    @apply text-lg leading-none;
+  }
+
+  .app-sidebar-footer {
+    @apply border-t border-slate-800 pt-3;
+  }
+
+  .app-main {
+    @apply min-h-0 min-w-0 overflow-hidden bg-slate-950;
+  }
+
+  .app-main-scroll {
+    @apply h-full min-h-0 overflow-auto p-6;
+  }
+
+  /* Button styles */
+  .button {
+    @apply inline-flex items-center gap-2 rounded px-4 py-2 text-sm font-medium transition-colors;
+    @apply border border-slate-700 bg-slate-800 text-slate-100;
+    @apply hover:border-slate-500 hover:bg-slate-700;
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500;
+    @apply disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .button.secondary {
+    @apply border-slate-700 bg-transparent text-slate-300;
+    @apply hover:border-slate-500 hover:text-slate-100;
+  }
+
+  .button-outline {
+    @apply inline-flex items-center gap-2 rounded px-3 py-1.5 text-sm font-medium;
+    @apply border border-slate-700 bg-transparent text-slate-400;
+    @apply hover:border-slate-500 hover:text-slate-100;
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500;
+  }
+
+  .button-outline.active {
+    @apply border-sky-500 text-sky-400;
+  }
+
+  /* Note list styles */
+  .note-list-scroll {
+    @apply flex flex-col gap-1 max-h-[24rem] overflow-y-auto;
+  }
+
+  .note-list-item {
+    @apply w-full text-left rounded border border-slate-800 bg-slate-900/30 px-3 py-2 transition-colors;
+    @apply hover:border-slate-700 hover:bg-slate-900/70;
+  }
+
+  .note-list-item-active {
+    @apply border-sky-500 bg-slate-800/70;
+  }
+
+  .note-list-item-title {
+    @apply text-sm font-medium text-slate-100 truncate;
+  }
+
+  .note-list-item-meta {
+    @apply flex items-center gap-2 mt-1 text-xs text-slate-500;
+  }
+
+  .note-list-item-tags {
+    @apply text-sky-400 truncate;
+  }
+
+  .note-editor {
+    @apply flex flex-col;
+  }
+
+  .note-editor-textarea-wrapper {
+    @apply flex-1;
+  }
+
+  /* Receipt status badges */
+  .receipt-status-badge {
+    @apply inline-block rounded px-1.5 py-0.5 text-[0.65rem] font-medium uppercase tracking-wider;
+  }
+
+  .receipt-status-pending {
+    @apply bg-slate-700/50 text-slate-400;
+  }
+
+  .receipt-status-reviewed {
+    @apply bg-emerald-900/30 text-emerald-400;
+  }
+
+  .receipt-status-archived {
+    @apply bg-amber-900/30 text-amber-400;
+  }
+}
+
+@layer utilities {
+  @media (max-width: 960px) {
+    .app-sidebar-expanded {
+      width: 14rem;
+    }
+
+    .app-main-scroll {
+      padding: 1rem;
+    }
+  }
+
+  @media (max-width: 720px) {
+    .app-shell-grid {
+      grid-template-columns: auto 1fr;
+    }
+
+    .app-sidebar-expanded {
+      width: 3.5rem;
+      padding-left: 0.5rem;
+      padding-right: 0.5rem;
+    }
+
+    .app-sidebar-expanded .app-sidebar-brand,
+    .app-sidebar-expanded .app-sidebar-footer,
+    .app-sidebar-expanded .app-sidebar-nav-button span:last-child {
+      display: none;
+    }
+
+    .app-sidebar-expanded .app-sidebar-nav-button {
+      justify-content: center;
+      padding-left: 0.5rem;
+      padding-right: 0.5rem;
+    }
+  }
+
+  /* Dashboard styles */
+  .metric-grid {
+    @apply grid gap-4 mb-6;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  }
+
+  .activity-list {
+    @apply space-y-3;
+  }
+
+  .activity-item {
+    @apply flex items-start gap-3 p-3 bg-slate-900/50 rounded-lg;
+  }
+
+  .activity-content {
+    @apply flex-1;
+  }
+
+  /* Todo styles */
+  .todo-actions {
+    @apply flex justify-between items-center mb-4;
+  }
+
+  .todo-search {
+    @apply mb-4;
+  }
+
+  .todo-form-section {
+    @apply mb-6;
+  }
+
+  .todo-list {
+    @apply space-y-2;
+  }
+
+  .list-header {
+    @apply mb-2 text-sm text-slate-400;
+  }
+
+  .list-items {
+    @apply space-y-2;
+  }
+
+  .todo-item {
+    @apply flex items-start gap-3 p-3 bg-slate-900/50 rounded-lg cursor-pointer hover:bg-slate-900/70 transition-colors;
+  }
+
+  .todo-item.active {
+    @apply bg-slate-800/50 border-l-2 border-sky-500;
+  }
+
+  .todo-content {
+    @apply flex-1 min-w-0;
+  }
+
+  .todo-title {
+    @apply font-medium block;
+  }
+
+  .todo-meta {
+    @apply flex flex-wrap gap-2 mt-1 text-sm text-slate-400;
+  }
+
+  .todo-due, .todo-tags {
+    @apply flex items-center gap-1;
+  }
+
+  .todo-actions {
+    @apply flex-shrink-0 flex items-center gap-2;
+  }
+
+  .todo-priority {
+    @apply px-2 py-0.5 text-xs rounded font-medium;
+  }
+
+  .priority-high {
+    @apply bg-red-500/20 text-red-400;
+  }
+
+  .priority-medium {
+    @apply bg-yellow-500/20 text-yellow-400;
+  }
+
+  .priority-low {
+    @apply bg-green-500/20 text-green-400;
+  }
+
+  .empty-state {
+    @apply text-center py-8 text-slate-500;
+  }
+
+  /* Receipt styles */
+  .receipt-search {
+    @apply mb-4;
+  }
+
+  .receipt-form-section {
+    @apply mb-6;
+  }
+
+  .receipt-list {
+    @apply space-y-2;
+  }
+
+  .receipt-item {
+    @apply flex items-start gap-3 p-3 bg-slate-900/50 rounded-lg cursor-pointer hover:bg-slate-900/70 transition-colors;
+  }
+
+  .receipt-item.active {
+    @apply bg-slate-800/50 border-l-2 border-sky-500;
+  }
+
+  .receipt-content {
+    @apply flex-1 min-w-0;
+  }
+
+  .receipt-title {
+    @apply font-medium block;
+  }
+
+  .receipt-meta {
+    @apply flex flex-wrap gap-2 mt-1 text-sm text-slate-400;
+  }
+
+  .receipt-date, .receipt-category {
+    @apply flex items-center gap-1;
+  }
+
+  .receipt-actions {
+    @apply flex-shrink-0 flex items-center gap-2;
+  }
+
+  .receipt-amount {
+    @apply font-mono text-lg;
+  }
+
+  /* Notes styles */
+  .note-search {
+    @apply mb-4;
+  }
+
+  .note-form-section {
+    @apply mb-6;
+  }
+
+  .note-list {
+    @apply space-y-2;
+  }
+
+  .note-item {
+    @apply flex flex-col gap-2 p-3 bg-slate-900/50 rounded-lg cursor-pointer hover:bg-slate-900/70 transition-colors;
+  }
+
+  .note-item.active {
+    @apply bg-slate-800/50 border-l-2 border-sky-500;
+  }
+
+  .note-content {
+    @apply flex-1;
+  }
+
+  .note-title {
+    @apply font-medium block;
+  }
+
+  .note-preview {
+    @apply text-slate-400;
+  }
+
+  .note-tags {
+    @apply flex flex-wrap gap-1 mt-1;
+  }
+
+  .note-meta {
+    @apply flex items-center gap-3 text-sm text-slate-500;
+  }
+
+  .note-updated {
+    @apply flex items-center gap-1;
+  }
+
+  /* Settings styles */
+  .settings-section {
+    @apply mb-6;
+  }
+
+  .settings-title {
+    @apply font-medium text-slate-200 mb-2;
+  }
+
+  .settings-description {
+    @apply text-sm text-slate-400 mb-4;
+  }
+
+  .toggle-group {
+    @apply space-y-3;
+  }
+
+  .action-group {
+    @apply flex flex-wrap gap-3;
+  }
+
+  .status-grid {
+    @apply grid gap-3;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  }
+
+  .status-item {
+    @apply flex flex-col gap-1 p-3 bg-slate-900/50 rounded-lg;
+  }
+
+  .status-label {
+    @apply text-sm text-slate-400;
+  }
+
+  .status-value {
+    @apply font-medium text-slate-100;
+  }
+}

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "maia-ui",
+  "productName": "Maia",
   "version": "0.1.0",
   "identifier": "com.maia-ui.app",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "maia-ui",
+        "title": "Maia",
         "width": 800,
         "height": 600
       }
