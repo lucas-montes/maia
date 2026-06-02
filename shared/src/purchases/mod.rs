@@ -1,3 +1,3 @@
 mod models;
-mod schema;
 mod parse;
+mod schema;

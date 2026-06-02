@@ -1,15 +1,10 @@
 // Database models for the finance module
 
-use serde::{Deserialize, Serialize};
 use chrono::NaiveDateTime;
 use maia_macros::Crud;
+use serde::{Deserialize, Serialize};
 
 use crate::finances::{Money, outils::Currency};
-
-
-
-
-
 
 #[derive(Debug, Serialize, Deserialize, Crud)]
 #[table_name = "investments"]

@@ -31,7 +31,6 @@ pub struct SystemInstruction {
     parts: Vec<TextPart>,
 }
 
-
 #[derive(Debug, Serialize)]
 pub struct TextPart {
     text: String,

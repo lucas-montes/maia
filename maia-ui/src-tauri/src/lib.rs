@@ -1570,11 +1570,22 @@ fn read_config() -> ConfigResponse {
             data: Some(content),
             error: None,
         },
-        Err(e) => ConfigResponse {
-            success: false,
-            data: None,
-            error: Some(format!("Failed to read {path}: {e}")),
-        },
+        Err(_) => {
+            // Return a default config when the file doesn't exist
+            let defaults = r#"{
+  "receipts_path": "",
+  "nutriments_path": "",
+  "bank_statements_path": "",
+  "investments_statements_path": "",
+  "database": "maia.db",
+  "models_api": []
+}"#;
+            ConfigResponse {
+                success: true,
+                data: Some(defaults.to_string()),
+                error: None,
+            }
+        }
     }
 }
 

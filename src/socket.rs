@@ -12,14 +12,11 @@ use tokio::{
 enum Message {
     //TODO: maybe combine this one with AI to make it more general
     Knowledge(knowledge::cli::Commands),
-    Chrome
+    Chrome,
 }
 impl MessageProtocol for Message {}
 
-
-
-async fn handle_message(message: Message)-> String {
-
+async fn handle_message(message: Message) -> String {
     todo!()
 }
 

@@ -1,11 +1,13 @@
 use std::borrow::Cow;
 
 use chrono::NaiveDateTime;
-use serde::{Deserialize, Serialize};
 use maia_macros::Crud;
+use serde::{Deserialize, Serialize};
 
-use crate::{finances::{Currency, Money}, purchases::schema};
-
+use crate::{
+    finances::{Currency, Money},
+    purchases::schema,
+};
 
 #[derive(Debug, Serialize, Deserialize, Crud)]
 #[table_name = "receipts_metadata"]
@@ -28,7 +30,6 @@ impl<'a> ReceiptMetadata<'a> {
     }
 }
 
-
 /// The purcase base model representing an entry in a receipt
 #[derive(Debug, Serialize, Deserialize, Crud)]
 #[table_name = "receipts"]
@@ -46,7 +47,8 @@ impl From<schema::Receipt> for Receipt {
         Self {
             id: None,
             store: receipt.store,
-            date: NaiveDateTime::parse_from_str(&receipt.date, "%Y-%m-%d %H:%M:%S").unwrap_or_else(|_| chrono::Local::now().naive_local()),
+            date: NaiveDateTime::parse_from_str(&receipt.date, "%Y-%m-%d %H:%M:%S")
+                .unwrap_or_else(|_| chrono::Local::now().naive_local()),
             total: Money::from(receipt.total),
             currency: receipt.currency.into(),
         }
@@ -64,6 +66,5 @@ pub struct Purchase {
     price: Money,
     currency: Currency,
 }
-
 
 //TODO: maybe I want a one to many for receipt -> purchases, and purchases maybe should be generic to keep track of any purchase?

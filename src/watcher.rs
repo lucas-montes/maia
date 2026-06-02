@@ -12,7 +12,7 @@ pub enum WatchedDirKind {
     Receipt,
     Bank,
     Investment,
-    ToDo
+    ToDo,
 }
 
 #[derive(Debug)]

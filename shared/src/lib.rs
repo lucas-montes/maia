@@ -1,10 +1,9 @@
-pub mod protocol;
 pub mod database;
+pub mod protocol;
 
-mod todo;
 mod finances;
 mod purchases;
-
+mod todo;
 
 // Re-export derive macros
-pub use maia_macros::{Crud};
+pub use maia_macros::Crud;

@@ -3,11 +3,11 @@ use rand_distr::{Distribution, Normal, Uniform};
 use rust_decimal::Decimal;
 use rust_decimal::dec;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
-use std::cmp::Ordering;
 
 fn write_totals_csv(
     filename: &str,
@@ -63,18 +63,41 @@ struct SimulationResult {
 
 impl fmt::Display for SimulationResult {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "\n{:-^172}", format!(" Simulation Summary [{}] ", self.simulation_name))?;
-        writeln!(f, "{:<8} {:>13} {:>10} {:>8} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
-            "Type", "Final Total", "Years $1M", "Thresh", "FixedPct", "Inflation", "FixRet", "VarRet", "Rent", "Food", "Transp", "Util", "Entmt", "Others")?;
+        writeln!(
+            f,
+            "\n{:-^172}",
+            format!(" Simulation Summary [{}] ", self.simulation_name)
+        )?;
+        writeln!(
+            f,
+            "{:<8} {:>13} {:>10} {:>8} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
+            "Type",
+            "Final Total",
+            "Years $1M",
+            "Thresh",
+            "FixedPct",
+            "Inflation",
+            "FixRet",
+            "VarRet",
+            "Rent",
+            "Food",
+            "Transp",
+            "Util",
+            "Entmt",
+            "Others"
+        )?;
         writeln!(f, "{:-<172}", "")?;
         let em_dash = "—";
         let mut print_row = |label: &str, s: &ScenarioSummary| {
             let p = &s.params.portfolio;
             let e = &s.params.expenses;
-            writeln!(f, "{:<8} {:>13.2} {:>10} {:>8.0} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>9.2}",
+            writeln!(
+                f,
+                "{:<8} {:>13.2} {:>10} {:>8.0} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>9.2}",
                 label,
                 s.final_total,
-                s.years_to_million.map_or(em_dash.to_string(), |y| y.to_string()),
+                s.years_to_million
+                    .map_or(em_dash.to_string(), |y| y.to_string()),
                 p.savings_threshold,
                 p.fixed_pct,
                 p.inflation,
@@ -94,11 +117,47 @@ impl fmt::Display for SimulationResult {
         print_row("Q1", &self.q1)?;
         print_row("Q3", &self.q3)?;
         writeln!(f, "{:-<172}", "")?;
-        writeln!(f, "{:<8} {:>13.2} {:>10} {:>8} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
-            "Avg", self.average_final_total, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash)?;
-        writeln!(f, "{:<8} {:>13.2} {:>10} {:>8} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
-            "Stddev", self.stddev_final_total, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash, em_dash)?;
-        writeln!(f, "Scenarios ≥ $1M: {:<5}   Total: {:<5}   Duration (s): {:.2}", self.count_reached_million, self.total_scenarios, self.duration_secs)?;
+        writeln!(
+            f,
+            "{:<8} {:>13.2} {:>10} {:>8} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
+            "Avg",
+            self.average_final_total,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash
+        )?;
+        writeln!(
+            f,
+            "{:<8} {:>13.2} {:>10} {:>8} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
+            "Stddev",
+            self.stddev_final_total,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash,
+            em_dash
+        )?;
+        writeln!(
+            f,
+            "Scenarios ≥ $1M: {:<5}   Total: {:<5}   Duration (s): {:.2}",
+            self.count_reached_million, self.total_scenarios, self.duration_secs
+        )?;
         Ok(())
     }
 }
@@ -148,11 +207,19 @@ impl StreamingStats {
         let delta2 = value - self.mean;
         self.m2 += delta * delta2;
         self.sum += value;
-        if value < self.min { self.min = value; }
-        if value > self.max { self.max = value; }
+        if value < self.min {
+            self.min = value;
+        }
+        if value > self.max {
+            self.max = value;
+        }
     }
     fn stddev(&self) -> f64 {
-        if self.count < 2 { 0.0 } else { (self.m2 / (self.count as f64 - 1.0)).sqrt() }
+        if self.count < 2 {
+            0.0
+        } else {
+            (self.m2 / (self.count as f64 - 1.0)).sqrt()
+        }
     }
 }
 
@@ -175,7 +242,8 @@ impl Histogram {
         let idx = if self.max == self.min {
             0
         } else {
-            let pos = ((value - self.min) / (self.max - self.min) * (num_bins as f64)).floor() as usize;
+            let pos =
+                ((value - self.min) / (self.max - self.min) * (num_bins as f64)).floor() as usize;
             pos.min(num_bins - 1)
         };
         self.bins[idx] += 1;
@@ -297,8 +365,14 @@ fn analyze_scenarios(scenarios: &[ScenarioResult], duration_secs: f64) -> Simula
     } else {
         sorted[q3_idx].clone()
     };
-    let best = sorted.last().cloned().unwrap_or_else(|| summaries[0].clone());
-    let worst = sorted.first().cloned().unwrap_or_else(|| summaries[0].clone());
+    let best = sorted
+        .last()
+        .cloned()
+        .unwrap_or_else(|| summaries[0].clone());
+    let worst = sorted
+        .first()
+        .cloned()
+        .unwrap_or_else(|| summaries[0].clone());
     let average_final_total = totals.iter().sum::<f64>() / totals.len().max(1) as f64;
     let median_final_total = if sorted.is_empty() {
         0.0
@@ -309,7 +383,8 @@ fn analyze_scenarios(scenarios: &[ScenarioResult], duration_secs: f64) -> Simula
     };
     let stddev_final_total = {
         let mean = average_final_total;
-        let var = totals.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / totals.len().max(1) as f64;
+        let var =
+            totals.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / totals.len().max(1) as f64;
         var.sqrt()
     };
     let mut years_sorted = years_to_million_vec.clone();
@@ -334,8 +409,18 @@ fn analyze_scenarios(scenarios: &[ScenarioResult], duration_secs: f64) -> Simula
     } else {
         Some(years_sorted[q3_y] as u32)
     };
-    let time_to_million_best = years_sorted.iter().cloned().filter(|&y| y > 0.0).min_by(|a, b| a.partial_cmp(b).unwrap()).map(|y| y as u32);
-    let time_to_million_worst = years_sorted.iter().cloned().filter(|&y| y > 0.0).max_by(|a, b| a.partial_cmp(b).unwrap()).map(|y| y as u32);
+    let time_to_million_best = years_sorted
+        .iter()
+        .cloned()
+        .filter(|&y| y > 0.0)
+        .min_by(|a, b| a.partial_cmp(b).unwrap())
+        .map(|y| y as u32);
+    let time_to_million_worst = years_sorted
+        .iter()
+        .cloned()
+        .filter(|&y| y > 0.0)
+        .max_by(|a, b| a.partial_cmp(b).unwrap())
+        .map(|y| y as u32);
     let time_to_million_average = if !years_to_million.is_empty() {
         Some((years_to_million.iter().sum::<u32>() as f64) / years_to_million.len() as f64)
     } else {
@@ -765,9 +850,19 @@ fn main() {
                 for year_result in simulate_portfolio(&params, net_income) {
                     scenario.add_year_result(year_result);
                 }
-                let final_total = scenario.results.last().map(|y| y.total).unwrap_or_default().to_f64().unwrap_or(0.0);
-                if final_total < min_total { min_total = final_total; }
-                if final_total > max_total { max_total = final_total; }
+                let final_total = scenario
+                    .results
+                    .last()
+                    .map(|y| y.total)
+                    .unwrap_or_default()
+                    .to_f64()
+                    .unwrap_or(0.0);
+                if final_total < min_total {
+                    min_total = final_total;
+                }
+                if final_total > max_total {
+                    max_total = final_total;
+                }
                 progress += 1;
                 if progress % 1000 == 0 || progress == total {
                     print_progress_bar(progress, total, 40);
@@ -792,8 +887,18 @@ fn main() {
                 for year_result in simulate_portfolio(&params, net_income) {
                     scenario.add_year_result(year_result);
                 }
-                let final_total = scenario.results.last().map(|y| y.total).unwrap_or_default().to_f64().unwrap_or(0.0);
-                let year_million = scenario.results.iter().find(|y| y.total >= dec!(1_000_000.0)).map(|y| y.year);
+                let final_total = scenario
+                    .results
+                    .last()
+                    .map(|y| y.total)
+                    .unwrap_or_default()
+                    .to_f64()
+                    .unwrap_or(0.0);
+                let year_million = scenario
+                    .results
+                    .iter()
+                    .find(|y| y.total >= dec!(1_000_000.0))
+                    .map(|y| y.year);
                 let summary = ScenarioSummary {
                     params: scenario.params.clone(),
                     name: format!("{}", scenario.params.portfolio),

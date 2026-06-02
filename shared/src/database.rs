@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{Connection, Result as SqlResult, params};
 use std::{path::Path, sync::Arc};
 
 #[derive(Clone)]
@@ -14,7 +14,8 @@ impl Database {
             println!("Creating database at {:?}", db_path);
         }
 
-
-        Ok(Self { conn: Arc::new(conn) })
+        Ok(Self {
+            conn: Arc::new(conn),
+        })
     }
 }

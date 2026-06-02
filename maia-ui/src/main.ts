@@ -1,6 +1,7 @@
 import "./styles/tailwind.css";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 type ViewId = "dashboard" | "todos" | "receipts" | "notes" | "settings" | "goals" | "urls";
 
@@ -102,8 +103,14 @@ interface TodosState {
   statusMessage: string;
 }
 
+interface GoalPendingTask {
+  title: string;
+  description: string;
+}
+
 interface GoalsState {
   items: Goal[];
+  pendingTasks: GoalPendingTask[];
   status: "idle" | "loading" | "saving" | "error";
   statusMessage: string;
 }
@@ -124,6 +131,7 @@ interface AppState {
   sidebarCollapsed: boolean;
   settings: {
     configJson: string;
+    configFields: Record<string, string>;
     status: "idle" | "loading" | "saving" | "saved" | "error";
     statusMessage: string;
   };
@@ -135,11 +143,78 @@ interface AppState {
   urls: UrlsState;
 }
 
+// ---- Config field definitions (must be before defaultAppState) ----
+
+const CONFIG_FIELD_DEFS: { key: string; label: string; placeholder: string }[] = [
+  { key: "database", label: "Database File", placeholder: "maia.db" },
+  { key: "receipts_path", label: "Receipts Path", placeholder: "receipts" },
+  { key: "nutriments_path", label: "Nutriments Path", placeholder: "" },
+  { key: "bank_statements_path", label: "Bank Statements Path", placeholder: "" },
+  { key: "investments_statements_path", label: "Investments Statements Path", placeholder: "" },
+  { key: "model_api", label: "Model API Key", placeholder: "e.g. $GEMINI_API" },
+  { key: "receipts.archived_dir", label: "Receipts Archive Directory", placeholder: "receipts_archive" },
+];
+
+function getDefaultConfigFields(): Record<string, string> {
+  const fields: Record<string, string> = {};
+  for (const def of CONFIG_FIELD_DEFS) {
+    fields[def.key] = "";
+  }
+  return fields;
+}
+
+function extractConfigFields(jsonStr: string): Record<string, string> {
+  const fields = getDefaultConfigFields();
+  try {
+    const obj = JSON.parse(jsonStr);
+    for (const key of Object.keys(fields)) {
+      const parts = key.split(".");
+      let val: unknown = obj;
+      for (const part of parts) {
+        if (val && typeof val === "object" && part in (val as Record<string, unknown>)) {
+          val = (val as Record<string, unknown>)[part];
+        } else {
+          val = undefined;
+          break;
+        }
+      }
+      fields[key] = val !== null && val !== undefined ? String(val) : "";
+    }
+  } catch {
+    // If JSON is invalid, keep defaults
+  }
+  return fields;
+}
+
+function buildConfigJson(fields: Record<string, string>): string {
+  const obj: Record<string, unknown> = {};
+  for (const def of CONFIG_FIELD_DEFS) {
+    const val = fields[def.key]?.trim() || "";
+    const parts = def.key.split(".");
+    if (parts.length === 1) {
+      // Nullable fields: empty string → null
+      if (val === "" && (def.key === "bank_statements_path" || def.key === "investments_statements_path")) {
+        obj[def.key] = null;
+      } else {
+        obj[def.key] = val;
+      }
+    } else if (parts.length === 2) {
+      // Nested field: e.g. receipts.archived_dir → { receipts: { archived_dir: val } }
+      if (!obj[parts[0]]) {
+        obj[parts[0]] = {};
+      }
+      (obj[parts[0]] as Record<string, unknown>)[parts[1]] = val || null;
+    }
+  }
+  return JSON.stringify(obj, null, 2);
+}
+
 const defaultAppState = (): AppState => ({
   view: "dashboard",
   sidebarCollapsed: false,
   settings: {
     configJson: "",
+    configFields: getDefaultConfigFields(),
     status: "idle",
     statusMessage: "",
   },
@@ -166,6 +241,7 @@ const defaultAppState = (): AppState => ({
   },
   goals: {
     items: [],
+    pendingTasks: [],
     status: "idle",
     statusMessage: "",
   },
@@ -218,13 +294,15 @@ async function loadConfig(): Promise<void> {
   try {
     const result = await invoke<{ success: boolean; data?: string; error?: string }>("read_config");
     if (result.success && result.data) {
-      // Pretty-print the config for the editor
       const parsed = JSON.parse(result.data);
       state.settings.configJson = JSON.stringify(parsed, null, 2);
+      state.settings.configFields = extractConfigFields(result.data);
       state.settings.status = "idle";
     } else {
-      state.settings.status = "error";
-      state.settings.statusMessage = result.error ?? "Failed to load config";
+      state.settings.configFields = getDefaultConfigFields();
+      state.settings.configJson = buildConfigJson(state.settings.configFields);
+      state.settings.status = "idle";
+      state.settings.statusMessage = "Loaded default configuration (maia.json not found).";
     }
   } catch (e) {
     state.settings.status = "error";
@@ -233,7 +311,16 @@ async function loadConfig(): Promise<void> {
   render();
 }
 
-async function saveConfig(json: string): Promise<void> {
+async function saveConfigFromForm(): Promise<void> {
+  // Read field values from the form
+  const fields: Record<string, string> = {};
+  for (const def of CONFIG_FIELD_DEFS) {
+    const input = document.getElementById(`cfg-${def.key}`) as HTMLInputElement | null;
+    fields[def.key] = input?.value ?? "";
+  }
+  state.settings.configFields = fields;
+
+  const json = buildConfigJson(fields);
   state.settings.status = "saving";
   state.settings.statusMessage = "";
   render();
@@ -243,13 +330,7 @@ async function saveConfig(json: string): Promise<void> {
     if (result.success) {
       state.settings.status = "saved";
       state.settings.statusMessage = "Settings saved successfully.";
-      // Update local state with the formatted version
-      try {
-        const parsed = JSON.parse(json);
-        state.settings.configJson = JSON.stringify(parsed, null, 2);
-      } catch {
-        state.settings.configJson = json;
-      }
+      state.settings.configJson = json;
     } else {
       state.settings.status = "error";
       state.settings.statusMessage = result.error ?? "Failed to save config";
@@ -466,6 +547,7 @@ async function createTodo(): Promise<void> {
   const dueInput = document.getElementById("todo-due") as HTMLInputElement | null;
   const prioSelect = document.getElementById("todo-priority") as HTMLSelectElement | null;
   const tagsInput = document.getElementById("todo-tags") as HTMLInputElement | null;
+  const goalSelect = document.getElementById("todo-goal") as HTMLSelectElement | null;
 
   const title = titleInput?.value?.trim();
   if (!title) return;
@@ -479,6 +561,9 @@ async function createTodo(): Promise<void> {
     .filter((t) => t.length > 0);
   const tagsJson = JSON.stringify(tagsArr);
 
+  const goalVal = goalSelect?.value;
+  const goalId = goalVal && goalVal !== "" ? parseInt(goalVal, 10) : null;
+
   try {
     const result = await invoke<{ success: boolean; data?: Todo; error?: string }>("create_task", {
       title,
@@ -486,7 +571,7 @@ async function createTodo(): Promise<void> {
       due_date: dueInput?.value || null,
       priority: prioSelect?.value || "medium",
       tags: tagsJson,
-      goal_id: null,
+      goal_id: goalId,
     });
     if (result.success) {
       // Reset form
@@ -495,6 +580,7 @@ async function createTodo(): Promise<void> {
       if (dueInput) dueInput.value = "";
       if (prioSelect) prioSelect.value = "medium";
       if (tagsInput) tagsInput.value = "";
+      if (goalSelect) goalSelect.value = "";
       state.todos.status = "idle";
       await loadTodos();
     } else {
@@ -604,14 +690,38 @@ async function createGoal(): Promise<void> {
       deadline: deadlineInput?.value || null,
       progress: parseFloat(progressInput?.value || "0"),
     });
-    if (result.success) {
+    if (result.success && result.data) {
+      // Clear goal form fields
       if (titleInput) titleInput.value = "";
       if (descInput) descInput.value = "";
       if (statusSelect) statusSelect.value = "active";
       if (deadlineInput) deadlineInput.value = "";
       if (progressInput) progressInput.value = "0";
+
+      // Create inline tasks linked to the new goal
+      const goalId = result.data.id;
+      const pending = [...state.goals.pendingTasks];
+      state.goals.pendingTasks = [];
+
+      for (const pt of pending) {
+        try {
+          const tagsJson = JSON.stringify([]);
+          await invoke<{ success: boolean }>("create_task", {
+            title: pt.title,
+            description: pt.description || null,
+            due_date: null,
+            priority: "medium",
+            tags: tagsJson,
+            goal_id: goalId,
+          });
+        } catch {
+          // Silently skip individual task failures so the goal is still created
+        }
+      }
+
       state.goals.status = "idle";
       await loadGoals();
+      await loadTodos(); // Refresh task counts
     } else {
       state.goals.status = "error";
       state.goals.statusMessage = result.error ?? "Failed to create goal";
@@ -902,6 +1012,68 @@ function escapeHtml(value: string): string {
 function handleClick(event: MouseEvent): void {
   const target = event.target as HTMLElement;
 
+  // Close open datepickers when clicking outside
+  if (!target.closest(".datepicker-wrapper") && !target.closest("[data-action^='datepicker-']")) {
+    closeAllDatepickers();
+  }
+
+  // ---- Datepicker handlers ----
+
+  // Datepicker toggle (open/close calendar)
+  const dpToggle = target.closest<HTMLElement>("[data-action='datepicker-toggle']");
+  if (dpToggle) {
+    const wrapper = dpToggle.closest<HTMLElement>(".datepicker-wrapper");
+    if (wrapper) {
+      const cal = wrapper.querySelector<HTMLElement>(".datepicker-calendar");
+      if (cal) {
+        cal.classList.toggle("hidden");
+      }
+    }
+    event.stopPropagation();
+    return;
+  }
+
+  // Datepicker day selection
+  const dpDay = target.closest<HTMLElement>("[data-action='datepicker-day']");
+  if (dpDay?.dataset.date) {
+    const wrapper = dpDay.closest<HTMLElement>(".datepicker-wrapper");
+    if (wrapper) {
+      const input = wrapper.querySelector<HTMLInputElement>(".datepicker-input");
+      if (input) {
+        input.value = dpDay.dataset.date;
+      }
+      const cal = wrapper.querySelector<HTMLElement>(".datepicker-calendar");
+      if (cal) {
+        cal.classList.add("hidden");
+      }
+    }
+    return;
+  }
+
+  // Datepicker month navigation
+  const dpNav = target.closest<HTMLElement>("[data-action='datepicker-prev-month'], [data-action='datepicker-next-month']");
+  if (dpNav) {
+    const cal = dpNav.closest<HTMLElement>(".datepicker-calendar");
+    if (cal) {
+      const id = dpNav.dataset.datepickerId || "";
+      let year = parseInt(cal.dataset.year || "0", 10);
+      let month = parseInt(cal.dataset.month || "0", 10);
+      if (dpNav.dataset.action === "datepicker-prev-month") {
+        month -= 1;
+        if (month < 0) { month = 11; year -= 1; }
+      } else {
+        month += 1;
+        if (month > 11) { month = 0; year += 1; }
+      }
+      cal.dataset.year = String(year);
+      cal.dataset.month = String(month);
+      const wrapper = cal.closest<HTMLElement>(".datepicker-wrapper");
+      const input = wrapper?.querySelector<HTMLInputElement>(".datepicker-input");
+      cal.innerHTML = renderCalendarGrid(id, year, month, input?.value || "");
+    }
+    return;
+  }
+
   const toggleButton = target.closest<HTMLElement>("[data-action='toggle-sidebar']");
   if (toggleButton) {
     toggleSidebar();
@@ -914,13 +1086,10 @@ function handleClick(event: MouseEvent): void {
     return;
   }
 
-  // Handle settings save
+  // Handle settings save (form-based)
   const saveButton = target.closest<HTMLElement>("[data-action='save-settings']");
   if (saveButton) {
-    const editor = document.getElementById("settings-editor") as HTMLTextAreaElement | null;
-    if (editor) {
-      saveConfig(editor.value);
-    }
+    saveConfigFromForm();
     return;
   }
 
@@ -1011,6 +1180,35 @@ function handleClick(event: MouseEvent): void {
   }
 
   // ---- Goal handlers ----
+
+  // Handle goal add inline task
+  const addTaskBtn = target.closest<HTMLElement>("[data-action='goal-add-task']");
+  if (addTaskBtn) {
+    const taskTitleInput = document.getElementById("goal-task-title") as HTMLInputElement | null;
+    const taskDescInput = document.getElementById("goal-task-desc") as HTMLInputElement | null;
+    const taskTitle = taskTitleInput?.value?.trim();
+    if (taskTitle) {
+      state.goals.pendingTasks.push({
+        title: taskTitle,
+        description: taskDescInput?.value?.trim() || "",
+      });
+      if (taskTitleInput) taskTitleInput.value = "";
+      if (taskDescInput) taskDescInput.value = "";
+    }
+    render();
+    return;
+  }
+
+  // Handle goal remove inline task
+  const removeTaskBtn = target.closest<HTMLElement>("[data-action='goal-remove-task']");
+  if (removeTaskBtn?.dataset.taskIndex !== undefined) {
+    const idx = parseInt(removeTaskBtn.dataset.taskIndex, 10);
+    if (!isNaN(idx) && idx >= 0 && idx < state.goals.pendingTasks.length) {
+      state.goals.pendingTasks.splice(idx, 1);
+    }
+    render();
+    return;
+  }
 
   // Handle create goal
   const createGoalButton = target.closest<HTMLElement>("[data-action='create-goal']");
@@ -1138,6 +1336,12 @@ function renderDashboard(): string {
 function renderTodos(): string {
   const s = state.todos;
 
+  // Build goal title lookup from loaded goals
+  const goalTitleById: Record<number, string> = {};
+  for (const g of state.goals.items) {
+    goalTitleById[g.id] = g.title;
+  }
+
   let filtered = s.items;
   if (s.filter === "active") {
     filtered = s.items.filter((t) => t.completed_at === null);
@@ -1168,7 +1372,7 @@ function renderTodos(): string {
                   ${t.priority ? `<span class="px-2 py-0.5 text-xs rounded font-medium ${priorityClass(t.priority)}">${escapeHtml(t.priority)}</span>` : ""}
                   ${t.due_date ? `<span>Due: ${escapeHtml(formatDate(t.due_date))}</span>` : ""}
                   ${renderTodoTags(t.tags)}
-                  ${t.goal_id ? `<span class="text-sky-400">Goal #${t.goal_id}</span>` : ""}
+                  ${t.goal_id && goalTitleById[t.goal_id] ? `<span class="text-sky-400">${escapeHtml(goalTitleById[t.goal_id])}</span>` : ""}
                 </div>
               </div>
               <button class="text-red-400 hover:text-red-300 text-sm px-2 py-1" type="button" data-action="delete-todo" data-todo-id="${t.id}" title="Delete task">✕</button>
@@ -1197,10 +1401,10 @@ function renderTodos(): string {
               <label class="block text-sm font-medium text-slate-200 mb-1">Description</label>
               <textarea id="todo-description" class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500" rows="2" placeholder="Optional description"></textarea>
             </div>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
               <div>
                 <label class="block text-sm font-medium text-slate-200 mb-1">Due Date</label>
-                <input type="date" id="todo-due" class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500" />
+                ${renderDatePicker("todo-due", "")}
               </div>
               <div>
                 <label class="block text-sm font-medium text-slate-200 mb-1">Priority</label>
@@ -1208,6 +1412,13 @@ function renderTodos(): string {
                   <option value="low">Low</option>
                   <option value="medium" selected>Medium</option>
                   <option value="high">High</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-slate-200 mb-1">Goal</label>
+                <select id="todo-goal" class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500">
+                  <option value="">None</option>
+                  ${state.goals.items.map((g) => `<option value="${g.id}">${escapeHtml(g.title)}</option>`).join("")}
                 </select>
               </div>
             </div>
@@ -1274,6 +1485,82 @@ function formatDate(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+// ---- Datepicker helpers ----
+
+function todayStr(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function renderDatePicker(id: string, value: string): string {
+  const today = new Date();
+  const curYear = today.getFullYear();
+  const curMonth = today.getMonth();
+  return `
+    <div class="datepicker-wrapper" data-datepicker-wrapper="${id}">
+      <div class="flex gap-2">
+        <input type="text" id="${id}" readonly value="${escapeHtml(value)}"
+          placeholder="YYYY-MM-DD"
+          class="datepicker-input w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500 cursor-pointer text-sm"
+          data-action="datepicker-toggle" />
+        <button type="button" data-action="datepicker-toggle"
+          class="datepicker-toggle px-3 py-2 bg-slate-800 border border-slate-700 rounded-md text-slate-400 hover:text-slate-100 text-sm leading-none">
+          &#128197;
+        </button>
+      </div>
+      <div id="${id}-calendar" class="datepicker-calendar hidden" data-year="${curYear}" data-month="${curMonth}">
+        ${renderCalendarGrid(id, curYear, curMonth, value)}
+      </div>
+    </div>
+  `;
+}
+
+function renderCalendarGrid(id: string, year: number, month: number, selectedDate: string): string {
+  const monthNames = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+  ];
+  const firstDay = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  let dayCells = "";
+  for (let i = 0; i < firstDay; i++) {
+    dayCells += "<div></div>";
+  }
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dateStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    const isSelected = dateStr === selectedDate;
+    const isToday = dateStr === todayStr();
+    const selectedClass = isSelected ? " datepicker-day-selected" : "";
+    const todayClass = isToday ? " datepicker-day-today" : "";
+    dayCells += `<button type="button" class="datepicker-day${selectedClass}${todayClass}" data-action="datepicker-day" data-date="${dateStr}">${d}</button>`;
+  }
+
+  return `
+    <div class="datepicker-header">
+      <button type="button" data-action="datepicker-prev-month" data-datepicker-id="${id}" class="datepicker-nav">&#9664;</button>
+      <span class="text-sm font-medium text-slate-200">${monthNames[month]} ${year}</span>
+      <button type="button" data-action="datepicker-next-month" data-datepicker-id="${id}" class="datepicker-nav">&#9654;</button>
+    </div>
+    <div class="datepicker-grid">
+      <div class="datepicker-weekday">Su</div>
+      <div class="datepicker-weekday">Mo</div>
+      <div class="datepicker-weekday">Tu</div>
+      <div class="datepicker-weekday">We</div>
+      <div class="datepicker-weekday">Th</div>
+      <div class="datepicker-weekday">Fr</div>
+      <div class="datepicker-weekday">Sa</div>
+      ${dayCells}
+    </div>
+  `;
+}
+
+function closeAllDatepickers(): void {
+  document.querySelectorAll(".datepicker-calendar:not(.hidden)").forEach((cal) => {
+    cal.classList.add("hidden");
+  });
 }
 
 // ---- Receipt render functions ----
@@ -1669,13 +1956,43 @@ function renderGoals(): string {
               </div>
               <div>
                 <label class="block text-sm font-medium text-slate-200 mb-1">Deadline</label>
-                <input type="date" id="goal-deadline" class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500" />
+                ${renderDatePicker("goal-deadline", "")}
               </div>
               <div>
                 <label class="block text-sm font-medium text-slate-200 mb-1">Progress (0-100)</label>
                 <input type="number" id="goal-progress" min="0" max="100" value="0" class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500" />
               </div>
             </div>
+
+            <!-- Inline task entry -->
+            <div class="border-t border-slate-700 pt-4 mt-4">
+              <h4 class="text-sm font-medium text-slate-200 mb-3">Tasks</h4>
+              <div class="space-y-2">
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1" for="goal-task-title">Task Title</label>
+                  <input type="text" id="goal-task-title" class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500 text-sm" placeholder="Task to add to this goal" />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1" for="goal-task-desc">Description (optional)</label>
+                  <input type="text" id="goal-task-desc" class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500 text-sm" placeholder="Optional description" />
+                </div>
+                <button class="button secondary text-sm" type="button" data-action="goal-add-task">+ Add Task</button>
+              </div>
+              ${s.pendingTasks.length > 0
+                ? `<div class="mt-3 space-y-2">
+                    ${s.pendingTasks
+                      .map(
+                        (pt, i) => `
+                      <div class="flex items-center gap-2 rounded bg-slate-800/50 px-3 py-2 text-sm">
+                        <span class="flex-1 min-w-0 truncate text-slate-200">${escapeHtml(pt.title)}</span>
+                        <button type="button" class="text-red-400 hover:text-red-300 shrink-0" data-action="goal-remove-task" data-task-index="${i}" title="Remove task">✕</button>
+                      </div>`,
+                      )
+                      .join("")}
+                  </div>`
+                : ""}
+            </div>
+
             <button class="button" type="button" data-action="create-goal">Create Goal</button>
           </div>
         </div>
@@ -1823,8 +2140,11 @@ function renderUrlTags(tagsJson: string): string {
   }
 }
 
+// ---- Settings config form ----
+
 function renderSettings(): string {
   const status = state.settings.status;
+  const fields = state.settings.configFields;
 
   let statusHtml = "";
   if (status === "loading") {
@@ -1837,9 +2157,16 @@ function renderSettings(): string {
     statusHtml = `<div class="rounded border border-red-700 bg-red-900/30 p-3 text-sm text-red-300">${escapeHtml(state.settings.statusMessage)}</div>`;
   }
 
-  const editorContent = state.settings.configJson
-    ? state.settings.configJson
-    : '{\n  "receipts_path": "",\n  "nutriments_path": "",\n  "bank_statements_path": "",\n  "investments_statements_path": "",\n  "database": "maia.db",\n  "models_api": []\n}';
+  const formFields = CONFIG_FIELD_DEFS
+    .map(
+      (def) => `
+        <div>
+          <label class="block text-sm font-medium text-slate-200 mb-1" for="cfg-${def.key}">${escapeHtml(def.label)}</label>
+          <input type="text" id="cfg-${def.key}" data-config-key="${def.key}" value="${escapeHtml(fields[def.key] || "")}" placeholder="${escapeHtml(def.placeholder)}"
+            class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500 text-sm" />
+        </div>`,
+    )
+    .join("");
 
   return `
     <section class="panel">
@@ -1849,24 +2176,18 @@ function renderSettings(): string {
       </div>
       <div class="panel-content space-y-6">
         <div class="rounded border border-slate-800 bg-slate-900/30 p-4">
-          <h3 class="mb-3 text-sm font-medium text-slate-200">maia.json Editor</h3>
+          <h3 class="mb-3 text-sm font-medium text-slate-200">Configuration</h3>
           <p class="mb-4 text-xs text-slate-400">
-            Edit your Maia configuration directly. The file is validated as JSON before saving.
-            A backup will be created as <code class="rounded bg-slate-800 px-1 py-0.5 font-mono text-slate-300">maia.json.bak</code>.
+            Edit your Maia configuration. A backup will be created as <code class="rounded bg-slate-800 px-1 py-0.5 font-mono text-slate-300">maia.json.bak</code> when saving.
           </p>
 
           ${statusHtml}
 
-          <div class="mt-4">
-            <textarea
-              id="settings-editor"
-              class="h-72 w-full resize-y rounded border border-slate-700 bg-slate-950 p-3 font-mono text-sm text-slate-100 placeholder-slate-600 focus:border-slate-500 focus:outline-none"
-              spellcheck="false"
-              placeholder="{ ... }"
-            >${escapeHtml(editorContent)}</textarea>
+          <div class="mt-4 space-y-4">
+            ${formFields}
           </div>
 
-          <div class="mt-4 flex items-center gap-3">
+          <div class="mt-6 flex items-center gap-3">
             <button class="button" type="button" data-action="save-settings" ${status === "loading" || status === "saving" ? "disabled" : ""}>
               ${status === "saving" ? "Saving..." : "Save Settings"}
             </button>
@@ -1910,4 +2231,40 @@ window.addEventListener("DOMContentLoaded", () => {
   render();
   document.addEventListener("click", handleClick);
   document.addEventListener("input", handleInput);
+
+  // Keyboard zoom shortcuts (Ctrl+/-, Ctrl+0, Ctrl+=)
+  document.addEventListener("keydown", async (e) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    const target = e.target as HTMLElement;
+    // Don't zoom when typing in inputs
+    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) return;
+
+    try {
+      const webview = getCurrentWebview();
+      // Tauri v2 setZoom reads current zoom from the webview; we track it ourselves
+      // because the API doesn't expose a getter. Use a module-level variable.
+      const step = 0.1;
+      const minZoom = 0.5;
+      const maxZoom = 2.0;
+
+      if (e.key === "=" || e.key === "+") {
+        e.preventDefault();
+        _currentZoom = Math.min(maxZoom, _currentZoom + step);
+        await webview.setZoom(_currentZoom);
+      } else if (e.key === "-") {
+        e.preventDefault();
+        _currentZoom = Math.max(minZoom, _currentZoom - step);
+        await webview.setZoom(_currentZoom);
+      } else if (e.key === "0") {
+        e.preventDefault();
+        _currentZoom = 1.0;
+        await webview.setZoom(_currentZoom);
+      }
+    } catch {
+      // Silently ignore zoom errors (e.g., permission denied)
+    }
+  });
 });
+
+// Module-level zoom tracking (persists across renders)
+let _currentZoom = 1.0;

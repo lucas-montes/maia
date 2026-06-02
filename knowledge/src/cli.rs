@@ -13,7 +13,9 @@ pub struct Cli {
 }
 impl Cli {
     pub fn message(self) -> Vec<u8> {
-        self.command.to_bytes().expect("msgage serialization failed")
+        self.command
+            .to_bytes()
+            .expect("msgage serialization failed")
     }
 }
 
@@ -22,7 +24,7 @@ impl Cli {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Commands {
     /// Add a file to knowledge
-    Add(Add)
+    Add(Add),
 }
 
 impl MessageProtocol for Commands {}
@@ -30,9 +32,9 @@ impl MessageProtocol for Commands {}
 /// Add a file to knowledge
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Add{
+pub struct Add {
     /// File to add
     pub file: PathBuf,
     /// Create a symlink
-    pub symlink: bool
+    pub symlink: bool,
 }

@@ -25,6 +25,8 @@
       rust
       sce
       pkgs.openssl
+      pkgs.pnpm
+      pkgs.nodejs
       pkgs.sqlite
       pkgs.librsvg
       pkgs.webkitgtk_4_1

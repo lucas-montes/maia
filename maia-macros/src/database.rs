@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields, Lit, Meta};
+use syn::{Data, DeriveInput, Fields, Lit, Meta, parse_macro_input};
 
 /// Derive macro for automatic CRUD operations
 ///
@@ -60,9 +60,10 @@ pub fn create_derive_crud(input: TokenStream) -> TokenStream {
         let field_name = field.ident.as_ref().unwrap();
         all_field_names.push(field_name);
 
-        let skip = field.attrs.iter().any(|attr| {
-            attr.path().is_ident("skip_crud")
-        });
+        let skip = field
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("skip_crud"));
 
         if !skip {
             crud_fields.push(field_name);
@@ -115,34 +116,38 @@ pub fn create_derive_crud(input: TokenStream) -> TokenStream {
         select_fields_str, table_name, primary_key
     );
 
-    let select_all_sql = format!(
-        "SELECT {} FROM {}",
-        select_fields_str, table_name
-    );
+    let select_all_sql = format!("SELECT {} FROM {}", select_fields_str, table_name);
 
     // Generate DELETE SQL
-    let delete_sql = format!(
-        "DELETE FROM {} WHERE {} = ?1",
-        table_name, primary_key
-    );
+    let delete_sql = format!("DELETE FROM {} WHERE {} = ?1", table_name, primary_key);
 
     // Generate from_row code
-    let from_row_assignments: Vec<_> = all_field_names.iter().enumerate().map(|(i, field)| {
-        quote! {
-            #field: row.get(#i)?
-        }
-    }).collect();
+    let from_row_assignments: Vec<_> = all_field_names
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            quote! {
+                #field: row.get(#i)?
+            }
+        })
+        .collect();
 
     let primary_key_ident = syn::Ident::new(&primary_key, proc_macro2::Span::call_site());
 
     // Generate parameter references for execute
-    let insert_params: Vec<_> = crud_fields.iter().map(|field| {
-        quote! { &entity.#field }
-    }).collect();
+    let insert_params: Vec<_> = crud_fields
+        .iter()
+        .map(|field| {
+            quote! { &entity.#field }
+        })
+        .collect();
 
-    let update_params_with_id: Vec<_> = crud_fields.iter().map(|field| {
-        quote! { &entity.#field }
-    }).collect();
+    let update_params_with_id: Vec<_> = crud_fields
+        .iter()
+        .map(|field| {
+            quote! { &entity.#field }
+        })
+        .collect();
 
     // Generate the implementation
     let expanded = quote! {

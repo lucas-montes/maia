@@ -37,4 +37,4 @@ shared.workspace = true
 
 
 [workspace]
-members = ["ai", "knowledge", "shared", "chrome", "maia-macros"]
+members = ["ai", "knowledge", "shared", "chrome", "maia-macros", "maia-ui/src-tauri"]

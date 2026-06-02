@@ -27,13 +27,21 @@ impl fmt::Display for ProtocolError {
             ProtocolError::Json(e) => write!(f, "JSON error: {}", e),
             ProtocolError::Utf8(e) => write!(f, "UTF-8 conversion error: {}", e),
             ProtocolError::BufferTooShort { expected, actual } => {
-                write!(f, "Buffer too short: expected {} bytes, got {}", expected, actual)
+                write!(
+                    f,
+                    "Buffer too short: expected {} bytes, got {}",
+                    expected, actual
+                )
             }
             ProtocolError::InvalidLength(len) => {
                 write!(f, "Invalid message length: {}", len)
             }
             ProtocolError::IncompleteMessage { expected, actual } => {
-                write!(f, "Incomplete message: expected {} bytes, got {}", expected, actual)
+                write!(
+                    f,
+                    "Incomplete message: expected {} bytes, got {}",
+                    expected, actual
+                )
             }
             ProtocolError::Io(e) => write!(f, "IO error: {}", e),
             ProtocolError::MessageTooLarge(size) => {
@@ -74,15 +82,24 @@ impl From<std::io::Error> for ProtocolError {
 
 impl From<std::array::TryFromSliceError> for ProtocolError {
     fn from(_: std::array::TryFromSliceError) -> Self {
-        ProtocolError::BufferTooShort { expected: 4, actual: 0 }
+        ProtocolError::BufferTooShort {
+            expected: 4,
+            actual: 0,
+        }
     }
 }
 
 /// Length-prefixed JSON protocol for CLI-daemon communication
 /// Format: [4 bytes length][JSON data]
-pub trait MessageProtocol where Self: Sized {
+pub trait MessageProtocol
+where
+    Self: Sized,
+{
     /// Serialize command to length-prefixed bytes
-    fn to_bytes(&self) -> Result<Vec<u8>, ProtocolError> where Self: Serialize {
+    fn to_bytes(&self) -> Result<Vec<u8>, ProtocolError>
+    where
+        Self: Serialize,
+    {
         let json = serde_json::to_string(self)?;
         let json_bytes = json.as_bytes();
         let len = json_bytes.len() as u32;
@@ -99,11 +116,14 @@ pub trait MessageProtocol where Self: Sized {
         Ok(result)
     }
     /// Deserialize command from length-prefixed bytes
-    fn from_bytes(bytes: &[u8]) -> Result<Self, ProtocolError> where Self: for<'de> Deserialize<'de> {
+    fn from_bytes(bytes: &[u8]) -> Result<Self, ProtocolError>
+    where
+        Self: for<'de> Deserialize<'de>,
+    {
         if bytes.len() < 4 {
             return Err(ProtocolError::BufferTooShort {
                 expected: 4,
-                actual: bytes.len()
+                actual: bytes.len(),
             });
         }
 
@@ -120,7 +140,7 @@ pub trait MessageProtocol where Self: Sized {
         if bytes.len() < 4 + expected_len {
             return Err(ProtocolError::IncompleteMessage {
                 expected: 4 + expected_len,
-                actual: bytes.len()
+                actual: bytes.len(),
             });
         }
 

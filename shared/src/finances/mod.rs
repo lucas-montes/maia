@@ -1,5 +1,5 @@
 pub mod models;
-mod simulation;
 mod outils;
+mod simulation;
 
-pub use outils::{Money, Currency};
+pub use outils::{Currency, Money};

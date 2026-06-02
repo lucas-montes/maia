@@ -94,28 +94,45 @@ fn test_receipt_schema_matches_model_rs() {
         "propertyOrdering": ["store", "date", "total", "currency", "products", "discounts"]
     });
 
-
     // Assert top-level structure
     assert_eq!(generated_schema["type"], expected_schema["type"]);
     assert_eq!(generated_schema["required"], expected_schema["required"]);
-    assert_eq!(generated_schema["propertyOrdering"], expected_schema["propertyOrdering"]);
+    assert_eq!(
+        generated_schema["propertyOrdering"],
+        expected_schema["propertyOrdering"]
+    );
 
     // Assert store property
     assert_eq!(generated_schema["properties"]["store"]["type"], "string");
-    assert_eq!(generated_schema["properties"]["store"]["description"], "Store name");
+    assert_eq!(
+        generated_schema["properties"]["store"]["description"],
+        "Store name"
+    );
 
     // Assert date property with format
     assert_eq!(generated_schema["properties"]["date"]["type"], "string");
-    assert_eq!(generated_schema["properties"]["date"]["format"], "date-time");
-    assert_eq!(generated_schema["properties"]["date"]["description"], "Purchase date");
+    assert_eq!(
+        generated_schema["properties"]["date"]["format"],
+        "date-time"
+    );
+    assert_eq!(
+        generated_schema["properties"]["date"]["description"],
+        "Purchase date"
+    );
 
     // Assert total property
     assert_eq!(generated_schema["properties"]["total"]["type"], "number");
-    assert_eq!(generated_schema["properties"]["total"]["description"], "Total amount");
+    assert_eq!(
+        generated_schema["properties"]["total"]["description"],
+        "Total amount"
+    );
 
     // Assert currency property
     assert_eq!(generated_schema["properties"]["currency"]["type"], "string");
-    assert_eq!(generated_schema["properties"]["currency"]["description"], "Currency code");
+    assert_eq!(
+        generated_schema["properties"]["currency"]["description"],
+        "Currency code"
+    );
 
     // Assert products array
     let products = &generated_schema["properties"]["products"];
@@ -127,8 +144,14 @@ fn test_receipt_schema_matches_model_rs() {
     assert_eq!(products_items["properties"]["name"]["type"], "string");
     assert_eq!(products_items["properties"]["price"]["type"], "number");
     assert_eq!(products_items["properties"]["currency"]["type"], "string");
-    assert_eq!(products_items["required"], json!(["name", "price", "currency"]));
-    assert_eq!(products_items["propertyOrdering"], json!(["name", "price", "currency"]));
+    assert_eq!(
+        products_items["required"],
+        json!(["name", "price", "currency"])
+    );
+    assert_eq!(
+        products_items["propertyOrdering"],
+        json!(["name", "price", "currency"])
+    );
 
     // Assert discounts array
     let discounts = &generated_schema["properties"]["discounts"];
@@ -137,9 +160,17 @@ fn test_receipt_schema_matches_model_rs() {
 
     let discounts_items = &discounts["items"];
     assert_eq!(discounts_items["type"], "object");
-    assert_eq!(discounts_items["properties"]["description"]["type"], "string");
+    assert_eq!(
+        discounts_items["properties"]["description"]["type"],
+        "string"
+    );
     assert_eq!(discounts_items["properties"]["amount"]["type"], "number");
-    assert_eq!(discounts_items["required"], json!(["description", "amount"]));
-    assert_eq!(discounts_items["propertyOrdering"], json!(["description", "amount"]));
-
+    assert_eq!(
+        discounts_items["required"],
+        json!(["description", "amount"])
+    );
+    assert_eq!(
+        discounts_items["propertyOrdering"],
+        json!(["description", "amount"])
+    );
 }

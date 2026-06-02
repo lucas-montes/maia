@@ -12,6 +12,7 @@
 
   body {
     @apply bg-slate-950 text-slate-100 antialiased;
+    font-size: 18px;
   }
 }
 
@@ -162,6 +163,47 @@
 
   .receipt-status-archived {
     @apply bg-amber-900/30 text-amber-400;
+  }
+
+  /* Datepicker styles */
+  .datepicker-wrapper {
+    @apply relative;
+  }
+
+  .datepicker-calendar {
+    @apply absolute z-50 top-full left-0 mt-1 w-72 p-3 rounded-lg border border-slate-700 bg-slate-900 shadow-xl;
+  }
+
+  .datepicker-calendar.hidden {
+    display: none;
+  }
+
+  .datepicker-header {
+    @apply flex items-center justify-between mb-3;
+  }
+
+  .datepicker-nav {
+    @apply inline-flex h-7 w-7 items-center justify-center rounded text-sm text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-100;
+  }
+
+  .datepicker-grid {
+    @apply grid grid-cols-7 gap-1;
+  }
+
+  .datepicker-weekday {
+    @apply text-center text-xs font-medium text-slate-500 py-1;
+  }
+
+  .datepicker-day {
+    @apply inline-flex h-8 w-8 items-center justify-center rounded text-sm text-slate-300 transition-colors hover:bg-slate-800 hover:text-slate-100;
+  }
+
+  .datepicker-day-selected {
+    @apply bg-sky-600 text-white hover:bg-sky-500;
+  }
+
+  .datepicker-day-today {
+    @apply border border-slate-600;
   }
 }
 

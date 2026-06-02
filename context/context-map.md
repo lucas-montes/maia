@@ -10,6 +10,11 @@ This file indexes all durable context artifacts for the Maia project.
 | `glossary.md` | Domain-specific terms and definitions |
 | `context-map.md` | This file — index of all context |
 
+## Domain Context Files
+| File | Purpose |
+|---|---|
+| `ui-rebuild/shell-and-screens.md` | UI shell, core screen implementations, settings editor, and notes file-backed records |
+
 ## Plans (proposed)
 | Plan | Status | Description |
 |---|---|---|
@@ -25,6 +30,7 @@ This file indexes all durable context artifacts for the Maia project.
 | `calendar-google` | proposed | Google Calendar OAuth, event fetch/create, reminders |
 | `personal-meetings` | proposed | Meeting start/stop, notes, audio recording, markdown export |
 | `ui-visualization` | proposed | Embedded HTTP server + web dashboard with charts |
+| `ui-rebuild` | completed | Sober responsive desktop UI rebuild with files, SQLite indexing, and saved URLs |
 | `kb-chrome-extension` | proposed | Wire Chrome → native host → daemon → SQLite pipeline |
 | `kb-search` | proposed | FTS5 full-text search, vector embeddings, knowledge graph |
 

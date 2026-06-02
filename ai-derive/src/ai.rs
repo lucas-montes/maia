@@ -1,7 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields, Lit, Meta, Type};
-
+use syn::{Data, DeriveInput, Fields, Lit, Meta, Type, parse_macro_input};
 
 /// Derive macro for generating Google Gemini-compatible JSON schemas
 ///
@@ -182,9 +181,6 @@ pub fn create_derive_gemini_schema(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-
-
-
 fn extract_description(attrs: &[syn::Attribute]) -> Option<String> {
     for attr in attrs {
         if attr.path().is_ident("description") {
@@ -215,7 +211,11 @@ fn extract_option_type(ty: &Type) -> (bool, &Type) {
     (false, ty)
 }
 
-fn generate_type_schema(ty: &Type, attrs: &[syn::Attribute], is_nullable: bool) -> proc_macro2::TokenStream {
+fn generate_type_schema(
+    ty: &Type,
+    attrs: &[syn::Attribute],
+    is_nullable: bool,
+) -> proc_macro2::TokenStream {
     let base_type = get_json_type(ty);
 
     // Extract gemini attributes
@@ -276,7 +276,8 @@ fn generate_type_schema(ty: &Type, attrs: &[syn::Attribute], is_nullable: bool) 
 
                         let inner_schema = if is_custom_type {
                             // For nested custom structs, call their to_schema() method
-                            let inner_ident = syn::Ident::new(&inner_type_name, proc_macro2::Span::call_site());
+                            let inner_ident =
+                                syn::Ident::new(&inner_type_name, proc_macro2::Span::call_site());
                             quote! { #inner_ident::to_schema() }
                         } else {
                             // For primitive types, generate inline schema
@@ -326,7 +327,9 @@ fn get_json_type(ty: &Type) -> &'static str {
             let ident = segment.ident.to_string();
             return match ident.as_str() {
                 "String" | "str" => "string",
-                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize" => "integer",
+                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize" => {
+                    "integer"
+                }
                 "f32" | "f64" => "number",
                 "bool" => "boolean",
                 "Vec" => "array",
@@ -350,9 +353,23 @@ fn is_custom_struct(type_name: &str) -> bool {
     // Check if it's not a primitive type
     !matches!(
         type_name,
-        "String" | "str" | "i8" | "i16" | "i32" | "i64" |
-        "u8" | "u16" | "u32" | "u64" | "isize" | "usize" |
-        "f32" | "f64" | "bool" | "Vec" | "Option"
+        "String"
+            | "str"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "isize"
+            | "usize"
+            | "f32"
+            | "f64"
+            | "bool"
+            | "Vec"
+            | "Option"
     )
 }
 
