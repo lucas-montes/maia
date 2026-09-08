@@ -11,6 +11,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 tracing-appender = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1.46.1", features = ["macros", "rt", "net", "io-util", "rt-multi-thread", "fs"] }
 
 ai = { path = "ai" }
 knowledge = { path = "knowledge" }
@@ -25,8 +26,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 chrono.workspace = true
-
-tokio = { version = "1.46.1", features = ["macros", "rt", "net", "io-util", "rt-multi-thread"] }
+tokio.workspace = true
 
 notify-rust = "4.5.0"
 inotify = "0.11.0"
@@ -37,4 +37,4 @@ shared.workspace = true
 
 
 [workspace]
-members = ["ai", "knowledge", "shared", "chrome", "maia-macros", "maia-ui/src-tauri"]
+members = ["ai", "knowledge", "shared", "chrome", "maia-macros", "maia-ui/src-tauri", "sync-server"]

@@ -14,6 +14,7 @@ This file indexes all durable context artifacts for the Maia project.
 | File | Purpose |
 |---|---|
 | `ui-rebuild/shell-and-screens.md` | UI shell, core screen implementations, settings editor, and notes file-backed records |
+| `sync/sync-contract.md` | FitFat offline-first sync contract (mirrors `~/Projects/fitfat/docs/api/openapi.yaml` and `context/sync/sync-contract.md`) |
 
 ## Plans (proposed)
 | Plan | Status | Description |
@@ -33,6 +34,7 @@ This file indexes all durable context artifacts for the Maia project.
 | `ui-rebuild` | completed | Sober responsive desktop UI rebuild with files, SQLite indexing, and saved URLs |
 | `kb-chrome-extension` | proposed | Wire Chrome → native host → daemon → SQLite pipeline |
 | `kb-search` | proposed | FTS5 full-text search, vector embeddings, knowledge graph |
+| `fitfat-sync-server` | completed | Standalone `sync-server` crate (Axum+rusqlite) + full FitFat OpenAPI + Tauri 0.0.0.0:3030 deterministic LAN embedding |
 
 ## Decisions
 | Decision | Date | Summary |

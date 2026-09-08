@@ -4,11 +4,18 @@ use std::sync::Mutex;
 
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use sync_server::Config as SyncConfig;
+use tauri::Manager;
 
 /// Shared application state managed by Tauri.
 struct AppState {
     db: Mutex<Connection>,
     notes_dir: PathBuf,
+}
+
+struct SyncServerState {
+    port: u16,
+    url: String,
 }
 
 // ---- Data types ----
@@ -207,6 +214,39 @@ fn get_notes_dir() -> PathBuf {
         let _ = fs::create_dir_all(&dir);
     }
     dir
+}
+
+fn get_sync_db_path() -> PathBuf {
+    let db_path = get_database_path();
+    let p = PathBuf::from(&db_path);
+    let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
+    parent.join("fitfat_sync.db")
+}
+
+fn get_sync_api_key() -> String {
+    if let Ok(content) = fs::read_to_string("maia.json") {
+        if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(key) = config.get("sync_api_key").and_then(|v| v.as_str()) {
+                return key.to_string();
+            }
+            if let Some(sync) = config.get("sync") {
+                if let Some(key) = sync.get("api_key").and_then(|v| v.as_str()) {
+                    return key.to_string();
+                }
+            }
+        }
+    }
+    "fitfat-sync-key".to_string()
+}
+
+#[tauri::command]
+fn get_sync_port(state: tauri::State<Mutex<SyncServerState>>) -> u16 {
+    state.lock().map(|s| s.port).unwrap_or(0)
+}
+
+#[tauri::command]
+fn get_sync_url(state: tauri::State<Mutex<SyncServerState>>) -> String {
+    state.lock().map(|s| s.url.clone()).unwrap_or_default()
 }
 
 /// Slugify a title for use as a filename.
@@ -1642,12 +1682,40 @@ pub fn run() {
         notes_dir,
     };
 
+    let sync_db_path = get_sync_db_path();
+    let sync_api_key = get_sync_api_key();
+    let sync_config = SyncConfig::new(sync_db_path, sync_api_key);
+    let sync_state = Mutex::new(SyncServerState { port: 0, url: String::new() });
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(app_state)
+        .manage(sync_state)
+        .setup(move |app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match sync_server::server::start_server(sync_config).await {
+                    Ok((port, _jh)) => {
+                        let url = format!("http://0.0.0.0:{port}");
+                        let state = handle.state::<Mutex<SyncServerState>>();
+                        if let Ok(mut s) = state.lock() {
+                            s.port = port;
+                            s.url = url.clone();
+                        }
+                        eprintln!("sync-server listening on 0.0.0.0:{port}");
+                    }
+                    Err(e) => {
+                        eprintln!("failed to start sync-server: {e}");
+                    }
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             read_config,
             save_config,
+            get_sync_port,
+            get_sync_url,
             list_notes,
             read_note,
             save_note,
