@@ -326,4 +326,40 @@ mod tests {
         handle.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn read_workouts_meals_body_metrics() {
+        use crate::db;
+        let pool = db::init_memory().unwrap();
+        {
+            let conn = pool.lock().unwrap();
+            conn.execute("INSERT INTO workouts (id, name, date, created_at, updated_at) VALUES ('w1','Push',1000,1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Bench','weightlifting',1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO workout_exercises (id, workout_id, exercise_id, sort_order, updated_at) VALUES ('we1','w1','e1',0,1000)", []).unwrap();
+            conn.execute("INSERT INTO exercise_sets (id, workout_exercise_id, set_number, reps, weight_kg, updated_at) VALUES ('s1','we1',1,8,80,1000)", []).unwrap();
+            conn.execute("INSERT INTO meals (id, name, eaten_at, created_at, updated_at) VALUES ('m1','Lunch',1000,1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i1','Oats',100,10,20,5,1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO meal_ingredients (id, meal_id, ingredient_id, grams, updated_at) VALUES ('mi1','m1','i1',100,1000)", []).unwrap();
+            conn.execute("INSERT INTO body_metrics (id, date, weight_kg, created_at, updated_at) VALUES ('b1',1000,70.5,1000,1000)", []).unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool).await;
+        let client = reqwest::Client::new();
+        let resp = client.get(format!("http://127.0.0.1:{port}/workouts?since=0")).header("Authorization","Bearer test-key").send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["workouts"].as_array().unwrap().len(), 1);
+        assert_eq!(body["workoutExercises"].as_array().unwrap().len(), 1);
+        assert_eq!(body["exerciseSets"].as_array().unwrap().len(), 1);
+        let resp = client.get(format!("http://127.0.0.1:{port}/meals?since=0")).header("Authorization","Bearer test-key").send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["meals"].as_array().unwrap().len(), 1);
+        assert_eq!(body["mealIngredients"].as_array().unwrap().len(), 1);
+        let resp = client.get(format!("http://127.0.0.1:{port}/body-metrics?since=0")).header("Authorization","Bearer test-key").send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["items"][0]["weightKg"], 70.5);
+        handle.abort();
+    }
 }

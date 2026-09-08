@@ -17,3 +17,6 @@
 | **since cursor** | Epoch-ms query param `?since=<ms>`; server returns only rows where `updated_at > since` and `deleted_at > since` for `deleted[]` |
 | **Bearer API key** | `Authorization: Bearer <apiKey>` on every sync request; single key from `maia.json` `sync_api_key` (default `fitfat-sync-key`) |
 | **FitFat Sync** | Offline-first delta sync per `~/Projects/fitfat/docs/api/openapi.yaml` and `context/sync/sync-contract.md` §11 MVP (Pull `since`, Push camelCase Drift `toJson`) |
+| **FitFat Visualization** | `maia-ui` `ViewId="fitfat"` reading `sync-server` HTTP (`GET /workouts|/meals|/body-metrics`) with per-chart `since` filters, Chart.js, no duplicate Tauri DB logic |
+| **Per-Chart Filter** | Each FitFat chart owns its `since`/`date` state (`data-fitfat-filter`), `fetch(...?since=<ms>)` re-fetches only that chart |
+| **QR Auth Payload** | Settings QR `{"url":"http://<lan-ip>:3030","apiKey":"<Bearer>","version":1}` via `qrcode` canvas + copy, not logged |

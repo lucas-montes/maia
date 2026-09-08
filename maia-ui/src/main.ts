@@ -1,9 +1,10 @@
 import "./styles/tailwind.css";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
+import Chart from "chart.js/auto";
+import QRCode from "qrcode";
 
-type ViewId = "dashboard" | "todos" | "receipts" | "notes" | "settings" | "goals" | "urls";
+type ViewId = "dashboard" | "todos" | "receipts" | "notes" | "settings" | "goals" | "urls" | "fitfat";
 
 interface Note {
   id: number;
@@ -126,6 +127,20 @@ interface UrlsState {
   statusMessage: string;
 }
 
+interface FitFatState {
+  status: "idle" | "loading" | "error";
+  statusMessage: string;
+  counts: { workouts: number; meals: number; bodyMetrics: number; exercises: number } | null;
+  workouts: any[];
+  meals: any[];
+  bodyMetrics: any[];
+  exercises: any[];
+  filters: { workoutsSince: string; mealsSince: string; bodySince: string };
+  syncUrl: string;
+  apiKey: string;
+  qrDataUrl: string | null;
+}
+
 interface AppState {
   view: ViewId;
   sidebarCollapsed: boolean;
@@ -141,6 +156,7 @@ interface AppState {
   goals: GoalsState;
   dashboard: DashboardState;
   urls: UrlsState;
+  fitfat: FitFatState;
 }
 
 // ---- Config field definitions (must be before defaultAppState) ----
@@ -254,9 +270,23 @@ const defaultAppState = (): AppState => ({
     status: "idle",
     statusMessage: "",
   },
+  fitfat: {
+    status: "idle",
+    statusMessage: "",
+    counts: null,
+    workouts: [],
+    meals: [],
+    bodyMetrics: [],
+    exercises: [],
+    filters: { workoutsSince: "", mealsSince: "", bodySince: "" },
+    syncUrl: "",
+    apiKey: "",
+    qrDataUrl: null,
+  },
 });
 
 let state: AppState = defaultAppState();
+let fitfatCharts: Record<string, Chart> = {};
 
 function setView(view: ViewId): void {
   state.view = view;
@@ -277,6 +307,8 @@ function setView(view: ViewId): void {
     loadUrls();
   } else if (view === "dashboard") {
     loadDashboardCounts();
+  } else if (view === "fitfat") {
+    loadFitFat();
   }
   render();
 }
@@ -805,6 +837,149 @@ async function loadDashboardCounts(): Promise<void> {
   render();
 }
 
+function dateStrToSince(dateStr: string): number {
+  if (!dateStr) return 0;
+  const d = new Date(dateStr);
+  return isNaN(d.getTime()) ? 0 : d.getTime();
+}
+
+function resolveSyncUrl(raw: string): string {
+  if (!raw) return "http://127.0.0.1:3030";
+  try {
+    const u = new URL(raw);
+    if (u.hostname === "0.0.0.0") u.hostname = "127.0.0.1";
+    return u.toString().replace(/\/$/, "");
+  } catch {
+    return raw.replace(/\/$/, "");
+  }
+}
+
+async function fetchFitFat(path: string, since: number): Promise<any> {
+  const url = resolveSyncUrl(state.fitfat.syncUrl);
+  const sep = path.includes("?") ? "&" : "?";
+  const full = `${url}${path}${sep}since=${since}`;
+  const res = await fetch(full, { headers: { Authorization: `Bearer ${state.fitfat.apiKey}` } });
+  if (!res.ok) throw new Error(`${path} ${res.status}`);
+  return res.json();
+}
+
+async function loadFitFat(): Promise<void> {
+  state.fitfat.status = "loading";
+  state.fitfat.statusMessage = "";
+  render();
+  try {
+    const [url, apiKey] = await Promise.all([
+      invoke<string>("get_sync_url"),
+      invoke<string>("get_sync_api_key"),
+    ]);
+    state.fitfat.syncUrl = url || "http://127.0.0.1:3030";
+    state.fitfat.apiKey = apiKey || "fitfat-sync-key";
+    const workoutsSince = dateStrToSince(state.fitfat.filters.workoutsSince);
+    const mealsSince = dateStrToSince(state.fitfat.filters.mealsSince);
+    const bodySince = dateStrToSince(state.fitfat.filters.bodySince);
+    const [workoutsRes, mealsRes, bodyRes, exercisesRes] = await Promise.all([
+      fetchFitFat("/workouts", workoutsSince).catch(() => ({ workouts: [], workoutExercises: [], exerciseSets: [] })),
+      fetchFitFat("/meals", mealsSince).catch(() => ({ meals: [], mealIngredients: [] })),
+      fetchFitFat("/body-metrics", bodySince).catch(() => ({ items: [] })),
+      fetchFitFat("/exercises", 0).catch(() => ({ items: [] })),
+    ]);
+    state.fitfat.workouts = workoutsRes.workouts || [];
+    (state.fitfat as any).workoutExercises = workoutsRes.workoutExercises || [];
+    (state.fitfat as any).exerciseSets = workoutsRes.exerciseSets || [];
+    state.fitfat.meals = mealsRes.meals || [];
+    (state.fitfat as any).mealIngredients = mealsRes.mealIngredients || [];
+    state.fitfat.bodyMetrics = bodyRes.items || bodyRes.bodyMetrics || [];
+    state.fitfat.exercises = exercisesRes.items || [];
+    const wCount = state.fitfat.workouts.length;
+    const mCount = state.fitfat.meals.length;
+    const bCount = state.fitfat.bodyMetrics.length;
+    const eCount = state.fitfat.exercises.length;
+    state.fitfat.counts = { workouts: wCount, meals: mCount, bodyMetrics: bCount, exercises: eCount };
+    state.fitfat.status = "idle";
+    await generateFitFatQR();
+  } catch (e) {
+    state.fitfat.status = "error";
+    state.fitfat.statusMessage = `Failed to load FitFat data: ${e}`;
+  }
+  render();
+  requestAnimationFrame(renderFitFatCharts);
+}
+
+async function generateFitFatQR(): Promise<void> {
+  if (!state.fitfat.apiKey || !state.fitfat.syncUrl) return;
+  const payload = JSON.stringify({ url: resolveSyncUrl(state.fitfat.syncUrl), apiKey: state.fitfat.apiKey, version: 1 });
+  try {
+    state.fitfat.qrDataUrl = await QRCode.toDataURL(payload, { width: 180, margin: 1 });
+  } catch {
+    state.fitfat.qrDataUrl = null;
+  }
+}
+
+function renderFitFatCharts(): void {
+  Object.values(fitfatCharts).forEach((c) => { try { c.destroy(); } catch {} });
+  fitfatCharts = {};
+  if (state.view !== "fitfat" || state.fitfat.status !== "idle") return;
+  const workoutsCanvas = document.getElementById("fitfat-workouts-chart") as HTMLCanvasElement | null;
+  if (workoutsCanvas) {
+    const byWeek: Record<string, number> = {};
+    for (const w of state.fitfat.workouts) {
+      const d = new Date(w.date);
+      const key = `${d.getFullYear()}-W${Math.ceil(((d.getTime() - new Date(d.getFullYear(), 0, 1).getTime()) / 86400000 + new Date(d.getFullYear(), 0, 1).getDay() + 1) / 7)}`;
+      byWeek[key] = (byWeek[key] || 0) + 1;
+    }
+    const labels = Object.keys(byWeek).slice(-12);
+    const data = labels.map((k) => byWeek[k]);
+    fitfatCharts["workouts"] = new Chart(workoutsCanvas, {
+      type: "bar",
+      data: { labels, datasets: [{ label: "Workouts / week", data, backgroundColor: "rgba(14,165,233,0.6)", borderColor: "#0ea5e9", borderWidth: 1 }] },
+      options: { responsive: true, plugins: { legend: { labels: { color: "#cbd5e1" } } }, scales: { x: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }, y: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" }, beginAtZero: true } } },
+    });
+  }
+  const volumeCanvas = document.getElementById("fitfat-volume-chart") as HTMLCanvasElement | null;
+  if (volumeCanvas) {
+    const sets: any[] = (state.fitfat as any).exerciseSets || [];
+    const volByDate: Record<string, number> = {};
+    for (const s of sets) {
+      const w = state.fitfat.workouts.find((w: any) => (state.fitfat as any).workoutExercises?.some((we: any) => we.id === s.workoutExerciseId && we.workoutId === w.id));
+      const d = w ? new Date(w.date).toISOString().slice(0, 10) : "unknown";
+      volByDate[d] = (volByDate[d] || 0) + (s.weightKg || 0) * (s.reps || 0);
+    }
+    const labels = Object.keys(volByDate).sort().slice(-12);
+    const data = labels.map((k) => volByDate[k]);
+    fitfatCharts["volume"] = new Chart(volumeCanvas, {
+      type: "line",
+      data: { labels, datasets: [{ label: "Volume (kg·reps)", data, borderColor: "#10b981", backgroundColor: "rgba(16,185,129,0.2)", tension: 0.3, fill: true }] },
+      options: { responsive: true, plugins: { legend: { labels: { color: "#cbd5e1" } } }, scales: { x: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }, y: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } } } },
+    });
+  }
+  const weightCanvas = document.getElementById("fitfat-weight-chart") as HTMLCanvasElement | null;
+  if (weightCanvas) {
+    const sorted = [...state.fitfat.bodyMetrics].sort((a: any, b: any) => a.date - b.date);
+    const labels = sorted.map((b: any) => new Date(b.date).toISOString().slice(0, 10));
+    const data = sorted.map((b: any) => b.weightKg);
+    fitfatCharts["weight"] = new Chart(weightCanvas, {
+      type: "line",
+      data: { labels, datasets: [{ label: "Weight (kg)", data, borderColor: "#f59e0b", backgroundColor: "rgba(245,158,11,0.2)", tension: 0.3, fill: true }] },
+      options: { responsive: true, plugins: { legend: { labels: { color: "#cbd5e1" } } }, scales: { x: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }, y: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } } } },
+    });
+  }
+  const mealsCanvas = document.getElementById("fitfat-meals-chart") as HTMLCanvasElement | null;
+  if (mealsCanvas) {
+    const calByDate: Record<string, number> = {};
+    for (const m of state.fitfat.meals) {
+      const d = new Date(m.eatenAt).toISOString().slice(0, 10);
+      calByDate[d] = (calByDate[d] || 0) + 300;
+    }
+    const labels = Object.keys(calByDate).sort().slice(-12);
+    const data = labels.map((k) => calByDate[k]);
+    fitfatCharts["meals"] = new Chart(mealsCanvas, {
+      type: "bar",
+      data: { labels, datasets: [{ label: "Meals count", data, backgroundColor: "rgba(139,92,246,0.6)", borderColor: "#8b5cf6", borderWidth: 1 }] },
+      options: { responsive: true, plugins: { legend: { labels: { color: "#cbd5e1" } } }, scales: { x: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }, y: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" }, beginAtZero: true } } },
+    });
+  }
+}
+
 // ---- URL functions ----
 
 async function loadUrls(): Promise<void> {
@@ -918,6 +1093,7 @@ function renderSidebar(): string {
     ["receipts", "Receipts", "💰"],
     ["notes", "Notes", "📝"],
     ["urls", "URLs", "🔗"],
+    ["fitfat", "FitFat", "📊"],
     ["settings", "Settings", "⚙️"],
   ];
 
@@ -973,6 +1149,8 @@ function renderContent(): string {
       return renderNotes();
     case "urls":
       return renderUrls();
+    case "fitfat":
+      return renderFitFat();
     case "settings":
       return renderSettings();
     default:
@@ -1259,6 +1437,50 @@ function handleClick(event: MouseEvent): void {
     }
     return;
   }
+
+  // ---- FitFat handlers ----
+  const fitfatRefresh = target.closest<HTMLElement>("[data-action='fitfat-refresh']");
+  if (fitfatRefresh) {
+    loadFitFat();
+    return;
+  }
+  const fitfatApplyWorkouts = target.closest<HTMLElement>("[data-action='fitfat-apply-workouts']");
+  if (fitfatApplyWorkouts) {
+    const inputs = document.querySelectorAll<HTMLInputElement>("[data-fitfat-filter='workoutsSince']");
+    if (inputs[0]) state.fitfat.filters.workoutsSince = inputs[0].value;
+    loadFitFat();
+    return;
+  }
+  const fitfatApplyBody = target.closest<HTMLElement>("[data-action='fitfat-apply-body']");
+  if (fitfatApplyBody) {
+    const inp = document.querySelector<HTMLInputElement>("[data-fitfat-filter='bodySince']");
+    if (inp) state.fitfat.filters.bodySince = inp.value;
+    loadFitFat();
+    return;
+  }
+  const fitfatApplyMeals = target.closest<HTMLElement>("[data-action='fitfat-apply-meals']");
+  if (fitfatApplyMeals) {
+    const inp = document.querySelector<HTMLInputElement>("[data-fitfat-filter='mealsSince']");
+    if (inp) state.fitfat.filters.mealsSince = inp.value;
+    loadFitFat();
+    return;
+  }
+  const copyQr = target.closest<HTMLElement>("[data-action='fitfat-copy-qr']");
+  if (copyQr) {
+    const payload = JSON.stringify({ url: resolveSyncUrl(state.fitfat.syncUrl), apiKey: state.fitfat.apiKey, version: 1 });
+    navigator.clipboard.writeText(payload).catch(() => {});
+    return;
+  }
+  const copyUrl = target.closest<HTMLElement>("[data-action='fitfat-copy-url']");
+  if (copyUrl) {
+    navigator.clipboard.writeText(resolveSyncUrl(state.fitfat.syncUrl)).catch(() => {});
+    return;
+  }
+  const copyKey = target.closest<HTMLElement>("[data-action='fitfat-copy-key']");
+  if (copyKey) {
+    navigator.clipboard.writeText(state.fitfat.apiKey).catch(() => {});
+    return;
+  }
 }
 
 function renderDashboard(): string {
@@ -1503,10 +1725,10 @@ function renderDatePicker(id: string, value: string): string {
       <div class="flex gap-2">
         <input type="text" id="${id}" readonly value="${escapeHtml(value)}"
           placeholder="YYYY-MM-DD"
-          class="datepicker-input w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500 cursor-pointer text-sm"
+          class="datepicker-input w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500 cursor-pointer"
           data-action="datepicker-toggle" />
         <button type="button" data-action="datepicker-toggle"
-          class="datepicker-toggle px-3 py-2 bg-slate-800 border border-slate-700 rounded-md text-slate-400 hover:text-slate-100 text-sm leading-none">
+          class="datepicker-toggle px-3 py-2 bg-slate-800 border border-slate-700 rounded-md text-slate-400 hover:text-slate-100 leading-none">
           &#128197;
         </button>
       </div>
@@ -1970,11 +2192,11 @@ function renderGoals(): string {
               <div class="space-y-2">
                 <div>
                   <label class="block text-xs font-medium text-slate-400 mb-1" for="goal-task-title">Task Title</label>
-                  <input type="text" id="goal-task-title" class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500 text-sm" placeholder="Task to add to this goal" />
+                  <input type="text" id="goal-task-title" class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500" placeholder="Task to add to this goal" />
                 </div>
                 <div>
                   <label class="block text-xs font-medium text-slate-400 mb-1" for="goal-task-desc">Description (optional)</label>
-                  <input type="text" id="goal-task-desc" class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500 text-sm" placeholder="Optional description" />
+                  <input type="text" id="goal-task-desc" class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500" placeholder="Optional description" />
                 </div>
                 <button class="button secondary text-sm" type="button" data-action="goal-add-task">+ Add Task</button>
               </div>
@@ -2140,6 +2362,86 @@ function renderUrlTags(tagsJson: string): string {
   }
 }
 
+function renderFitFat(): string {
+  const ff = state.fitfat;
+  let statusHtml = "";
+  if (ff.status === "loading") statusHtml = `<div class="rounded border border-slate-700 bg-slate-900/70 p-3 text-sm text-slate-300">Loading FitFat data from ${escapeHtml(resolveSyncUrl(ff.syncUrl))}...</div>`;
+  else if (ff.status === "error") statusHtml = `<div class="rounded border border-red-700 bg-red-900/30 p-3 text-sm text-red-300">${escapeHtml(ff.statusMessage)}</div>`;
+
+  const counts = ff.counts;
+  const countsHtml = counts
+    ? `<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <div class="bg-slate-900/50 p-4 rounded-lg border border-slate-800"><div class="text-xs text-slate-400">Workouts</div><div class="text-2xl font-semibold text-sky-400">${counts.workouts}</div></div>
+        <div class="bg-slate-900/50 p-4 rounded-lg border border-slate-800"><div class="text-xs text-slate-400">Meals</div><div class="text-2xl font-semibold text-emerald-400">${counts.meals}</div></div>
+        <div class="bg-slate-900/50 p-4 rounded-lg border border-slate-800"><div class="text-xs text-slate-400">Exercises</div><div class="text-2xl font-semibold text-amber-400">${counts.exercises}</div></div>
+        <div class="bg-slate-900/50 p-4 rounded-lg border border-slate-800"><div class="text-xs text-slate-400">Body Metrics</div><div class="text-2xl font-semibold text-violet-400">${counts.bodyMetrics}</div></div>
+      </div>`
+    : `<div class="text-sm text-slate-400 mb-4">No data yet — sync from FitFat mobile to see workouts, meals and weight.</div>`;
+
+  const qrHtml = ff.qrDataUrl
+    ? `<div class="bg-white p-2 rounded-lg inline-block"><img src="${ff.qrDataUrl}" alt="FitFat QR" class="w-44 h-44" /></div><div class="mt-2 text-xs text-slate-400 break-all max-w-[280px]">${escapeHtml(JSON.stringify({ url: resolveSyncUrl(ff.syncUrl), apiKey: ff.apiKey }))}</div><div class="mt-2 flex gap-2"><button class="button secondary text-xs" data-action="fitfat-copy-qr">Copy JSON</button><button class="button secondary text-xs" data-action="fitfat-copy-url">Copy URL</button></div>`
+    : `<div class="text-xs text-slate-400">Generating QR...</div>`;
+
+  return `
+    <section class="panel">
+      <div class="panel-header">
+        <h2 class="panel-title">FitFat</h2>
+        <p class="panel-subtitle text-slate-400">Visualize workouts, meals, weight synced from FitFat — via ${escapeHtml(resolveSyncUrl(ff.syncUrl))}</p>
+      </div>
+      <div class="panel-content space-y-6">
+        ${statusHtml}
+        <div class="flex gap-2">
+          <button class="button secondary text-sm" data-action="fitfat-refresh">↻ Refresh</button>
+          <button class="button secondary text-sm" data-view="settings">Settings → QR</button>
+        </div>
+        ${countsHtml}
+
+        <div class="bg-slate-900/50 p-4 rounded-lg border border-slate-800">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-sm font-medium text-slate-200">Workouts / week</h3>
+            <div class="flex items-center gap-2 text-xs"><input type="date" value="${escapeHtml(ff.filters.workoutsSince)}" data-fitfat-filter="workoutsSince" class="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs" /><button class="button secondary text-xs" data-action="fitfat-apply-workouts">Apply</button></div>
+          </div>
+          <canvas id="fitfat-workouts-chart" height="120"></canvas>
+        </div>
+
+        <div class="bg-slate-900/50 p-4 rounded-lg border border-slate-800">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-sm font-medium text-slate-200">Volume (kg·reps) over time</h3>
+            <div class="flex items-center gap-2 text-xs"><input type="date" value="${escapeHtml(ff.filters.workoutsSince)}" data-fitfat-filter="workoutsSince" class="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs" /><button class="button secondary text-xs" data-action="fitfat-apply-workouts">Apply</button></div>
+          </div>
+          <canvas id="fitfat-volume-chart" height="120"></canvas>
+        </div>
+
+        <div class="bg-slate-900/50 p-4 rounded-lg border border-slate-800">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-sm font-medium text-slate-200">Weight trend</h3>
+            <div class="flex items-center gap-2 text-xs"><input type="date" value="${escapeHtml(ff.filters.bodySince)}" data-fitfat-filter="bodySince" class="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs" /><button class="button secondary text-xs" data-action="fitfat-apply-body">Apply</button></div>
+          </div>
+          <canvas id="fitfat-weight-chart" height="120"></canvas>
+        </div>
+
+        <div class="bg-slate-900/50 p-4 rounded-lg border border-slate-800">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-sm font-medium text-slate-200">Meals</h3>
+            <div class="flex items-center gap-2 text-xs"><input type="date" value="${escapeHtml(ff.filters.mealsSince)}" data-fitfat-filter="mealsSince" class="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs" /><button class="button secondary text-xs" data-action="fitfat-apply-meals">Apply</button></div>
+          </div>
+          <canvas id="fitfat-meals-chart" height="120"></canvas>
+          <div class="mt-3 text-xs text-slate-400">${ff.meals.length} meals loaded${ff.meals.length ? ` — latest: ${escapeHtml(ff.meals[ff.meals.length - 1]?.name || "")}` : ""}</div>
+        </div>
+
+        <div class="bg-slate-900/50 p-4 rounded-lg border border-slate-800">
+          <h3 class="text-sm font-medium text-slate-200 mb-2">Pairing QR — URL + Auth Token</h3>
+          <p class="text-xs text-slate-400 mb-3">Scan with FitFat mobile to pair. Contains <code class="bg-slate-800 px-1 rounded">{"url","apiKey"}</code> for <code class="bg-slate-800 px-1 rounded">${escapeHtml(resolveSyncUrl(ff.syncUrl))}</code></p>
+          <div class="flex flex-col items-start gap-3">
+            ${qrHtml}
+            <div class="text-xs text-slate-500">API Key: <code class="bg-slate-800 px-1 rounded select-all">${escapeHtml(ff.apiKey)}</code> <button class="button secondary text-xs ml-2" data-action="fitfat-copy-key">Copy Key</button></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 // ---- Settings config form ----
 
 function renderSettings(): string {
@@ -2163,7 +2465,7 @@ function renderSettings(): string {
         <div>
           <label class="block text-sm font-medium text-slate-200 mb-1" for="cfg-${def.key}">${escapeHtml(def.label)}</label>
           <input type="text" id="cfg-${def.key}" data-config-key="${def.key}" value="${escapeHtml(fields[def.key] || "")}" placeholder="${escapeHtml(def.placeholder)}"
-            class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500 text-sm" />
+            class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-md focus:outline-none focus:border-slate-500" />
         </div>`,
     )
     .join("");
@@ -2199,6 +2501,16 @@ function renderSettings(): string {
             </button>
           </div>
         </div>
+
+        <div class="rounded border border-slate-800 bg-slate-900/30 p-4">
+          <h3 class="mb-3 text-sm font-medium text-slate-200">FitFat Sync — Pairing</h3>
+          <p class="mb-3 text-xs text-slate-400">Scan with FitFat mobile to pair. QR contains <code class="bg-slate-800 px-1 rounded">{"url","apiKey"}</code> for <code class="bg-slate-800 px-1 rounded">${escapeHtml(resolveSyncUrl(state.fitfat.syncUrl) || "http://127.0.0.1:3030")}</code></p>
+          <div class="flex flex-col items-start gap-3">
+            ${state.fitfat.qrDataUrl ? `<div class="bg-white p-2 rounded-lg inline-block"><img src="${state.fitfat.qrDataUrl}" alt="QR" class="w-44 h-44" /></div>` : `<div class="text-xs text-slate-400">QR will appear after visiting FitFat tab or <button class="button secondary text-xs ml-2" data-action="fitfat-refresh">Generate</button></div>`}
+            <div class="text-xs text-slate-500 break-all max-w-full">API Key: <code class="bg-slate-800 px-1 rounded select-all">${escapeHtml(state.fitfat.apiKey || "...")}</code> <button class="button secondary text-xs ml-2" data-action="fitfat-copy-key">Copy Key</button> <button class="button secondary text-xs" data-action="fitfat-copy-qr">Copy JSON</button></div>
+            <div class="text-xs text-slate-500 break-all">Payload: <code class="bg-slate-800 px-1 rounded">${escapeHtml(JSON.stringify({ url: resolveSyncUrl(state.fitfat.syncUrl), apiKey: state.fitfat.apiKey, version: 1 }))}</code></div>
+          </div>
+        </div>
       </div>
     </section>
   `;
@@ -2206,6 +2518,13 @@ function renderSettings(): string {
 
 function handleInput(event: Event): void {
   const target = event.target as HTMLElement;
+
+  if (target.hasAttribute("data-fitfat-filter")) {
+    const key = (target as HTMLElement).getAttribute("data-fitfat-filter");
+    if (key && key in state.fitfat.filters) {
+      (state.fitfat.filters as Record<string, string>)[key] = (target as HTMLInputElement).value;
+    }
+  }
 
   if (target.id === "note-title-input") {
     state.notes.editTitle = (target as HTMLInputElement).value;
@@ -2232,36 +2551,29 @@ window.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("click", handleClick);
   document.addEventListener("input", handleInput);
 
-  // Keyboard zoom shortcuts (Ctrl+/-, Ctrl+0, Ctrl+=)
-  document.addEventListener("keydown", async (e) => {
+  // Zoom via CSS custom property on :root — scales all rem units proportionally (no distortion)
+  // Ctrl+= / Ctrl+- to zoom in/out, Ctrl+0 to reset
+  document.addEventListener("keydown", (e) => {
     if (!e.ctrlKey && !e.metaKey) return;
     const target = e.target as HTMLElement;
-    // Don't zoom when typing in inputs
     if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) return;
 
-    try {
-      const webview = getCurrentWebview();
-      // Tauri v2 setZoom reads current zoom from the webview; we track it ourselves
-      // because the API doesn't expose a getter. Use a module-level variable.
-      const step = 0.1;
-      const minZoom = 0.5;
-      const maxZoom = 2.0;
+    const step = 0.1;
+    const minZoom = 0.5;
+    const maxZoom = 2.0;
 
-      if (e.key === "=" || e.key === "+") {
-        e.preventDefault();
-        _currentZoom = Math.min(maxZoom, _currentZoom + step);
-        await webview.setZoom(_currentZoom);
-      } else if (e.key === "-") {
-        e.preventDefault();
-        _currentZoom = Math.max(minZoom, _currentZoom - step);
-        await webview.setZoom(_currentZoom);
-      } else if (e.key === "0") {
-        e.preventDefault();
-        _currentZoom = 1.0;
-        await webview.setZoom(_currentZoom);
-      }
-    } catch {
-      // Silently ignore zoom errors (e.g., permission denied)
+    if (e.key === "=" || e.key === "+") {
+      e.preventDefault();
+      _currentZoom = Math.min(maxZoom, _currentZoom + step);
+      document.documentElement.style.setProperty("--zoom-level", String(_currentZoom));
+    } else if (e.key === "-") {
+      e.preventDefault();
+      _currentZoom = Math.max(minZoom, _currentZoom - step);
+      document.documentElement.style.setProperty("--zoom-level", String(_currentZoom));
+    } else if (e.key === "0") {
+      e.preventDefault();
+      _currentZoom = 1.0;
+      document.documentElement.style.setProperty("--zoom-level", "1");
     }
   });
 });

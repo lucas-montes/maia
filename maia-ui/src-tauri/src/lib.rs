@@ -223,7 +223,7 @@ fn get_sync_db_path() -> PathBuf {
     parent.join("fitfat_sync.db")
 }
 
-fn get_sync_api_key() -> String {
+fn get_sync_api_key_value() -> String {
     if let Ok(content) = fs::read_to_string("maia.json") {
         if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
             if let Some(key) = config.get("sync_api_key").and_then(|v| v.as_str()) {
@@ -247,6 +247,11 @@ fn get_sync_port(state: tauri::State<Mutex<SyncServerState>>) -> u16 {
 #[tauri::command]
 fn get_sync_url(state: tauri::State<Mutex<SyncServerState>>) -> String {
     state.lock().map(|s| s.url.clone()).unwrap_or_default()
+}
+
+#[tauri::command]
+fn get_sync_api_key() -> String {
+    get_sync_api_key_value()
 }
 
 /// Slugify a title for use as a filename.
@@ -1683,7 +1688,7 @@ pub fn run() {
     };
 
     let sync_db_path = get_sync_db_path();
-    let sync_api_key = get_sync_api_key();
+    let sync_api_key = get_sync_api_key_value();
     let sync_config = SyncConfig::new(sync_db_path, sync_api_key);
     let sync_state = Mutex::new(SyncServerState { port: 0, url: String::new() });
 
@@ -1716,6 +1721,7 @@ pub fn run() {
             save_config,
             get_sync_port,
             get_sync_url,
+            get_sync_api_key,
             list_notes,
             read_note,
             save_note,

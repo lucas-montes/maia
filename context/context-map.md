@@ -35,6 +35,7 @@ This file indexes all durable context artifacts for the Maia project.
 | `kb-chrome-extension` | proposed | Wire Chrome → native host → daemon → SQLite pipeline |
 | `kb-search` | proposed | FTS5 full-text search, vector embeddings, knowledge graph |
 | `fitfat-sync-server` | completed | Standalone `sync-server` crate (Axum+rusqlite) + full FitFat OpenAPI + Tauri 0.0.0.0:3030 deterministic LAN embedding |
+| `fitfat-visualization` | completed | HTTP-leveraged `GET /workouts|/meals|/body-metrics` + Chart.js 4 canvases + per-chart filters + Settings QR auth token |
 
 ## Decisions
 | Decision | Date | Summary |
