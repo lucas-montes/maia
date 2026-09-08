@@ -140,6 +140,10 @@ interface FitFatState {
   lanUrl: string;
   apiKey: string;
   qrDataUrl: string | null;
+  serverHealth: "checking" | "online" | "offline";
+  lastHealthCheck: string;
+  diagnostics: any | null;
+  logs: string[];
 }
 
 interface AppState {
@@ -284,6 +288,10 @@ const defaultAppState = (): AppState => ({
     lanUrl: "",
     apiKey: "",
     qrDataUrl: null,
+    serverHealth: "checking",
+    lastHealthCheck: "",
+    diagnostics: null,
+    logs: [],
   },
 });
 
@@ -291,7 +299,14 @@ let state: AppState = defaultAppState();
 let fitfatCharts: Record<string, Chart> = {};
 
 function setView(view: ViewId): void {
+  if (fitfatHealthInterval) { clearInterval(fitfatHealthInterval); fitfatHealthInterval = null; }
   state.view = view;
+  if (view === "fitfat") {
+    loadFitFat();
+    checkServerHealth();
+    loadDiagnostics();
+    fitfatHealthInterval = window.setInterval(() => { checkServerHealth(); loadDiagnostics(); }, 10000);
+  }
   if (view === "settings") {
     loadConfig();
     if (!state.fitfat.lanUrl) loadFitFat();
@@ -310,8 +325,6 @@ function setView(view: ViewId): void {
     loadUrls();
   } else if (view === "dashboard") {
     loadDashboardCounts();
-  } else if (view === "fitfat") {
-    loadFitFat();
   }
   render();
 }
@@ -921,6 +934,75 @@ async function generateFitFatQR(): Promise<void> {
   }
 }
 
+let fitfatHealthInterval: number | null = null;
+
+async function checkServerHealth(): Promise<void> {
+  const localUrl = "http://127.0.0.1:3030/health";
+  const lanUrl = state.fitfat.lanUrl ? `${state.fitfat.lanUrl}/health` : null;
+  try {
+    const res = await fetch(localUrl);
+    if (res.ok) {
+      state.fitfat.serverHealth = "online";
+      state.fitfat.lastHealthCheck = new Date().toLocaleTimeString();
+      if (lanUrl) {
+        try {
+          const lanRes = await fetch(lanUrl);
+          if (!lanRes.ok) state.fitfat.serverHealth = "online";
+        } catch {}
+      }
+    } else {
+      state.fitfat.serverHealth = "offline";
+    }
+  } catch {
+    state.fitfat.serverHealth = "offline";
+  }
+  if (state.view === "fitfat") render();
+}
+
+async function loadDiagnostics(): Promise<void> {
+  try {
+    const [diag, logs] = await Promise.all([
+      invoke<any>("get_server_diagnostics"),
+      invoke<string[]>("get_server_logs", { limit: 50 }).catch(() => [] as string[]),
+    ]);
+    state.fitfat.diagnostics = diag;
+    state.fitfat.logs = logs;
+  } catch {
+    state.fitfat.diagnostics = null;
+    state.fitfat.logs = [];
+  }
+  if (state.view === "fitfat") render();
+}
+
+async function testFitFatConnection(): Promise<void> {
+  state.fitfat.statusMessage = "Testing connection...";
+  render();
+  const url = resolveSyncUrl(state.fitfat.syncUrl);
+  const lanUrl = state.fitfat.lanUrl;
+  const results: string[] = [];
+  for (const [name, base] of [["local", url], ["lan", lanUrl]] as const) {
+    if (!base) continue;
+    try {
+      const h = await fetch(`${base}/health`);
+      results.push(`${name} /health: ${h.ok ? "✓ " + h.status : "✗ " + h.status}`);
+    } catch (e) {
+      results.push(`${name} /health: ✗ unreachable (${e})`);
+    }
+    try {
+      const r = await fetch(`${base}/exercises?since=0`, { headers: { Authorization: `Bearer ${state.fitfat.apiKey}` } });
+      results.push(`${name} /exercises: ${r.ok ? "✓ " + r.status : "✗ " + r.status}`);
+    } catch (e) {
+      results.push(`${name} /exercises: ✗ unreachable (${e})`);
+    }
+  }
+  try {
+    const logs = await invoke<string[]>("get_server_logs", { limit: 5 });
+    results.push(`logs: ${logs.length} entries`);
+  } catch {}
+  state.fitfat.statusMessage = results.join(" | ");
+  render();
+}
+
 function renderFitFatCharts(): void {
   Object.values(fitfatCharts).forEach((c) => { try { c.destroy(); } catch {} });
   fitfatCharts = {};
@@ -1487,6 +1569,22 @@ function handleClick(event: MouseEvent): void {
   const copyKey = target.closest<HTMLElement>("[data-action='fitfat-copy-key']");
   if (copyKey) {
     navigator.clipboard.writeText(state.fitfat.apiKey).catch(() => {});
+    return;
+  }
+  const testConn = target.closest<HTMLElement>("[data-action='fitfat-test-connection']");
+  if (testConn) {
+    testFitFatConnection();
+    return;
+  }
+  const copyCurl = target.closest<HTMLElement>("[data-action='fitfat-copy-curl']");
+  if (copyCurl) {
+    const cmd = `curl -v -H "Authorization: Bearer ${state.fitfat.apiKey}" ${state.fitfat.lanUrl || resolveSyncUrl(state.fitfat.syncUrl)}/health`;
+    navigator.clipboard.writeText(cmd).catch(() => {});
+    return;
+  }
+  const showLogs = target.closest<HTMLElement>("[data-action='fitfat-show-logs']");
+  if (showLogs) {
+    loadDiagnostics();
     return;
   }
 }
@@ -2392,6 +2490,27 @@ function renderFitFat(): string {
     : `<div class="text-xs text-slate-400">Generating QR...</div>`;
 
   const lanDisplay = ff.lanUrl || resolveSyncUrl(ff.syncUrl);
+  const healthColor = ff.serverHealth === "online" ? "text-emerald-400" : ff.serverHealth === "offline" ? "text-red-400" : "text-slate-400";
+  const healthDot = ff.serverHealth === "online" ? "●" : ff.serverHealth === "offline" ? "○" : "◐";
+  const diag = ff.diagnostics;
+  const healthHtml = `
+    <div class="bg-slate-900/50 p-4 rounded-lg border border-slate-800">
+      <div class="flex items-center justify-between mb-2">
+        <h3 class="text-sm font-medium text-slate-200">Server Health</h3>
+        <span class="text-sm ${healthColor}">${healthDot} ${ff.serverHealth === "online" ? "Online" : ff.serverHealth === "offline" ? "Offline" : "Checking"} ${ff.lastHealthCheck ? `— ${escapeHtml(ff.lastHealthCheck)}` : ""}</span>
+      </div>
+      <div class="text-xs text-slate-400 mb-2">Bind: <code class="bg-slate-800 px-1 rounded">0.0.0.0:3030</code> • LAN: <code class="bg-slate-800 px-1 rounded">${escapeHtml(lanDisplay)}</code> • Local: <code class="bg-slate-800 px-1 rounded">${escapeHtml(resolveSyncUrl(ff.syncUrl))}</code></div>
+      ${diag ? `<div class="text-xs text-slate-400 mb-2">Port: ${diag.port} • Listening: ${diag.isListening ? "✓" : "✗"} • LAN IP: ${escapeHtml(diag.lanIp)} • Key: ${escapeHtml(diag.apiKeyMasked)}</div>` : ""}
+      <div class="flex flex-wrap gap-2 mb-3">
+        <button class="button secondary text-xs" data-action="fitfat-test-connection">Test Connection</button>
+        <button class="button secondary text-xs" data-action="fitfat-copy-curl">Copy curl</button>
+        <button class="button secondary text-xs" data-action="fitfat-show-logs">Show Logs (${ff.logs.length})</button>
+      </div>
+      ${ff.statusMessage ? `<div class="rounded border border-slate-700 bg-slate-900/70 p-2 text-xs text-slate-300 break-all">${escapeHtml(ff.statusMessage)}</div>` : ""}
+      ${ff.logs.length ? `<details class="mt-3"><summary class="text-xs text-slate-400 cursor-pointer">Recent requests (${ff.logs.length})</summary><pre class="mt-2 max-h-40 overflow-auto bg-slate-950 p-2 rounded text-xs text-slate-300 border border-slate-800">${escapeHtml(ff.logs.slice(-10).join("\n"))}</pre></details>` : ""}
+      <div class="mt-3 text-xs text-slate-500">If mobile can't reach: 1) Phone on same Wi-Fi as ${escapeHtml(diag?.lanIp || ff.lanUrl || "10.229.34.33")} • 2) <code class="bg-slate-800 px-1 rounded">sudo ufw allow 3030/tcp</code> • 3) <code class="bg-slate-800 px-1 rounded">curl -v http://${escapeHtml((diag?.lanIp || "10.229.34.33"))}:3030/health</code></div>
+    </div>
+  `;
   return `
     <section class="panel">
       <div class="panel-header">
@@ -2400,6 +2519,7 @@ function renderFitFat(): string {
       </div>
       <div class="panel-content space-y-6">
         ${statusHtml}
+        ${healthHtml}
         <div class="flex gap-2">
           <button class="button secondary text-sm" data-action="fitfat-refresh">↻ Refresh</button>
           <button class="button secondary text-sm" data-view="settings">Settings → QR</button>

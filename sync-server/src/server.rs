@@ -5,12 +5,13 @@ use axum::http::Method;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::{auth, config::Config, db, handlers::health};
+use crate::{auth, config::Config, db, handlers::health, logs};
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub db: db::DbPool,
+    pub logs: logs::LogBuffer,
 }
 
 pub fn create_router(state: AppState) -> Router {
@@ -43,18 +44,51 @@ pub fn create_router(state: AppState) -> Router {
         .route("/backup/latest", get(crate::handlers::backup::get_backup))
         .route("/media/:id", get(crate::handlers::media::get_media))
         .route("/exercises/:id", get(crate::handlers::media::get_media))
+        .layer(middleware::from_fn_with_state(state.clone(), log_requests))
         .layer(middleware::from_fn_with_state(state.clone(), auth::bearer_auth))
         .layer(cors)
         .with_state(state)
 }
 
+async fn log_requests(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::http::Request<axum::body::Body>,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let auth_present = req.headers().contains_key(axum::http::header::AUTHORIZATION);
+    let auth_hint = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            if s.len() > 12 {
+                format!("{}...", &s[..12])
+            } else {
+                "present".to_string()
+            }
+        })
+        .unwrap_or_else(|| "none".to_string());
+    let start = std::time::Instant::now();
+    let res = next.run(req).await;
+    let elapsed = start.elapsed().as_millis();
+    let status = res.status().as_u16();
+    let line = format!("{} {} {} {}ms auth={} -> {}", method, path, status, elapsed, auth_hint, if auth_present { "present" } else { "none" });
+    tracing::info!("{}", line);
+    logs::push_log(&state.logs, line);
+    res
+}
+
 pub async fn start_server(config: Config) -> anyhow::Result<(u16, JoinHandle<()>)> {
+    let _ = tracing_subscriber::fmt::try_init();
     let db = db::init_db(&config.db_path)?;
     let listener = TcpListener::bind(&config.bind_addr).await?;
     let port = listener.local_addr()?.port();
     let state = AppState {
         config: Arc::new(config),
         db,
+        logs: logs::new_buffer(200),
     };
     let router = create_router(state);
     let handle = tokio::spawn(async move {
@@ -76,6 +110,7 @@ pub async fn start_test_server_with_db(db: db::DbPool) -> (u16, JoinHandle<()>) 
     let state = AppState {
         config: Arc::new(config),
         db,
+        logs: logs::new_buffer(200),
     };
     let router = create_router(state);
     let handle = tokio::spawn(async move {

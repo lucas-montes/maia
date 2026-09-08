@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod handlers;
+pub mod logs;
 pub mod server;
 
 pub use config::Config;

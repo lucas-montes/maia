@@ -280,6 +280,35 @@ fn get_sync_lan_url(state: tauri::State<Mutex<SyncServerState>>) -> String {
     format!("http://{}:{}", get_lan_ip_value(), port)
 }
 
+#[tauri::command]
+fn get_server_logs(limit: Option<usize>) -> Vec<String> {
+    sync_server::logs::tail_global(limit.unwrap_or(50))
+}
+
+#[tauri::command]
+fn get_server_diagnostics(state: tauri::State<Mutex<SyncServerState>>) -> serde_json::Value {
+    let port = state.lock().map(|s| s.port).unwrap_or(0);
+    let lan_ip = get_lan_ip_value();
+    let lan_url = format!("http://{}:{}", lan_ip, port);
+    let bind_addr = "0.0.0.0:3030".to_string();
+    let is_listening = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok();
+    let api_key = get_sync_api_key_value();
+    let masked = if api_key.len() > 8 {
+        format!("{}...{}", &api_key[..4], &api_key[api_key.len() - 4..])
+    } else {
+        "***".to_string()
+    };
+    serde_json::json!({
+        "port": port,
+        "lanUrl": lan_url,
+        "bindAddr": bind_addr,
+        "isListening": is_listening,
+        "lanIp": lan_ip,
+        "apiKeyMasked": masked,
+        "hasApiKey": !api_key.is_empty()
+    })
+}
+
 /// Slugify a title for use as a filename.
 fn slugify(title: &str) -> String {
     let slug: String = title
@@ -1750,6 +1779,8 @@ pub fn run() {
             get_sync_api_key,
             get_lan_ip,
             get_sync_lan_url,
+            get_server_logs,
+            get_server_diagnostics,
             list_notes,
             read_note,
             save_note,
