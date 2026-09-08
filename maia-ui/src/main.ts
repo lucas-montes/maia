@@ -137,6 +137,7 @@ interface FitFatState {
   exercises: any[];
   filters: { workoutsSince: string; mealsSince: string; bodySince: string };
   syncUrl: string;
+  lanUrl: string;
   apiKey: string;
   qrDataUrl: string | null;
 }
@@ -280,6 +281,7 @@ const defaultAppState = (): AppState => ({
     exercises: [],
     filters: { workoutsSince: "", mealsSince: "", bodySince: "" },
     syncUrl: "",
+    lanUrl: "",
     apiKey: "",
     qrDataUrl: null,
   },
@@ -292,6 +294,7 @@ function setView(view: ViewId): void {
   state.view = view;
   if (view === "settings") {
     loadConfig();
+    if (!state.fitfat.lanUrl) loadFitFat();
   } else if (view === "notes") {
     loadNotes();
   } else if (view === "receipts") {
@@ -868,11 +871,13 @@ async function loadFitFat(): Promise<void> {
   state.fitfat.statusMessage = "";
   render();
   try {
-    const [url, apiKey] = await Promise.all([
+    const [url, lanUrl, apiKey] = await Promise.all([
       invoke<string>("get_sync_url"),
+      invoke<string>("get_sync_lan_url").catch(() => "http://127.0.0.1:3030"),
       invoke<string>("get_sync_api_key"),
     ]);
     state.fitfat.syncUrl = url || "http://127.0.0.1:3030";
+    state.fitfat.lanUrl = lanUrl || state.fitfat.syncUrl;
     state.fitfat.apiKey = apiKey || "fitfat-sync-key";
     const workoutsSince = dateStrToSince(state.fitfat.filters.workoutsSince);
     const mealsSince = dateStrToSince(state.fitfat.filters.mealsSince);
@@ -906,8 +911,9 @@ async function loadFitFat(): Promise<void> {
 }
 
 async function generateFitFatQR(): Promise<void> {
-  if (!state.fitfat.apiKey || !state.fitfat.syncUrl) return;
-  const payload = JSON.stringify({ url: resolveSyncUrl(state.fitfat.syncUrl), apiKey: state.fitfat.apiKey, version: 1 });
+  const urlForQR = state.fitfat.lanUrl || resolveSyncUrl(state.fitfat.syncUrl);
+  if (!state.fitfat.apiKey || !urlForQR) return;
+  const payload = JSON.stringify({ url: urlForQR, apiKey: state.fitfat.apiKey, version: 1 });
   try {
     state.fitfat.qrDataUrl = await QRCode.toDataURL(payload, { width: 180, margin: 1 });
   } catch {
@@ -1467,13 +1473,15 @@ function handleClick(event: MouseEvent): void {
   }
   const copyQr = target.closest<HTMLElement>("[data-action='fitfat-copy-qr']");
   if (copyQr) {
-    const payload = JSON.stringify({ url: resolveSyncUrl(state.fitfat.syncUrl), apiKey: state.fitfat.apiKey, version: 1 });
+    const urlForQR = state.fitfat.lanUrl || resolveSyncUrl(state.fitfat.syncUrl);
+    const payload = JSON.stringify({ url: urlForQR, apiKey: state.fitfat.apiKey, version: 1 });
     navigator.clipboard.writeText(payload).catch(() => {});
     return;
   }
   const copyUrl = target.closest<HTMLElement>("[data-action='fitfat-copy-url']");
   if (copyUrl) {
-    navigator.clipboard.writeText(resolveSyncUrl(state.fitfat.syncUrl)).catch(() => {});
+    const urlForQR = state.fitfat.lanUrl || resolveSyncUrl(state.fitfat.syncUrl);
+    navigator.clipboard.writeText(urlForQR).catch(() => {});
     return;
   }
   const copyKey = target.closest<HTMLElement>("[data-action='fitfat-copy-key']");
@@ -2378,15 +2386,17 @@ function renderFitFat(): string {
       </div>`
     : `<div class="text-sm text-slate-400 mb-4">No data yet — sync from FitFat mobile to see workouts, meals and weight.</div>`;
 
+  const displayUrl = ff.lanUrl || resolveSyncUrl(ff.syncUrl);
   const qrHtml = ff.qrDataUrl
-    ? `<div class="bg-white p-2 rounded-lg inline-block"><img src="${ff.qrDataUrl}" alt="FitFat QR" class="w-44 h-44" /></div><div class="mt-2 text-xs text-slate-400 break-all max-w-[280px]">${escapeHtml(JSON.stringify({ url: resolveSyncUrl(ff.syncUrl), apiKey: ff.apiKey }))}</div><div class="mt-2 flex gap-2"><button class="button secondary text-xs" data-action="fitfat-copy-qr">Copy JSON</button><button class="button secondary text-xs" data-action="fitfat-copy-url">Copy URL</button></div>`
+    ? `<div class="bg-white p-2 rounded-lg inline-block"><img src="${ff.qrDataUrl}" alt="FitFat QR" class="w-44 h-44" /></div><div class="mt-2 text-xs text-slate-400 break-all max-w-[280px]">${escapeHtml(JSON.stringify({ url: displayUrl, apiKey: ff.apiKey }))}</div><div class="mt-2 flex gap-2"><button class="button secondary text-xs" data-action="fitfat-copy-qr">Copy JSON</button><button class="button secondary text-xs" data-action="fitfat-copy-url">Copy URL</button></div><div class="mt-1 text-xs text-slate-500">LAN IP: ${escapeHtml(displayUrl)} ${displayUrl.includes("127.0.0.1") ? "(offline — connect to Wi-Fi)" : ""}</div>`
     : `<div class="text-xs text-slate-400">Generating QR...</div>`;
 
+  const lanDisplay = ff.lanUrl || resolveSyncUrl(ff.syncUrl);
   return `
     <section class="panel">
       <div class="panel-header">
         <h2 class="panel-title">FitFat</h2>
-        <p class="panel-subtitle text-slate-400">Visualize workouts, meals, weight synced from FitFat — via ${escapeHtml(resolveSyncUrl(ff.syncUrl))}</p>
+        <p class="panel-subtitle text-slate-400">Visualize workouts, meals, weight synced from FitFat — via ${escapeHtml(lanDisplay)}</p>
       </div>
       <div class="panel-content space-y-6">
         ${statusHtml}
@@ -2504,11 +2514,12 @@ function renderSettings(): string {
 
         <div class="rounded border border-slate-800 bg-slate-900/30 p-4">
           <h3 class="mb-3 text-sm font-medium text-slate-200">FitFat Sync — Pairing</h3>
-          <p class="mb-3 text-xs text-slate-400">Scan with FitFat mobile to pair. QR contains <code class="bg-slate-800 px-1 rounded">{"url","apiKey"}</code> for <code class="bg-slate-800 px-1 rounded">${escapeHtml(resolveSyncUrl(state.fitfat.syncUrl) || "http://127.0.0.1:3030")}</code></p>
+          <p class="mb-3 text-xs text-slate-400">Scan with FitFat mobile to pair. QR contains <code class="bg-slate-800 px-1 rounded">{"url","apiKey"}</code> for <code class="bg-slate-800 px-1 rounded">${escapeHtml(state.fitfat.lanUrl || resolveSyncUrl(state.fitfat.syncUrl) || "http://127.0.0.1:3030")}</code></p>
           <div class="flex flex-col items-start gap-3">
             ${state.fitfat.qrDataUrl ? `<div class="bg-white p-2 rounded-lg inline-block"><img src="${state.fitfat.qrDataUrl}" alt="QR" class="w-44 h-44" /></div>` : `<div class="text-xs text-slate-400">QR will appear after visiting FitFat tab or <button class="button secondary text-xs ml-2" data-action="fitfat-refresh">Generate</button></div>`}
             <div class="text-xs text-slate-500 break-all max-w-full">API Key: <code class="bg-slate-800 px-1 rounded select-all">${escapeHtml(state.fitfat.apiKey || "...")}</code> <button class="button secondary text-xs ml-2" data-action="fitfat-copy-key">Copy Key</button> <button class="button secondary text-xs" data-action="fitfat-copy-qr">Copy JSON</button></div>
-            <div class="text-xs text-slate-500 break-all">Payload: <code class="bg-slate-800 px-1 rounded">${escapeHtml(JSON.stringify({ url: resolveSyncUrl(state.fitfat.syncUrl), apiKey: state.fitfat.apiKey, version: 1 }))}</code></div>
+            <div class="text-xs text-slate-500 break-all">Payload: <code class="bg-slate-800 px-1 rounded">${escapeHtml(JSON.stringify({ url: state.fitfat.lanUrl || resolveSyncUrl(state.fitfat.syncUrl), apiKey: state.fitfat.apiKey, version: 1 }))}</code></div>
+            ${state.fitfat.lanUrl && state.fitfat.lanUrl.includes("127.0.0.1") ? `<div class="text-xs text-amber-400">Offline — connect to Wi-Fi for LAN IP (showing loopback)</div>` : ""}
           </div>
         </div>
       </div>

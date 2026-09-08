@@ -1,4 +1,5 @@
 use std::fs;
+use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -252,6 +253,31 @@ fn get_sync_url(state: tauri::State<Mutex<SyncServerState>>) -> String {
 #[tauri::command]
 fn get_sync_api_key() -> String {
     get_sync_api_key_value()
+}
+
+fn get_lan_ip_value() -> String {
+    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                let ip = addr.ip();
+                if !ip.is_loopback() && ip.is_ipv4() {
+                    return ip.to_string();
+                }
+            }
+        }
+    }
+    "127.0.0.1".to_string()
+}
+
+#[tauri::command]
+fn get_lan_ip() -> String {
+    get_lan_ip_value()
+}
+
+#[tauri::command]
+fn get_sync_lan_url(state: tauri::State<Mutex<SyncServerState>>) -> String {
+    let port = state.lock().map(|s| s.port).unwrap_or(3030);
+    format!("http://{}:{}", get_lan_ip_value(), port)
 }
 
 /// Slugify a title for use as a filename.
@@ -1722,6 +1748,8 @@ pub fn run() {
             get_sync_port,
             get_sync_url,
             get_sync_api_key,
+            get_lan_ip,
+            get_sync_lan_url,
             list_notes,
             read_note,
             save_note,
