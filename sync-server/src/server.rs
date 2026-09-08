@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
-use axum::{http::HeaderName, middleware, routing::get, Router};
+use axum::{extract::ConnectInfo, http::HeaderName, middleware, routing::get, Router};
 use axum::http::Method;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tower_http::cors::{Any, CorsLayer};
@@ -52,11 +52,21 @@ pub fn create_router(state: AppState) -> Router {
 
 async fn log_requests(
     axum::extract::State(state): axum::extract::State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     req: axum::http::Request<axum::body::Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+    let peer = connect_info
+        .map(|ci| ci.0.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let is_local = peer == "127.0.0.1" || peer == "::1";
+    let peer_label = if is_local {
+        format!("{} (local)", peer)
+    } else {
+        peer.clone()
+    };
     let auth_present = req.headers().contains_key(axum::http::header::AUTHORIZATION);
     let auth_hint = req
         .headers()
@@ -74,7 +84,16 @@ async fn log_requests(
     let res = next.run(req).await;
     let elapsed = start.elapsed().as_millis();
     let status = res.status().as_u16();
-    let line = format!("{} {} {} {}ms auth={} -> {}", method, path, status, elapsed, auth_hint, if auth_present { "present" } else { "none" });
+    let line = format!(
+        "{} {} from {} {}ms auth={} -> {} [{}]",
+        method,
+        path,
+        peer_label,
+        elapsed,
+        auth_hint,
+        if auth_present { "present" } else { "none" },
+        status
+    );
     tracing::info!("{}", line);
     logs::push_log(&state.logs, line);
     res
@@ -92,7 +111,12 @@ pub async fn start_server(config: Config) -> anyhow::Result<(u16, JoinHandle<()>
     };
     let router = create_router(state);
     let handle = tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     Ok((port, handle))
 }
@@ -114,7 +138,12 @@ pub async fn start_test_server_with_db(db: db::DbPool) -> (u16, JoinHandle<()>) 
     };
     let router = create_router(state);
     let handle = tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     (port, handle)
 }
