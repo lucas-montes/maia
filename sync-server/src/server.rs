@@ -29,6 +29,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/protected", get(|| async { "protected ok" }))
         .route("/exercises", get(crate::handlers::pull::pull_exercises))
         .route("/ingredients", get(crate::handlers::pull::pull_ingredients).post(crate::handlers::push::push_ingredient))
+        .route("/ingredients/lookup", get(crate::handlers::lookup::lookup_ingredient))
+        .route("/ingredients/import-from-barcode", axum::routing::post(crate::handlers::lookup::import_from_barcode))
         .route("/fx-rates", get(crate::handlers::pull::pull_fx_rates))
         .route("/workouts", get(crate::handlers::read::pull_workouts).post(crate::handlers::push::push_workouts))
         .route("/templates", axum::routing::post(crate::handlers::push::push_templates))

@@ -4,6 +4,7 @@ pub mod db;
 pub mod error;
 pub mod handlers;
 pub mod logs;
+pub mod openfoodfacts;
 pub mod server;
 
 pub use config::Config;
@@ -180,6 +181,51 @@ mod tests {
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["items"].as_array().unwrap().len(), 1);
         assert_eq!(body["items"][0]["code"], "GBP");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn lookup_local_hit_and_invalid() {
+        use crate::db;
+        let pool = db::init_memory().unwrap();
+        {
+            let conn = pool.lock().unwrap();
+            conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, barcode, created_at, updated_at) VALUES ('i1','Oats',100,10,20,5,'3017620422003',1000,1000)", []).unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+
+        let resp = client
+            .get(format!("{base}/ingredients/lookup?barcode=3017620422003"))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["source"], "local");
+        assert_eq!(body["ingredient"]["barcode"], "3017620422003");
+        assert_eq!(
+            body["openfoodUrl"],
+            "https://world.openfoodfacts.org/product/3017620422003"
+        );
+
+        let resp = client
+            .get(format!("{base}/ingredients/lookup?barcode=abc"))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+
+        let resp = client
+            .get(format!("{base}/ingredients/lookup?barcode=3017620422003"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+
         handle.abort();
     }
 
