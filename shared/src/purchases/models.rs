@@ -9,10 +9,8 @@ use crate::{
     purchases::schema,
 };
 
-#[derive(Debug, Serialize, Deserialize, Crud)]
-#[table_name = "receipts_metadata"]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ReceiptMetadata<'a> {
-    #[skip_crud]
     id: Option<i64>,
     receipt_id: i64,
     image: Cow<'a, str>,
@@ -56,10 +54,8 @@ impl From<schema::Receipt> for Receipt {
 }
 
 /// The purcase base model representing an entry in a receipt
-#[derive(Debug, Serialize, Deserialize, Crud)]
-#[table_name = "purchases"]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Purchase {
-    #[skip_crud]
     id: Option<i64>,
     aliment_id: Option<i64>,
     product_name: String,

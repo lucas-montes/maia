@@ -119,93 +119,36 @@ struct CommandResult<T: Serialize> {
 
 fn init_database(db_path: &str) -> Result<Connection, String> {
     let conn = Connection::open(db_path).map_err(|e| format!("Failed to open database: {e}"))?;
-
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS notes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
-            path TEXT NOT NULL UNIQUE,
-            metadata TEXT,
-            tags TEXT DEFAULT '[]',
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_notes_title ON notes(title);
-
-        CREATE TABLE IF NOT EXISTS receipts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            receipt_id TEXT,
-            original_path TEXT NOT NULL,
-            current_path TEXT NOT NULL,
-            archived_path TEXT,
-            status TEXT DEFAULT 'pending',
-            parsed_json_path TEXT,
-            merchant TEXT,
-            total TEXT,
-            date TEXT,
-            category TEXT,
-            tags TEXT,
-            checksum TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            processed_at TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_receipts_receipt_id ON receipts(receipt_id);
-
-        CREATE TABLE IF NOT EXISTS goals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            description TEXT,
-            status TEXT DEFAULT 'active',
-            deadline TEXT,
-            progress REAL DEFAULT 0.0,
-            metadata TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            goal_id INTEGER REFERENCES goals(id) ON DELETE SET NULL,
-            title TEXT NOT NULL,
-            description TEXT,
-            due_date TEXT,
-            priority TEXT DEFAULT 'medium',
-            tags TEXT DEFAULT '[]',
-            order_index INTEGER DEFAULT 0,
-            completed_at TEXT,
-            metadata TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_tasks_goal ON tasks(goal_id);
-        CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(due_date);
-
-        CREATE TABLE IF NOT EXISTS urls (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
-            url TEXT NOT NULL,
-            source TEXT,
-            tags TEXT DEFAULT '[]',
-            is_new INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_urls_url ON urls(url);
-        CREATE INDEX IF NOT EXISTS idx_urls_is_new ON urls(is_new);",
-    )
-    .map_err(|e| format!("Failed to create schema: {e}"))?;
-
+    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
+        .map_err(|e| format!("Failed to set pragmas: {e}"))?;
+    sync_server::db::create_schema(&conn).map_err(|e| format!("Failed to create sync schema: {e}"))?;
     Ok(conn)
 }
 
 fn get_database_path() -> String {
-    // Try to read database path from maia.json, fall back to "maia.db"
-    if let Ok(content) = fs::read_to_string("maia.json") {
-        if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(db) = config.get("database").and_then(|v| v.as_str()) {
-                return db.to_string();
+    for candidate in ["maia.json", "../../maia.json", "../maia.json"] {
+        if let Ok(content) = fs::read_to_string(candidate) {
+            if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(db) = config.get("database").and_then(|v| v.as_str()) {
+                    let p = PathBuf::from(db);
+                    if p.is_absolute() { return p.to_string_lossy().to_string(); }
+                    if let Some(parent) = PathBuf::from(candidate).parent() {
+                        return parent.join(p).to_string_lossy().to_string();
+                    }
+                    return db.to_string();
+                }
             }
         }
     }
+    for candidate in ["../../maia.db", "maia.db"] {
+        let p = PathBuf::from(candidate);
+        if p.exists() {
+            if let Ok(canon) = p.canonicalize() { return canon.to_string_lossy().to_string(); }
+            return p.to_string_lossy().to_string();
+        }
+    }
+    let proj = PathBuf::from("../../maia.db");
+    if let Ok(canon) = proj.canonicalize() { return canon.to_string_lossy().to_string(); }
     "maia.db".to_string()
 }
 
@@ -218,10 +161,7 @@ fn get_notes_dir() -> PathBuf {
 }
 
 fn get_sync_db_path() -> PathBuf {
-    let db_path = get_database_path();
-    let p = PathBuf::from(&db_path);
-    let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
-    parent.join("fitfat_sync.db")
+    PathBuf::from(get_database_path())
 }
 
 fn get_sync_api_key_value() -> String {
@@ -343,56 +283,11 @@ fn generate_note_path(notes_dir: &PathBuf, title: &str) -> PathBuf {
 // ---- Tauri commands ----
 
 #[tauri::command]
-fn list_notes(state: tauri::State<AppState>) -> CommandResult<Vec<Note>> {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
-    };
-
-    let mut stmt = match conn.prepare(
-        "SELECT id, title, path, tags, created_at, updated_at FROM notes ORDER BY updated_at DESC",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Query error: {e}")),
-            };
-        }
-    };
-
-    let notes: Vec<Note> = match stmt.query_map([], |row| {
-        Ok(Note {
-            id: row.get(0)?,
-            title: row.get::<_, String>(1).unwrap_or_default(),
-            path: row.get(2)?,
-            tags: row.get::<_, String>(3).unwrap_or_else(|_| "[]".to_string()),
-            created_at: row.get::<_, String>(4).unwrap_or_default(),
-            updated_at: row.get::<_, String>(5).unwrap_or_default(),
-        })
-    }) {
-        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Query error: {e}")),
-            };
-        }
-    };
-
-    CommandResult {
-        success: true,
-        data: Some(notes),
-        error: None,
-    }
+fn list_notes(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    let mut stmt = match conn.prepare("SELECT id, title, body, created_at, updated_at FROM notes WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 500") { Ok(s)=>s, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?,"body":r.get::<_,String>(2)?,"createdAt":r.get::<_,i64>(3)?,"updatedAt":r.get::<_,i64>(4)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    CommandResult{success:true,data:Some(rows),error:None}
 }
 
 #[tauri::command]
@@ -465,221 +360,16 @@ fn read_note(state: tauri::State<AppState>, id: i64) -> CommandResult<NoteWithCo
     }
 }
 
-#[tauri::command]
-fn save_note(
-    state: tauri::State<AppState>,
-    id: i64,
-    title: String,
-    content: String,
-    tags: String,
-) -> CommandResult<()> {
-    // First, get the current note path from the DB
-    let file_path = {
-        let conn = match state.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return CommandResult {
-                    success: false,
-                    data: None,
-                    error: Some(format!("Database lock error: {e}")),
-                };
-            }
-        };
 
-        let path: String =
-            match conn.query_row("SELECT path FROM notes WHERE id = ?1", params![id], |row| {
-                row.get(0)
-            }) {
-                Ok(p) => p,
-                Err(rusqlite::Error::QueryReturnedNoRows) => {
-                    return CommandResult {
-                        success: false,
-                        data: None,
-                        error: Some("Note not found".to_string()),
-                    };
-                }
-                Err(e) => {
-                    return CommandResult {
-                        success: false,
-                        data: None,
-                        error: Some(format!("Query error: {e}")),
-                    };
-                }
-            };
-
-        // Update SQLite metadata
-        if let Err(e) = conn.execute(
-            "UPDATE notes SET title = ?1, tags = ?2, updated_at = datetime('now') WHERE id = ?3",
-            params![title, tags, id],
-        ) {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Failed to update note: {e}")),
-            };
-        }
-
-        path
-    };
-
-    // Write the Markdown file
-    if let Err(e) = fs::write(&file_path, &content) {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Failed to write file '{}': {e}", file_path)),
-        };
-    }
-
-    CommandResult {
-        success: true,
-        data: None,
-        error: None,
-    }
-}
-
-#[tauri::command]
-fn create_note(state: tauri::State<AppState>, title: String) -> CommandResult<Note> {
-    let notes_dir = &state.notes_dir;
-    let file_path = generate_note_path(notes_dir, &title);
-    let content = format!("# {}\n\n", title);
-
-    // Write the initial Markdown file
-    if let Err(e) = fs::write(&file_path, &content) {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Failed to create file: {e}")),
-        };
-    }
-
-    let path_str = file_path.to_string_lossy().to_string();
-
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
-    };
-
-    match conn.execute(
-        "INSERT INTO notes (title, path, tags) VALUES (?1, ?2, '[]')",
-        params![title, path_str],
-    ) {
-        Ok(_) => {}
-        Err(e) => {
-            // Clean up the file if DB insert fails
-            let _ = fs::remove_file(&file_path);
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Failed to insert note: {e}")),
-            };
-        }
-    };
-
-    let note_id = conn.last_insert_rowid();
-
-    let note = match conn.query_row(
-        "SELECT id, title, path, tags, created_at, updated_at FROM notes WHERE id = ?1",
-        params![note_id],
-        |row| {
-            Ok(Note {
-                id: row.get(0)?,
-                title: row.get::<_, String>(1).unwrap_or_default(),
-                path: row.get(2)?,
-                tags: row.get::<_, String>(3).unwrap_or_else(|_| "[]".to_string()),
-                created_at: row.get::<_, String>(4).unwrap_or_default(),
-                updated_at: row.get::<_, String>(5).unwrap_or_default(),
-            })
-        },
-    ) {
-        Ok(n) => n,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Failed to read back note: {e}")),
-            };
-        }
-    };
-
-    CommandResult {
-        success: true,
-        data: Some(note),
-        error: None,
-    }
-}
 
 // ---- Receipt commands ----
 
 #[tauri::command]
-fn list_receipts(state: tauri::State<AppState>) -> CommandResult<Vec<Receipt>> {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
-    };
-
-    let mut stmt = match conn.prepare(
-        "SELECT id, receipt_id, original_path, current_path, archived_path,
-                status, parsed_json_path, merchant, total, date, category,
-                tags, checksum, created_at, processed_at
-         FROM receipts ORDER BY created_at DESC",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Query error: {e}")),
-            };
-        }
-    };
-
-    let receipts: Vec<Receipt> = match stmt.query_map([], |row| {
-        Ok(Receipt {
-            id: row.get(0)?,
-            receipt_id: row.get(1)?,
-            original_path: row.get(2)?,
-            current_path: row.get(3)?,
-            archived_path: row.get(4)?,
-            status: row.get(5)?,
-            parsed_json_path: row.get(6)?,
-            merchant: row.get(7)?,
-            total: row.get(8)?,
-            date: row.get(9)?,
-            category: row.get(10)?,
-            tags: row.get(11)?,
-            checksum: row.get(12)?,
-            created_at: row.get::<_, String>(13).unwrap_or_default(),
-            processed_at: row.get(14)?,
-        })
-    }) {
-        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Query error: {e}")),
-            };
-        }
-    };
-
-    CommandResult {
-        success: true,
-        data: Some(receipts),
-        error: None,
-    }
+fn list_receipts(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    let mut stmt = match conn.prepare("SELECT id, local_path, remote_path, upload_status, parsed, parsed_json, transaction_id, created_at, updated_at FROM receipts WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 500") { Ok(s)=>s, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"localPath":r.get::<_,String>(1)?,"remotePath":r.get::<_,Option<String>>(2)?,"uploadStatus":r.get::<_,i64>(3)?,"parsed":r.get::<_,i64>(4)?!=0,"parsedJson":r.get::<_,Option<String>>(5)?,"transactionId":r.get::<_,Option<String>>(6)?,"createdAt":r.get::<_,i64>(7)?,"updatedAt":r.get::<_,i64>(8)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    CommandResult{success:true,data:Some(rows),error:None}
 }
 
 #[tauri::command]
@@ -921,517 +611,39 @@ fn archive_receipt(state: tauri::State<AppState>, id: i64) -> CommandResult<Rece
 // ---- Task commands ----
 
 #[tauri::command]
-fn list_tasks(state: tauri::State<AppState>) -> CommandResult<Vec<Task>> {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
-    };
-
-    let mut stmt = match conn.prepare(
-        "SELECT id, goal_id, title, description, due_date, priority, tags, order_index, completed_at, created_at, updated_at
-         FROM tasks ORDER BY order_index ASC, created_at DESC",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Query error: {e}")),
-            };
-        }
-    };
-
-    let tasks: Vec<Task> = match stmt.query_map([], |row| {
-        Ok(Task {
-            id: row.get(0)?,
-            goal_id: row.get(1)?,
-            title: row.get(2)?,
-            description: row.get(3)?,
-            due_date: row.get(4)?,
-            priority: row
-                .get::<_, Option<String>>(5)
-                .unwrap_or(Some("medium".to_string())),
-            tags: row.get::<_, String>(6).unwrap_or_else(|_| "[]".to_string()),
-            order_index: row.get::<_, i64>(7).unwrap_or(0),
-            completed_at: row.get(8)?,
-            created_at: row.get::<_, String>(9).unwrap_or_default(),
-            updated_at: row.get::<_, String>(10).unwrap_or_default(),
-        })
-    }) {
-        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Query error: {e}")),
-            };
-        }
-    };
-
-    CommandResult {
-        success: true,
-        data: Some(tasks),
-        error: None,
-    }
+fn list_tasks(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    let mut stmt = match conn.prepare("SELECT id, date, title, done, task_status, carry_over, sort_order, due_date, notes, created_at, updated_at FROM tasks WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 500") { Ok(s)=>s, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"date":r.get::<_,i64>(1)?,"title":r.get::<_,String>(2)?,"done":r.get::<_,i64>(3)?,"taskStatus":r.get::<_,Option<i64>>(4)?,"carryOver":r.get::<_,i64>(5)?!=0,"sortOrder":r.get::<_,i64>(6)?,"dueDate":r.get::<_,Option<i64>>(7)?,"notes":r.get::<_,Option<String>>(8)?,"createdAt":r.get::<_,i64>(9)?,"updatedAt":r.get::<_,i64>(10)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    CommandResult{success:true,data:Some(rows),error:None}
 }
 
-#[tauri::command]
-fn create_task(
-    state: tauri::State<AppState>,
-    title: String,
-    description: Option<String>,
-    due_date: Option<String>,
-    priority: Option<String>,
-    tags: Option<String>,
-    goal_id: Option<i64>,
-) -> CommandResult<Task> {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
-    };
 
-    let tags_str = tags.unwrap_or_else(|| "[]".to_string());
-    let priority_str = priority.unwrap_or_else(|| "medium".to_string());
 
-    if let Err(e) = conn.execute(
-        "INSERT INTO tasks (title, description, due_date, priority, tags, goal_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![title, description, due_date, priority_str, tags_str, goal_id],
-    ) {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Failed to create task: {e}")),
-        };
-    }
-
-    let task_id = conn.last_insert_rowid();
-
-    let task = match conn.query_row(
-        "SELECT id, goal_id, title, description, due_date, priority, tags, order_index, completed_at, created_at, updated_at
-         FROM tasks WHERE id = ?1",
-        params![task_id],
-        |row| {
-            Ok(Task {
-                id: row.get(0)?,
-                goal_id: row.get(1)?,
-                title: row.get(2)?,
-                description: row.get(3)?,
-                due_date: row.get(4)?,
-                priority: row.get::<_, Option<String>>(5).unwrap_or(Some("medium".to_string())),
-                tags: row.get::<_, String>(6).unwrap_or_else(|_| "[]".to_string()),
-                order_index: row.get::<_, i64>(7).unwrap_or(0),
-                completed_at: row.get(8)?,
-                created_at: row.get::<_, String>(9).unwrap_or_default(),
-                updated_at: row.get::<_, String>(10).unwrap_or_default(),
-            })
-        },
-    ) {
-        Ok(t) => t,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Failed to read back task: {e}")),
-            };
-        }
-    };
-
-    CommandResult {
-        success: true,
-        data: Some(task),
-        error: None,
-    }
-}
-
-#[tauri::command]
-fn update_task(
-    state: tauri::State<AppState>,
-    id: i64,
-    title: String,
-    description: Option<String>,
-    due_date: Option<String>,
-    priority: Option<String>,
-    tags: Option<String>,
-    completed: bool,
-    goal_id: Option<i64>,
-) -> CommandResult<Task> {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
-    };
-
-    let tags_str = tags.unwrap_or_else(|| "[]".to_string());
-    let priority_str = priority.unwrap_or_else(|| "medium".to_string());
-
-    // Update fields and set completed_at based on completed toggle
-    let result = if completed {
-        conn.execute(
-            "UPDATE tasks SET title = ?1, description = ?2, due_date = ?3, priority = ?4, tags = ?5, goal_id = ?6,
-             completed_at = CASE WHEN completed_at IS NULL THEN datetime('now') ELSE completed_at END,
-             updated_at = datetime('now')
-             WHERE id = ?7",
-            params![title, description, due_date, priority_str, tags_str, goal_id, id],
-        )
-    } else {
-        conn.execute(
-            "UPDATE tasks SET title = ?1, description = ?2, due_date = ?3, priority = ?4, tags = ?5, goal_id = ?6,
-             completed_at = NULL,
-             updated_at = datetime('now')
-             WHERE id = ?7",
-            params![title, description, due_date, priority_str, tags_str, goal_id, id],
-        )
-    };
-
-    if let Err(e) = result {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Failed to update task: {e}")),
-        };
-    }
-
-    let task = match conn.query_row(
-        "SELECT id, goal_id, title, description, due_date, priority, tags, order_index, completed_at, created_at, updated_at
-         FROM tasks WHERE id = ?1",
-        params![id],
-        |row| {
-            Ok(Task {
-                id: row.get(0)?,
-                goal_id: row.get(1)?,
-                title: row.get(2)?,
-                description: row.get(3)?,
-                due_date: row.get(4)?,
-                priority: row.get::<_, Option<String>>(5).unwrap_or(Some("medium".to_string())),
-                tags: row.get::<_, String>(6).unwrap_or_else(|_| "[]".to_string()),
-                order_index: row.get::<_, i64>(7).unwrap_or(0),
-                completed_at: row.get(8)?,
-                created_at: row.get::<_, String>(9).unwrap_or_default(),
-                updated_at: row.get::<_, String>(10).unwrap_or_default(),
-            })
-        },
-    ) {
-        Ok(t) => t,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Failed to read back task: {e}")),
-            };
-        }
-    };
-
-    CommandResult {
-        success: true,
-        data: Some(task),
-        error: None,
-    }
-}
-
-#[tauri::command]
-fn delete_task(state: tauri::State<AppState>, id: i64) -> CommandResult<()> {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
-    };
-
-    if let Err(e) = conn.execute("DELETE FROM tasks WHERE id = ?1", params![id]) {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Failed to delete task: {e}")),
-        };
-    }
-
-    CommandResult {
-        success: true,
-        data: None,
-        error: None,
-    }
-}
 
 // ---- Goal commands ----
 
 #[tauri::command]
-fn list_goals(state: tauri::State<AppState>) -> CommandResult<Vec<Goal>> {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
-    };
-
-    let mut stmt = match conn.prepare(
-        "SELECT id, title, description, status, deadline, progress, created_at, updated_at
-         FROM goals ORDER BY created_at DESC",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Query error: {e}")),
-            };
-        }
-    };
-
-    let goals: Vec<Goal> = match stmt.query_map([], |row| {
-        Ok(Goal {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            description: row.get(2)?,
-            status: row
-                .get::<_, Option<String>>(3)
-                .unwrap_or(Some("active".to_string())),
-            deadline: row.get(4)?,
-            progress: row.get::<_, f64>(5).unwrap_or(0.0),
-            created_at: row.get::<_, String>(6).unwrap_or_default(),
-            updated_at: row.get::<_, String>(7).unwrap_or_default(),
-        })
-    }) {
-        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Query error: {e}")),
-            };
-        }
-    };
-
-    CommandResult {
-        success: true,
-        data: Some(goals),
-        error: None,
-    }
+fn list_goals(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    let mut stmt = match conn.prepare("SELECT id, title, description, start_date, end_date, status, target_type, target_value, baseline_value, unit, reminder_enabled, reminder_time_minutes, created_at, updated_at FROM goals WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 500") { Ok(s)=>s, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?,"description":r.get::<_,Option<String>>(2)?,"startDate":r.get::<_,i64>(3)?,"endDate":r.get::<_,Option<i64>>(4)?,"status":r.get::<_,String>(5)?,"targetType":r.get::<_,String>(6)?,"targetValue":r.get::<_,Option<f64>>(7)?,"baselineValue":r.get::<_,Option<f64>>(8)?,"unit":r.get::<_,Option<String>>(9)?,"reminderEnabled":r.get::<_,i64>(10)?!=0,"reminderTimeMinutes":r.get::<_,i64>(11)?,"createdAt":r.get::<_,i64>(12)?,"updatedAt":r.get::<_,i64>(13)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    CommandResult{success:true,data:Some(rows),error:None}
 }
 
-#[tauri::command]
-fn create_goal(
-    state: tauri::State<AppState>,
-    title: String,
-    description: Option<String>,
-    status: Option<String>,
-    deadline: Option<String>,
-    progress: Option<f64>,
-) -> CommandResult<Goal> {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
-    };
 
-    let status_str = status.unwrap_or_else(|| "active".to_string());
-    let progress_val = progress.unwrap_or(0.0);
 
-    if let Err(e) = conn.execute(
-        "INSERT INTO goals (title, description, status, deadline, progress) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![title, description, status_str, deadline, progress_val],
-    ) {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Failed to create goal: {e}")),
-        };
-    }
-
-    let goal_id = conn.last_insert_rowid();
-
-    let goal = match conn.query_row(
-        "SELECT id, title, description, status, deadline, progress, created_at, updated_at
-         FROM goals WHERE id = ?1",
-        params![goal_id],
-        |row| {
-            Ok(Goal {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                description: row.get(2)?,
-                status: row.get(3)?,
-                deadline: row.get(4)?,
-                progress: row.get::<_, f64>(5).unwrap_or(0.0),
-                created_at: row.get::<_, String>(6).unwrap_or_default(),
-                updated_at: row.get::<_, String>(7).unwrap_or_default(),
-            })
-        },
-    ) {
-        Ok(g) => g,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Failed to read back goal: {e}")),
-            };
-        }
-    };
-
-    CommandResult {
-        success: true,
-        data: Some(goal),
-        error: None,
-    }
-}
-
-#[tauri::command]
-fn update_goal(
-    state: tauri::State<AppState>,
-    id: i64,
-    title: String,
-    description: Option<String>,
-    status: Option<String>,
-    deadline: Option<String>,
-    progress: Option<f64>,
-) -> CommandResult<Goal> {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
-    };
-
-    let status_str = status.unwrap_or_else(|| "active".to_string());
-    let progress_val = progress.unwrap_or(0.0);
-
-    if let Err(e) = conn.execute(
-        "UPDATE goals SET title = ?1, description = ?2, status = ?3, deadline = ?4, progress = ?5, updated_at = datetime('now') WHERE id = ?6",
-        params![title, description, status_str, deadline, progress_val, id],
-    ) {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Failed to update goal: {e}")),
-        };
-    }
-
-    let goal = match conn.query_row(
-        "SELECT id, title, description, status, deadline, progress, created_at, updated_at
-         FROM goals WHERE id = ?1",
-        params![id],
-        |row| {
-            Ok(Goal {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                description: row.get(2)?,
-                status: row
-                    .get::<_, Option<String>>(3)
-                    .unwrap_or(Some("active".to_string())),
-                deadline: row.get(4)?,
-                progress: row.get::<_, f64>(5).unwrap_or(0.0),
-                created_at: row.get::<_, String>(6).unwrap_or_default(),
-                updated_at: row.get::<_, String>(7).unwrap_or_default(),
-            })
-        },
-    ) {
-        Ok(g) => g,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Failed to read back goal: {e}")),
-            };
-        }
-    };
-
-    CommandResult {
-        success: true,
-        data: Some(goal),
-        error: None,
-    }
-}
-
-#[tauri::command]
-fn delete_goal(state: tauri::State<AppState>, id: i64) -> CommandResult<()> {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
-    };
-
-    if let Err(e) = conn.execute("DELETE FROM goals WHERE id = ?1", params![id]) {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Failed to delete goal: {e}")),
-        };
-    }
-
-    CommandResult {
-        success: true,
-        data: None,
-        error: None,
-    }
-}
 
 // ---- Dashboard commands ----
 
 #[tauri::command]
 fn get_counts(state: tauri::State<AppState>) -> CommandResult<DashboardCounts> {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
-    };
-
-    let tasks: i64 = conn
-        .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
-        .unwrap_or(0);
-    let goals: i64 = conn
-        .query_row("SELECT COUNT(*) FROM goals", [], |row| row.get(0))
-        .unwrap_or(0);
-    let receipts: i64 = conn
-        .query_row("SELECT COUNT(*) FROM receipts", [], |row| row.get(0))
-        .unwrap_or(0);
-    let notes: i64 = conn
-        .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
-        .unwrap_or(0);
-    let urls: i64 = conn
-        .query_row("SELECT COUNT(*) FROM urls", [], |row| row.get(0))
-        .unwrap_or(0);
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    let tasks: i64 = conn.query_row("SELECT COUNT(*) FROM tasks WHERE deleted_at IS NULL", [], |r| r.get(0)).unwrap_or(0);
+    let goals: i64 = conn.query_row("SELECT COUNT(*) FROM goals WHERE deleted_at IS NULL", [], |r| r.get(0)).unwrap_or(0);
+    let receipts: i64 = conn.query_row("SELECT COUNT(*) FROM receipts WHERE deleted_at IS NULL", [], |r| r.get(0)).unwrap_or(0);
+    let notes: i64 = conn.query_row("SELECT COUNT(*) FROM notes WHERE deleted_at IS NULL", [], |r| r.get(0)).unwrap_or(0);
+    let urls: i64 = conn.query_row("SELECT COUNT(*) FROM urls WHERE deleted_at IS NULL", [], |r| r.get(0)).unwrap_or(0);
 
     CommandResult {
         success: true,
@@ -1449,58 +661,11 @@ fn get_counts(state: tauri::State<AppState>) -> CommandResult<DashboardCounts> {
 // ---- URL commands ----
 
 #[tauri::command]
-fn list_urls(state: tauri::State<AppState>) -> CommandResult<Vec<SavedUrl>> {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
-    };
-
-    let mut stmt = match conn.prepare(
-        "SELECT id, title, url, source, tags, is_new, created_at
-         FROM urls ORDER BY is_new DESC, created_at DESC",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Query error: {e}")),
-            };
-        }
-    };
-
-    let urls: Vec<SavedUrl> = match stmt.query_map([], |row| {
-        Ok(SavedUrl {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            url: row.get(2)?,
-            source: row.get(3)?,
-            tags: row.get::<_, String>(4).unwrap_or_else(|_| "[]".to_string()),
-            is_new: row.get::<_, i64>(5).unwrap_or(1),
-            created_at: row.get::<_, String>(6).unwrap_or_default(),
-        })
-    }) {
-        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Query error: {e}")),
-            };
-        }
-    };
-
-    CommandResult {
-        success: true,
-        data: Some(urls),
-        error: None,
-    }
+fn list_urls(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    let mut stmt = match conn.prepare("SELECT id, title, url, source, tags, is_new, created_at, updated_at FROM urls WHERE deleted_at IS NULL ORDER BY is_new DESC, created_at DESC LIMIT 500") { Ok(s)=>s, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,Option<String>>(1)?,"url":r.get::<_,String>(2)?,"source":r.get::<_,Option<String>>(3)?,"tags":r.get::<_,Option<String>>(4)?,"is_new":r.get::<_,i64>(5)?,"created_at":r.get::<_,i64>(6)?,"updated_at":r.get::<_,i64>(7)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    CommandResult{success:true,data:Some(rows),error:None}
 }
 
 #[tauri::command]
@@ -1652,6 +817,220 @@ fn mark_url_read(state: tauri::State<AppState>, id: i64) -> CommandResult<SavedU
     }
 }
 
+#[tauri::command]
+fn list_exercises(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    let mut stmt = match conn.prepare("SELECT id, name, exercise_type, body_part, equipment, primary_muscle, secondary_muscle, instructions, tips, faqs, keywords, image_path, video_path, created_at, updated_at FROM exercises ORDER BY name LIMIT 5000") { Ok(s)=>s, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("prep {e}"))}};
+    let rows = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"exercise_type":r.get::<_,Option<String>>(2)?,"body_part":r.get::<_,Option<String>>(3)?,"equipment":r.get::<_,Option<String>>(4)?,"primary_muscle":r.get::<_,Option<String>>(5)?,"secondary_muscle":r.get::<_,Option<String>>(6)?,"instructions":r.get::<_,Option<String>>(7)?,"tips":r.get::<_,Option<String>>(8)?,"faqs":r.get::<_,Option<String>>(9)?,"keywords":r.get::<_,Option<String>>(10)?,"image_path":r.get::<_,Option<String>>(11)?,"video_path":r.get::<_,Option<String>>(12)?,"created_at":r.get::<_,i64>(13).unwrap_or(0),"updated_at":r.get::<_,Option<i64>>(14)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    CommandResult{success:true,data:Some(rows),error:None}
+}
+#[tauri::command]
+fn list_ingredients(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    let mut stmt = match conn.prepare("SELECT id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, sodium_per100g, fiber_per100g, sugar_per100g, is_archived, brand, barcode, created_at FROM ingredients ORDER BY name LIMIT 1000") { Ok(s)=>s, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let mut out = Vec::new();
+    let rows: Vec<(String,String,f64,f64,f64,f64,Option<f64>,Option<f64>,Option<f64>,i64,Option<String>,Option<String>,i64)> = stmt.query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?,r.get(10)?,r.get(11)?,r.get(12)?))).unwrap().filter_map(|r|r.ok()).collect();
+    for (id,name,cal,prot,carb,fat,sod,fib,sug,arch,brand,barcode,created) in rows {
+        let pics: Vec<serde_json::Value> = conn.prepare("SELECT id, image_path, sort_order FROM ingredient_pictures WHERE ingredient_id=?1 ORDER BY sort_order").unwrap().query_map([&id], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"imagePath":r.get::<_,String>(1)?,"sortOrder":r.get::<_,i64>(2)?}))).unwrap().filter_map(|r|r.ok()).collect();
+        let prices: Vec<serde_json::Value> = conn.prepare("SELECT id, store_id, price, currency_code, recorded_at FROM ingredient_prices WHERE ingredient_id=?1 ORDER BY recorded_at DESC LIMIT 20").unwrap().query_map([&id], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"storeId":r.get::<_,String>(1)?,"price":r.get::<_,f64>(2)?,"currencyCode":r.get::<_,String>(3)?,"recordedAt":r.get::<_,i64>(4)?}))).unwrap().filter_map(|r|r.ok()).collect();
+        out.push(serde_json::json!({"id":id,"name":name,"calories_per100g":cal,"protein_per100g":prot,"carbs_per100g":carb,"fat_per100g":fat,"sodium_per100g":sod,"fiber_per100g":fib,"sugar_per100g":sug,"is_archived":arch!=0,"brand":brand,"barcode":barcode,"createdAt":created,"pictures":pics,"prices":prices}));
+    }
+    CommandResult{success:true,data:Some(out),error:None}
+}
+#[tauri::command]
+fn list_stores(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let mut stmt = conn.prepare("SELECT id, name, created_at FROM stores ORDER BY name").unwrap();
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"createdAt":r.get::<_,i64>(2)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    CommandResult{success:true,data:Some(rows),error:None}
+}
+#[tauri::command]
+fn list_meals(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let mut stmt = conn.prepare("SELECT id, name, eaten_at, created_at FROM meals ORDER BY eaten_at DESC LIMIT 200").unwrap();
+    let meals: Vec<(String,String,i64,i64)> = stmt.query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap().filter_map(|r|r.ok()).collect();
+    let mut out=Vec::new();
+    for (id,name,eaten,created) in meals {
+        let ings: Vec<serde_json::Value> = conn.prepare("SELECT id, ingredient_id, grams FROM meal_ingredients WHERE meal_id=?1").unwrap().query_map([&id], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"ingredientId":r.get::<_,String>(1)?,"grams":r.get::<_,f64>(2)?}))).unwrap().filter_map(|r|r.ok()).collect();
+        out.push(serde_json::json!({"id":id,"name":name,"eatenAt":eaten,"createdAt":created,"ingredients":ings}));
+    }
+    CommandResult{success:true,data:Some(out),error:None}
+}
+#[tauri::command]
+fn list_body_metrics(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let mut stmt = conn.prepare("SELECT id, date, weight_kg, height_cm, created_at FROM body_metrics ORDER BY date DESC LIMIT 500").unwrap();
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"date":r.get::<_,i64>(1)?,"weightKg":r.get::<_,Option<f64>>(2)?,"heightCm":r.get::<_,Option<f64>>(3)?,"createdAt":r.get::<_,i64>(4)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    CommandResult{success:true,data:Some(rows),error:None}
+}
+#[tauri::command]
+fn list_experiments(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let mut stmt = conn.prepare("SELECT id, name, purpose, start_date, end_date, status, categories, reminder_enabled, reminder_time_minutes, created_at FROM experiments ORDER BY start_date DESC LIMIT 200").unwrap();
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"purpose":r.get::<_,Option<String>>(2)?,"startDate":r.get::<_,i64>(3)?,"endDate":r.get::<_,Option<i64>>(4)?,"status":r.get::<_,String>(5)?,"categories":r.get::<_,Option<String>>(6)?,"reminderEnabled":r.get::<_,i64>(7)?,"reminderTimeMinutes":r.get::<_,i64>(8)?,"createdAt":r.get::<_,i64>(9)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    CommandResult{success:true,data:Some(rows),error:None}
+}
+#[tauri::command]
+fn list_tags(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let mut stmt = conn.prepare("SELECT id, name, color, sort_order, created_at FROM tags ORDER BY sort_order").unwrap();
+    let rows: Vec<(String,String,Option<i64>,i64)> = stmt.query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap().filter_map(|r|r.ok()).collect();
+    let mut out=Vec::new();
+    for (id,name,color,order) in rows {
+        let taskCount: i64 = conn.query_row("SELECT count(*) FROM task_tags WHERE tag_id=?1", [&id], |r| r.get(0)).unwrap_or(0);
+        let expCount: i64 = conn.query_row("SELECT count(*) FROM experiment_tags WHERE tag_id=?1", [&id], |r| r.get(0)).unwrap_or(0);
+        let goalCount: i64 = conn.query_row("SELECT count(*) FROM goal_tags WHERE tag_id=?1", [&id], |r| r.get(0)).unwrap_or(0);
+        let noteCount: i64 = conn.query_row("SELECT count(*) FROM note_tags WHERE tag_id=?1", [&id], |r| r.get(0)).unwrap_or(0);
+        out.push(serde_json::json!({"id":id,"name":name,"color":color,"sortOrder":order,"taskCount":taskCount,"experimentCount":expCount,"goalCount":goalCount,"noteCount":noteCount}));
+    }
+    CommandResult{success:true,data:Some(out),error:None}
+}
+#[tauri::command]
+fn list_accounts(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let mut stmt = conn.prepare("SELECT id, name, type, opening_balance, note, created_at FROM accounts ORDER BY name").unwrap();
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"type":r.get::<_,String>(2)?,"openingBalance":r.get::<_,f64>(3)?,"note":r.get::<_,Option<String>>(4)?,"createdAt":r.get::<_,i64>(5)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    CommandResult{success:true,data:Some(rows),error:None}
+}
+#[tauri::command]
+fn list_transactions(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let mut stmt = conn.prepare("SELECT id, type, amount, currency_code, amount_base, rate_used, category, date, note, receipt_id, is_draft FROM transactions ORDER BY date DESC LIMIT 500").unwrap();
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"type":r.get::<_,String>(1)?,"amount":r.get::<_,f64>(2)?,"currencyCode":r.get::<_,String>(3)?,"amountBase":r.get::<_,f64>(4)?,"rateUsed":r.get::<_,f64>(5)?,"category":r.get::<_,Option<String>>(6)?,"date":r.get::<_,i64>(7)?,"note":r.get::<_,Option<String>>(8)?,"receiptId":r.get::<_,Option<String>>(9)?,"isDraft":r.get::<_,i64>(10)? !=0}))).unwrap().filter_map(|r|r.ok()).collect();
+    CommandResult{success:true,data:Some(rows),error:None}
+}
+#[tauri::command]
+fn list_fx_rates(state: tauri::State<AppState>, base: Option<String>, date: Option<String>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let b = base.unwrap_or_else(|| "USD".to_string());
+    let d = date.unwrap_or_else(|| "".to_string());
+    let mut sql = "SELECT code, base_code, rate_date, rate_to_base, updated_at, manual FROM fx_rates".to_string();
+    let mut wh: Vec<String>=Vec::new();
+    if !d.is_empty() { wh.push(format!("rate_date='{}'", d.replace('\'',"''"))); }
+    if !b.is_empty() { wh.push(format!("base_code='{}'", b.replace('\'',"''"))); }
+    if !wh.is_empty() { sql.push_str(" WHERE "); sql.push_str(&wh.join(" AND ")); }
+    sql.push_str(" ORDER BY updated_at DESC LIMIT 200");
+    let mut stmt = conn.prepare(&sql).unwrap();
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"code":r.get::<_,String>(0)?,"baseCode":r.get::<_,String>(1)?,"rateDate":r.get::<_,String>(2)?,"rateToBase":r.get::<_,f64>(3)?,"updatedAt":r.get::<_,i64>(4)?,"manual":r.get::<_,i64>(5)?!=0}))).unwrap().filter_map(|r|r.ok()).collect();
+    CommandResult{success:true,data:Some(rows),error:None}
+}
+#[tauri::command]
+fn create_store(state: tauri::State<AppState>, name: String) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let id = uuid::Uuid::now_v7().to_string();
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e)=conn.execute("INSERT INTO stores (id, name, created_at, updated_at) VALUES (?1,?2,?3,?4)", rusqlite::params![id, name, now, now]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"id":id,"name":name})),error:None}
+}
+#[tauri::command]
+fn create_fx_rate(state: tauri::State<AppState>, code: String, baseCode: String, rateDate: String, rateToBase: f64) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e)=conn.execute("INSERT INTO fx_rates (code, base_code, rate_date, rate_to_base, updated_at, manual) VALUES (?1,?2,?3,?4,?5,1) ON CONFLICT(code, base_code, rate_date) DO UPDATE SET rate_to_base=excluded.rate_to_base, updated_at=excluded.updated_at, manual=1", rusqlite::params![code, baseCode, rateDate, rateToBase, now]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"code":code})),error:None}
+}
+#[tauri::command]
+fn update_exercise(state: tauri::State<AppState>, id: String, name: String, bodyPart: Option<String>, equipment: Option<String>, primaryMuscle: Option<String>, secondaryMuscle: Option<String>) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e)=conn.execute("UPDATE exercises SET name=?1, body_part=?2, equipment=?3, primary_muscle=?4, secondary_muscle=?5, updated_at=?6 WHERE id=?7", rusqlite::params![name, bodyPart, equipment, primaryMuscle, secondaryMuscle, now, id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+}
+#[tauri::command]
+fn update_ingredient(state: tauri::State<AppState>, id: String, name: String, caloriesPer100g: f64, proteinPer100g: f64, carbsPer100g: f64, fatPer100g: f64) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e)=conn.execute("UPDATE ingredients SET name=?1, calories_per100g=?2, protein_per100g=?3, carbs_per100g=?4, fat_per100g=?5, updated_at=?6 WHERE id=?7", rusqlite::params![name, caloriesPer100g, proteinPer100g, carbsPer100g, fatPer100g, now, id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+}
+#[tauri::command]
+fn create_ingredient(state: tauri::State<AppState>, name: String, caloriesPer100g: f64, proteinPer100g: f64, carbsPer100g: f64, fatPer100g: f64, sodiumPer100g: Option<f64>, fiberPer100g: Option<f64>, sugarPer100g: Option<f64>, brand: Option<String>, barcode: Option<String>) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let id = uuid::Uuid::now_v7().to_string();
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e)=conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, sodium_per100g, fiber_per100g, sugar_per100g, brand, barcode, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)", rusqlite::params![id, name, caloriesPer100g, proteinPer100g, carbsPer100g, fatPer100g, sodiumPer100g, fiberPer100g, sugarPer100g, brand, barcode, now, now]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+}
+#[tauri::command]
+fn create_template(state: tauri::State<AppState>, id: String, name: String) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e)=conn.execute("INSERT INTO workout_templates (id, name, start_date, created_at, updated_at) VALUES (?1,?2,?3,?4,?5)", rusqlite::params![id, name, now, now, now]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+}
+#[tauri::command]
+fn update_template(state: tauri::State<AppState>, id: String, name: String, notes: Option<String>, recurrence: Option<String>) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e)=conn.execute("UPDATE workout_templates SET name=?1, notes=?2, recurrence=?3, updated_at=?4 WHERE id=?5", rusqlite::params![name, notes, recurrence, now, id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+}
+#[tauri::command]
+fn delete_template(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    if let Err(e)=conn.execute("DELETE FROM workout_templates WHERE id=?1", rusqlite::params![id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+}
+#[tauri::command]
+fn get_template(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    let tpl: serde_json::Value = match conn.query_row("SELECT id, name, notes, start_date, recurrence, created_at, updated_at FROM workout_templates WHERE id=?1", rusqlite::params![id], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"notes":r.get::<_,Option<String>>(2)?,"startDate":r.get::<_,i64>(3)?,"recurrence":r.get::<_,Option<String>>(4)?,"createdAt":r.get::<_,i64>(5)?,"updatedAt":r.get::<_,i64>(6)?}))) { Ok(v)=>v, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("template not found: {e}"))} };
+    let mut ex_stmt = match conn.prepare("SELECT te.id, te.exercise_id, e.name, te.sort_order, te.notes FROM workout_template_exercises te JOIN exercises e ON e.id = te.exercise_id WHERE te.template_id = ?1 AND te.deleted_at IS NULL ORDER BY te.sort_order") { Ok(s)=>s, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("prep {e}"))} };
+    let ex_rows: Vec<(String,String,String,i64,Option<String>)> = ex_stmt.query_map(rusqlite::params![id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap().filter_map(|r|r.ok()).collect();
+    let mut exercises_out = Vec::new();
+    for (ex_id, exercise_id, exercise_name, sort_order, notes) in ex_rows {
+        let sets: Vec<serde_json::Value> = conn.prepare("SELECT id, set_number, reps, weight_kg, rest_seconds, duration_minutes, distance_meters FROM workout_template_sets WHERE template_exercise_id = ?1 AND deleted_at IS NULL ORDER BY set_number").unwrap().query_map([&ex_id], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"setNumber":r.get::<_,i64>(1)?,"reps":r.get::<_,Option<i64>>(2)?,"weightKg":r.get::<_,Option<f64>>(3)?,"restSeconds":r.get::<_,Option<i64>>(4)?,"durationMinutes":r.get::<_,Option<i64>>(5)?,"distanceMeters":r.get::<_,Option<f64>>(6)?}))).unwrap().filter_map(|r|r.ok()).collect();
+        exercises_out.push(serde_json::json!({"id":ex_id,"exerciseId":exercise_id,"exerciseName":exercise_name,"sortOrder":sort_order,"notes":notes,"sets":sets}));
+    }
+    CommandResult{success:true,data:Some(serde_json::json!({"template":tpl,"exercises":exercises_out})),error:None}
+}
+#[tauri::command]
+fn add_template_exercise(state: tauri::State<AppState>, templateId: String, exerciseId: String) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let now = chrono::Utc::now().timestamp_millis();
+    let id = uuid::Uuid::now_v7().to_string();
+    let max_sort: Option<i64> = conn.query_row("SELECT MAX(sort_order) FROM workout_template_exercises WHERE template_id = ?1 AND deleted_at IS NULL", rusqlite::params![templateId], |r| r.get(0)).unwrap_or(None);
+    let sort_order = max_sort.map(|m| m + 1).unwrap_or(0);
+    if let Err(e)=conn.execute("INSERT INTO workout_template_exercises (id, template_id, exercise_id, sort_order, updated_at) VALUES (?1,?2,?3,?4,?5)", rusqlite::params![id, templateId, exerciseId, sort_order, now]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+}
+#[tauri::command]
+fn update_template_exercise(state: tauri::State<AppState>, id: String, notes: Option<String>) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e)=conn.execute("UPDATE workout_template_exercises SET notes=?1, updated_at=?2 WHERE id=?3", rusqlite::params![notes, now, id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+}
+#[tauri::command]
+fn delete_template_exercise(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    if let Err(e)=conn.execute("DELETE FROM workout_template_exercises WHERE id=?1", rusqlite::params![id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+}
+#[tauri::command]
+fn add_template_set(state: tauri::State<AppState>, templateExerciseId: String, reps: Option<i64>, weightKg: Option<f64>, restSeconds: Option<i64>, durationMinutes: Option<i64>, distanceMeters: Option<f64>) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let now = chrono::Utc::now().timestamp_millis();
+    let id = uuid::Uuid::now_v7().to_string();
+    let max_num: Option<i64> = conn.query_row("SELECT MAX(set_number) FROM workout_template_sets WHERE template_exercise_id = ?1 AND deleted_at IS NULL", rusqlite::params![templateExerciseId], |r| r.get(0)).unwrap_or(None);
+    let set_number = max_num.map(|m| m + 1).unwrap_or(1);
+    if let Err(e)=conn.execute("INSERT INTO workout_template_sets (id, template_exercise_id, set_number, reps, weight_kg, rest_seconds, duration_minutes, distance_meters, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", rusqlite::params![id, templateExerciseId, set_number, reps, weightKg, restSeconds, durationMinutes, distanceMeters, now]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+}
+#[tauri::command]
+fn update_template_set(state: tauri::State<AppState>, id: String, reps: Option<i64>, weightKg: Option<f64>, restSeconds: Option<i64>, durationMinutes: Option<i64>, distanceMeters: Option<f64>) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e)=conn.execute("UPDATE workout_template_sets SET reps=?1, weight_kg=?2, rest_seconds=?3, duration_minutes=?4, distance_meters=?5, updated_at=?6 WHERE id=?7", rusqlite::params![reps, weightKg, restSeconds, durationMinutes, distanceMeters, now, id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+}
+#[tauri::command]
+fn delete_template_set(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+    if let Err(e)=conn.execute("DELETE FROM workout_template_sets WHERE id=?1", rusqlite::params![id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+}
+
 // ---- Config commands (from T04) ----
 
 #[derive(Serialize)]
@@ -1783,24 +1162,41 @@ pub fn run() {
             get_server_diagnostics,
             list_notes,
             read_note,
-            save_note,
-            create_note,
             list_receipts,
             read_receipt,
             archive_receipt,
             list_tasks,
-            create_task,
-            update_task,
-            delete_task,
             list_goals,
-            create_goal,
-            update_goal,
-            delete_goal,
             get_counts,
             list_urls,
             create_url,
             delete_url,
             mark_url_read,
+            list_exercises,
+            list_ingredients,
+            list_stores,
+            list_meals,
+            list_body_metrics,
+            list_experiments,
+            list_tags,
+            list_accounts,
+            list_transactions,
+            list_fx_rates,
+            create_store,
+            create_fx_rate,
+            update_exercise,
+            update_ingredient,
+            create_ingredient,
+            create_template,
+            update_template,
+            delete_template,
+            get_template,
+            add_template_exercise,
+            update_template_exercise,
+            delete_template_exercise,
+            add_template_set,
+            update_template_set,
+            delete_template_set,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

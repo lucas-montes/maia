@@ -1,0 +1,70 @@
+/* Maia design tokens (Phase 2). Source of truth for color, radius, motion,
+   and elevation. Values below reproduce the current look 1:1 — views adopt
+   them in Phase 4. Motion/elevation values come from Open Props; colors stay
+   on the app's slate/sky/status scales so nothing visually drifts. */
+
+@import "open-props/shadows";
+@import "open-props/easings";
+@import "open-props/borders";
+
+@theme {
+  /* ---- Surfaces (dark-only) ---- */
+  --color-surface-950: #020617; /* slate-950 — app bg */
+  --color-surface-900: #0f172a; /* slate-900 — raised panels, hover fills */
+  --color-surface-800: #1e293b; /* slate-800 — controls, borders, thumb bg */
+  --color-surface-700: #334155; /* slate-700 — borders, option hover */
+  --color-surface-600: #475569; /* slate-600 — secondary borders */
+
+  /* ---- Ink (text) ---- */
+  --color-ink-50: #f8fafc; /* slate-50 — active nav text */
+  --color-ink-100: #f1f5f9; /* slate-100 — primary text */
+  --color-ink-200: #e2e8f0; /* slate-200 — bright secondary text */
+  --color-ink-300: #cbd5e1; /* slate-300 — secondary text */
+  --color-ink-400: #94a3b8; /* slate-400 — muted text, icons */
+  --color-ink-500: #64748b; /* slate-500 — faint text, placeholders */
+  --color-ink-600: #475569; /* slate-600 — faintest text */
+
+  /* ---- Accent ---- */
+  --color-accent-300: #7dd3fc; /* sky-300 — bright accents */
+  --color-accent-400: #38bdf8; /* sky-400 — active states, links */
+  --color-accent-500: #0ea5e9; /* sky-500 — selection borders, focus rings */
+  --color-accent-600: #0284c7; /* sky-600 — selected fills */
+  --color-accent-800: #075985; /* sky-800 — deep accents */
+  --color-accent-900: #0c4a6e; /* sky-900 — tinted fills */
+
+  /* ---- Status ---- */
+  --color-ok-300: #6ee7b7; /* emerald-300 */
+  --color-ok-400: #34d399; /* emerald-400 — success, reviewed */
+  --color-ok-500: #10b981; /* emerald-500 — ok fills */
+  --color-ok-600: #059669; /* emerald-600 */
+  --color-ok-700: #047857; /* emerald-700 */
+  --color-ok-900: #064e3b; /* emerald-900 — tinted ok fills */
+  --color-warn-400: #fbbf24; /* amber-400 — archived, warnings */
+  --color-warn-500: #f59e0b; /* amber-500 */
+  --color-warn-900: #78350f; /* amber-900 — tinted warn fills */
+  --color-caution-400: #facc15; /* yellow-400 — medium priority */
+  --color-caution-500: #eab308; /* yellow-500 */
+  --color-err-300: #fca5a5; /* red-300 */
+  --color-err-400: #f87171; /* red-400 — errors, high priority */
+  --color-err-500: #ef4444; /* red-500 — destructive fills */
+  --color-err-700: #b91c1c; /* red-700 */
+  --color-err-900: #7f1d1d; /* red-900 — tinted err fills */
+
+  /* ---- Preserved one-offs (exact legacy hues, not unified) ---- */
+  --color-grn-400: #4ade80; /* green-400 — legacy status tint */
+  --color-grn-500: #22c55e; /* green-500 — legacy status fill */
+  --color-grape-400: #a78bfa; /* violet-400 — dashboard stat accent */
+
+  /* ---- Radius ---- */
+  --radius-maia-control: 0.25rem; /* buttons, inputs, pills (rounded) */
+  --radius-maia-card: 0.5rem; /* panels, calendars, rows (rounded-lg) */
+  --radius-maia-pill: var(--radius-round); /* full pills (Open Props) */
+
+  /* ---- Motion (Open Props) ---- */
+  --ease-maia-snappy: var(--ease-3);
+  --ease-maia-fluid: var(--ease-out-5, var(--ease-3));
+
+  /* ---- Elevation (Open Props) ---- */
+  --shadow-maia-popover: var(--shadow-4);
+  --shadow-maia-raised: var(--shadow-2);
+}

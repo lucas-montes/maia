@@ -5,7 +5,8 @@ use axum::http::Method;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::{auth, config::Config, db, handlers::health, logs};
+use utoipa::OpenApi as _;
+use crate::{auth, config::Config, db, handlers::health, logs, openapi::ApiDoc};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -23,26 +24,33 @@ pub fn create_router(state: AppState) -> Router {
         ])
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .expose_headers([HeaderName::from_static("content-type")]);
+    let openapi = ApiDoc::openapi();
 
     Router::new()
         .route("/health", get(health::health))
+        .merge(utoipa_swagger_ui::SwaggerUi::new("/docs").url("/api-docs/openapi.json", openapi))
         .route("/protected", get(|| async { "protected ok" }))
         .route("/exercises", get(crate::handlers::pull::pull_exercises))
+        .route("/exercises/catalog", get(crate::handlers::pull::pull_exercise_catalog))
+        .route("/exercises/item/:id", get(crate::handlers::pull::get_exercise_item))
         .route("/ingredients", get(crate::handlers::pull::pull_ingredients).post(crate::handlers::push::push_ingredient))
+        .route("/ingredients/catalog", get(crate::handlers::pull::pull_ingredient_catalog))
         .route("/ingredients/lookup", get(crate::handlers::lookup::lookup_ingredient))
         .route("/ingredients/import-from-barcode", axum::routing::post(crate::handlers::lookup::import_from_barcode))
+        .route("/ingredients/item/:id", get(crate::handlers::pull::get_ingredient_item))
         .route("/fx-rates", get(crate::handlers::pull::pull_fx_rates))
-        .route("/workouts", get(crate::handlers::read::pull_workouts).post(crate::handlers::push::push_workouts))
-        .route("/templates", axum::routing::post(crate::handlers::push::push_templates))
-        .route("/notes", axum::routing::post(crate::handlers::push::push_notes))
-        .route("/tasks", axum::routing::post(crate::handlers::push::push_tasks))
-        .route("/goals", axum::routing::post(crate::handlers::push::push_goals))
-        .route("/meals", get(crate::handlers::read::pull_meals).post(crate::handlers::push::push_meals))
+        .route("/workouts", get(crate::handlers::read::pull_workouts))
+        .route("/templates", get(crate::handlers::pull::pull_templates).post(crate::handlers::push::push_templates))
+        .route("/notes", get(crate::handlers::pull::pull_notes))
+        .route("/tasks", get(crate::handlers::pull::pull_tasks))
+        .route("/goals", get(crate::handlers::pull::pull_goals))
+        .route("/meals", get(crate::handlers::read::pull_meals))
         .route("/body-metrics", get(crate::handlers::read::pull_body_metrics))
-        .route("/transactions", axum::routing::post(crate::handlers::push::push_transactions))
-        .route("/budget-accounts", axum::routing::post(crate::handlers::push::push_budget_accounts))
-        .route("/receipt-pictures", axum::routing::post(crate::handlers::receipts::push_receipt_pictures))
-        .route("/backup", axum::routing::post(crate::handlers::backup::post_backup))
+        .route("/transactions", get(crate::handlers::pull::pull_transactions))
+        .route("/budget-accounts", get(crate::handlers::pull::pull_accounts))
+        .route("/receipt-pictures", get(crate::handlers::pull::pull_receipts).post(crate::handlers::receipts::push_receipt_pictures))
+        .route("/experiments", get(crate::handlers::pull::pull_experiments))
+        .route("/tags", get(crate::handlers::pull::pull_tags))
         .route("/backup/latest", get(crate::handlers::backup::get_backup))
         .route("/media/:id", get(crate::handlers::media::get_media))
         .route("/exercises/:id", get(crate::handlers::media::get_media))
@@ -104,6 +112,19 @@ async fn log_requests(
 pub async fn start_server(config: Config) -> anyhow::Result<(u16, JoinHandle<()>)> {
     let _ = tracing_subscriber::fmt::try_init();
     let db = db::init_db(&config.db_path)?;
+    {
+        let conn = db.lock().unwrap();
+        let cnt: i64 = conn.query_row("SELECT count(*) FROM exercises", [], |r| r.get(0)).unwrap_or(0);
+        if cnt == 0 {
+            for cand in [std::path::Path::new("data"), std::path::Path::new("../data"), std::path::Path::new("../../data")] {
+                if cand.join("parsed").exists() {
+                    let media = config.db_path.parent().unwrap_or_else(|| std::path::Path::new(".")).join("exercise_media");
+                    let _ = crate::seed::seed_exercises_to(&conn, &cand.join("parsed"), &cand.join("images"), &cand.join("videos"), &media);
+                    break;
+                }
+            }
+        }
+    }
     let listener = TcpListener::bind(&config.bind_addr).await?;
     let port = listener.local_addr()?.port();
     let state = AppState {

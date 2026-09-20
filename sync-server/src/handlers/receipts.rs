@@ -12,6 +12,8 @@ use crate::{db, server::AppState};
 #[derive(Deserialize)]
 struct ReceiptsJson {
     receipts: Vec<ReceiptPush>,
+    #[serde(default)]
+    deleted: Vec<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -102,6 +104,9 @@ pub async fn push_receipt_pictures(
                 rusqlite::params![r.id, r.local_path, r.remote_path, r.upload_status, if r.parsed {1} else {0}, r.parsed_json, r.transaction_id, r.created_at, server_time],
             )
             .unwrap();
+        }
+        for id in payload.deleted {
+            let _ = tx.execute("UPDATE receipts SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
         }
         tx.commit().unwrap();
         (StatusCode::OK, Json(serde_json::json!({"server_time": server_time}))).into_response()

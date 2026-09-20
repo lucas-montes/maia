@@ -4,7 +4,9 @@ pub mod db;
 pub mod error;
 pub mod handlers;
 pub mod logs;
+pub mod openapi;
 pub mod openfoodfacts;
+pub mod seed;
 pub mod server;
 
 pub use config::Config;
@@ -151,6 +153,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_and_item_routes() {
+        use crate::db;
+        let pool = db::init_memory().unwrap();
+        {
+            let conn = pool.lock().unwrap();
+            conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Squat','weightlifting',1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at, deleted_at) VALUES ('e9','Gone','weightlifting',1000,1000,2000)", []).unwrap();
+            conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, barcode, created_at, updated_at) VALUES ('i1','Oats',100,10,20,5,'123',1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO stores (id, name, created_at, updated_at) VALUES ('s1','Carrefour',1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO ingredient_pictures (id, ingredient_id, image_path, sort_order, created_at, updated_at) VALUES ('p1','i1','/tmp/a.jpg',0,1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO ingredient_prices (id, ingredient_id, store_id, price, currency_code, recorded_at, created_at, updated_at) VALUES ('pr1','i1','s1',2.4,'EUR',1000,1000,1000)", []).unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+        let auth = ("Authorization", "Bearer test-key");
+
+        let resp = client.get(format!("{base}/exercises/catalog")).header(auth.0, auth.1).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "e1");
+        assert_eq!(items[0]["name"], "Squat");
+        assert!(items[0].get("exerciseType").is_none());
+        assert_eq!(items[0].get("has_image").and_then(|v| v.as_bool()), Some(false));
+
+        let resp = client.get(format!("{base}/ingredients/catalog")).header(auth.0, auth.1).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["barcode"], "123");
+        assert!(items[0].get("pictures").is_none());
+        assert!(items[0].get("prices").is_none());
+
+        let resp = client.get(format!("{base}/exercises/item/e1")).header(auth.0, auth.1).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["name"], "Squat");
+        assert!(body.get("hasImage").is_some());
+
+        let resp = client.get(format!("{base}/exercises/item/e9")).header(auth.0, auth.1).send().await.unwrap();
+        assert_eq!(resp.status(), 404);
+        let resp = client.get(format!("{base}/exercises/item/missing")).header(auth.0, auth.1).send().await.unwrap();
+        assert_eq!(resp.status(), 404);
+
+        let resp = client.get(format!("{base}/ingredients/item/i1")).header(auth.0, auth.1).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["barcode"], "123");
+        assert_eq!(body["pictures"].as_array().unwrap().len(), 1);
+        assert!(body.get("prices").is_none());
+        assert!(body.get("stores").is_none());
+
+        let resp = client.get(format!("{base}/ingredients/item/missing")).header(auth.0, auth.1).send().await.unwrap();
+        assert_eq!(resp.status(), 404);
+
+        let resp = client.get(format!("{base}/exercises/catalog")).send().await.unwrap();
+        assert_eq!(resp.status(), 401);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
     async fn pull_fx_rates_filtered() {
         use crate::db;
         let pool = db::init_memory().unwrap();
@@ -278,13 +345,11 @@ mod tests {
             "exerciseSets": [{"id":"s1","workoutExerciseId":"we1","setNumber":1,"reps":8,"weightKg":80.0}]
         });
         let resp = client.post(format!("http://127.0.0.1:{port}/workouts")).header("Authorization","Bearer test-key").json(&payload).send().await.unwrap();
-        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.status(), 405);
         {
             let conn = pool.lock().unwrap();
             let c: i64 = conn.query_row("SELECT count(*) FROM workouts WHERE id='w1'", [], |r| r.get(0)).unwrap();
-            assert_eq!(c, 1);
-            let c2: i64 = conn.query_row("SELECT count(*) FROM exercise_sets WHERE id='s1'", [], |r| r.get(0)).unwrap();
-            assert_eq!(c2, 1);
+            assert_eq!(c, 0);
         }
         handle.abort();
     }
@@ -342,11 +407,9 @@ mod tests {
         let client = reqwest::Client::new();
         let data = b"fake sqlite bytes".to_vec();
         let resp = client.post(format!("http://127.0.0.1:{port}/backup")).header("Authorization","Bearer test-key").header("Content-Type","application/octet-stream").body(data.clone()).send().await.unwrap();
-        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.status(), 404);
         let resp = client.get(format!("http://127.0.0.1:{port}/backup/latest")).header("Authorization","Bearer test-key").send().await.unwrap();
-        assert_eq!(resp.status(), 200);
-        let bytes = resp.bytes().await.unwrap();
-        assert_eq!(bytes.to_vec(), data);
+        assert_eq!(resp.status(), 404);
         handle.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -368,7 +431,16 @@ mod tests {
         assert_eq!(resp2.headers().get("content-type").unwrap(), "image/jpeg");
         let resp = client.get(format!("http://127.0.0.1:{port}/media/missing.jpg")).header("Authorization","Bearer test-key").send().await.unwrap();
         assert_eq!(resp.status(), 404);
+        // Exercise media is public so plain <img>/<video> tags (no
+        // Authorization header) can load it; JSON routes stay protected.
         let resp = client.get(format!("http://127.0.0.1:{port}/media/test-id.jpg")).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers().get("content-type").unwrap(), "image/jpeg");
+        let resp = client.get(format!("http://127.0.0.1:{port}/exercises/test-id.jpg")).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let resp = client.get(format!("http://127.0.0.1:{port}/exercises?since=0")).send().await.unwrap();
+        assert_eq!(resp.status(), 401);
+        let resp = client.post(format!("http://127.0.0.1:{port}/ingredients")).send().await.unwrap();
         assert_eq!(resp.status(), 401);
         handle.abort();
         let _ = std::fs::remove_dir_all(&dir);

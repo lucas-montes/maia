@@ -1,8 +1,21 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@import "./tokens.css";
+
+@theme {
+  /* Preserve v3 border rendering: v4 defaults borders to currentColor. */
+  --default-border-color: var(--color-surface-800);
+}
 
 @layer base {
+  /* Zoom factor — adjusted by JS via Ctrl+/- */
+  :root {
+    --zoom-level: 1;
+  }
+
+  html {
+    font-size: calc(16px * var(--zoom-level));
+  }
+
   html,
   body,
   #app {
@@ -11,14 +24,66 @@
   }
 
   body {
-    @apply bg-slate-950 text-slate-100 antialiased;
-    font-size: 18px;
+    @apply bg-surface-950 text-ink-100 antialiased;
+    /* Match 20px at zoom 1.0 (20/16 = 1.25rem) */
+    font-size: 1.25rem;
+  }
+
+  /* ---- Unified form field styling ---- */
+  /* All inputs, selects, textareas: same background, text, border, and height */
+  input,
+  select,
+  textarea,
+  .datepicker-input,
+  .datepicker-toggle {
+    @apply bg-surface-800 text-ink-100;
+    font-size: inherit;
+    line-height: 1.5;
+    box-sizing: border-box;
+  }
+
+  /* Explicit uniform height for single-line form controls */
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea,
+  .datepicker-input,
+  .datepicker-toggle {
+    min-height: 2.75rem;
+  }
+
+  /* Keep textareas taller since they're multi-line */
+  textarea {
+    min-height: 5rem;
+  }
+
+  /* Select-specific: remove native OS arrow (we add a custom one), use dark popup scheme */
+  select {
+    appearance: none;
+    -webkit-appearance: none;
+    color-scheme: dark;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.75rem center;
+    background-size: 1rem;
+    padding-right: 2.25rem;
+  }
+
+  /* Style the native dropdown option list (works on most WebKit builds) */
+  select option {
+    background: var(--color-surface-800);
+    color: var(--color-ink-100);
+  }
+
+  /* Hover highlight for options */
+  select option:hover,
+  select option:focus {
+    background: var(--color-surface-700);
   }
 }
 
 @layer components {
   .app-shell {
-    @apply h-screen w-screen overflow-hidden bg-slate-950 text-slate-100;
+    @apply h-screen w-screen overflow-hidden bg-surface-950 text-ink-100;
   }
 
   .app-shell-grid {
@@ -26,7 +91,7 @@
   }
 
   .app-sidebar {
-    @apply flex h-screen shrink-0 flex-col gap-4 border-r border-slate-800 bg-slate-950 px-3 py-3 transition-[width,padding] duration-200;
+    @apply flex h-screen shrink-0 flex-col gap-4 border-r border-surface-800 bg-surface-950 px-3 py-3 transition-[width,padding] duration-200;
   }
 
   .app-sidebar-expanded {
@@ -38,7 +103,7 @@
   }
 
   .app-sidebar-toggle {
-    @apply self-end inline-flex h-8 w-8 items-center justify-center border border-slate-700 text-slate-300 transition-colors hover:border-slate-500 hover:text-slate-100;
+    @apply self-end inline-flex h-8 w-8 items-center justify-center border border-surface-700 text-ink-300 transition-colors hover:border-ink-500 hover:text-ink-100;
   }
 
   .app-sidebar-brand {
@@ -50,7 +115,7 @@
   }
 
   .app-sidebar-brand-mark {
-    @apply grid h-9 w-9 place-items-center bg-slate-800 font-semibold text-slate-100;
+    @apply grid h-9 w-9 place-items-center bg-surface-800 font-semibold text-ink-100;
   }
 
   .app-sidebar-nav {
@@ -62,11 +127,11 @@
   }
 
   .app-sidebar-nav-button-active {
-    @apply border-sky-500 bg-slate-800 text-slate-50;
+    @apply border-accent-500 bg-surface-800 text-ink-50;
   }
 
   .app-sidebar-nav-button-inactive {
-    @apply border-transparent text-slate-300 hover:border-slate-700 hover:bg-slate-900/70;
+    @apply border-transparent text-ink-300 hover:border-surface-700 hover:bg-surface-900/70;
   }
 
   .app-sidebar-nav-button-collapsed {
@@ -78,11 +143,11 @@
   }
 
   .app-sidebar-footer {
-    @apply border-t border-slate-800 pt-3;
+    @apply border-t border-surface-800 pt-3;
   }
 
   .app-main {
-    @apply min-h-0 min-w-0 overflow-hidden bg-slate-950;
+    @apply min-h-0 min-w-0 overflow-hidden bg-surface-950;
   }
 
   .app-main-scroll {
@@ -91,53 +156,27 @@
 
   /* Button styles */
   .button {
-    @apply inline-flex items-center gap-2 rounded px-4 py-2 text-sm font-medium transition-colors;
-    @apply border border-slate-700 bg-slate-800 text-slate-100;
-    @apply hover:border-slate-500 hover:bg-slate-700;
-    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500;
+    @apply inline-flex items-center gap-2 rounded-maia-control px-4 py-2 text-sm font-medium transition-colors;
+    @apply border border-surface-700 bg-surface-800 text-ink-100;
+    @apply hover:border-ink-500 hover:bg-surface-700;
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500;
     @apply disabled:opacity-50 disabled:cursor-not-allowed;
   }
 
   .button.secondary {
-    @apply border-slate-700 bg-transparent text-slate-300;
-    @apply hover:border-slate-500 hover:text-slate-100;
+    @apply border-surface-700 bg-transparent text-ink-300;
+    @apply hover:border-ink-500 hover:text-ink-100;
   }
 
   .button-outline {
-    @apply inline-flex items-center gap-2 rounded px-3 py-1.5 text-sm font-medium;
-    @apply border border-slate-700 bg-transparent text-slate-400;
-    @apply hover:border-slate-500 hover:text-slate-100;
-    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500;
+    @apply inline-flex items-center gap-2 rounded-maia-control px-3 py-1.5 text-sm font-medium;
+    @apply border border-surface-700 bg-transparent text-ink-400;
+    @apply hover:border-ink-500 hover:text-ink-100;
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500;
   }
 
   .button-outline.active {
-    @apply border-sky-500 text-sky-400;
-  }
-
-  /* Note list styles */
-  .note-list-scroll {
-    @apply flex flex-col gap-1 max-h-[24rem] overflow-y-auto;
-  }
-
-  .note-list-item {
-    @apply w-full text-left rounded border border-slate-800 bg-slate-900/30 px-3 py-2 transition-colors;
-    @apply hover:border-slate-700 hover:bg-slate-900/70;
-  }
-
-  .note-list-item-active {
-    @apply border-sky-500 bg-slate-800/70;
-  }
-
-  .note-list-item-title {
-    @apply text-sm font-medium text-slate-100 truncate;
-  }
-
-  .note-list-item-meta {
-    @apply flex items-center gap-2 mt-1 text-xs text-slate-500;
-  }
-
-  .note-list-item-tags {
-    @apply text-sky-400 truncate;
+    @apply border-accent-500 text-accent-400;
   }
 
   .note-editor {
@@ -148,30 +187,13 @@
     @apply flex-1;
   }
 
-  /* Receipt status badges */
-  .receipt-status-badge {
-    @apply inline-block rounded px-1.5 py-0.5 text-[0.65rem] font-medium uppercase tracking-wider;
-  }
-
-  .receipt-status-pending {
-    @apply bg-slate-700/50 text-slate-400;
-  }
-
-  .receipt-status-reviewed {
-    @apply bg-emerald-900/30 text-emerald-400;
-  }
-
-  .receipt-status-archived {
-    @apply bg-amber-900/30 text-amber-400;
-  }
-
   /* Datepicker styles */
   .datepicker-wrapper {
     @apply relative;
   }
 
   .datepicker-calendar {
-    @apply absolute z-50 top-full left-0 mt-1 w-72 p-3 rounded-lg border border-slate-700 bg-slate-900 shadow-xl;
+    @apply absolute z-50 top-full left-0 mt-1 w-72 p-3 rounded-maia-card border border-surface-700 bg-surface-900 shadow-maia-popover;
   }
 
   .datepicker-calendar.hidden {
@@ -183,7 +205,7 @@
   }
 
   .datepicker-nav {
-    @apply inline-flex h-7 w-7 items-center justify-center rounded text-sm text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-100;
+    @apply inline-flex h-7 w-7 items-center justify-center rounded text-sm text-ink-400 transition-colors hover:bg-surface-800 hover:text-ink-100;
   }
 
   .datepicker-grid {
@@ -191,19 +213,19 @@
   }
 
   .datepicker-weekday {
-    @apply text-center text-xs font-medium text-slate-500 py-1;
+    @apply text-center text-xs font-medium text-ink-500 py-1;
   }
 
   .datepicker-day {
-    @apply inline-flex h-8 w-8 items-center justify-center rounded text-sm text-slate-300 transition-colors hover:bg-slate-800 hover:text-slate-100;
+    @apply inline-flex h-8 w-8 items-center justify-center rounded text-sm text-ink-300 transition-colors hover:bg-surface-800 hover:text-ink-100;
   }
 
   .datepicker-day-selected {
-    @apply bg-sky-600 text-white hover:bg-sky-500;
+    @apply bg-accent-600 text-white hover:bg-accent-500;
   }
 
   .datepicker-day-today {
-    @apply border border-slate-600;
+    @apply border border-surface-600;
   }
 }
 
@@ -242,222 +264,227 @@
     }
   }
 
-  /* Dashboard styles */
-  .metric-grid {
-    @apply grid gap-4 mb-6;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  }
-
-  .activity-list {
-    @apply space-y-3;
-  }
-
-  .activity-item {
-    @apply flex items-start gap-3 p-3 bg-slate-900/50 rounded-lg;
-  }
-
-  .activity-content {
-    @apply flex-1;
-  }
-
-  /* Todo styles */
-  .todo-actions {
-    @apply flex justify-between items-center mb-4;
-  }
-
-  .todo-search {
-    @apply mb-4;
-  }
-
-  .todo-form-section {
-    @apply mb-6;
-  }
-
-  .todo-list {
-    @apply space-y-2;
-  }
-
-  .list-header {
-    @apply mb-2 text-sm text-slate-400;
-  }
-
-  .list-items {
-    @apply space-y-2;
-  }
-
-  .todo-item {
-    @apply flex items-start gap-3 p-3 bg-slate-900/50 rounded-lg cursor-pointer hover:bg-slate-900/70 transition-colors;
-  }
-
-  .todo-item.active {
-    @apply bg-slate-800/50 border-l-2 border-sky-500;
-  }
-
-  .todo-content {
-    @apply flex-1 min-w-0;
-  }
-
-  .todo-title {
-    @apply font-medium block;
-  }
-
-  .todo-meta {
-    @apply flex flex-wrap gap-2 mt-1 text-sm text-slate-400;
-  }
-
-  .todo-due, .todo-tags {
-    @apply flex items-center gap-1;
-  }
-
-  .todo-actions {
-    @apply flex-shrink-0 flex items-center gap-2;
-  }
-
-  .todo-priority {
-    @apply px-2 py-0.5 text-xs rounded font-medium;
-  }
-
-  .priority-high {
-    @apply bg-red-500/20 text-red-400;
-  }
-
-  .priority-medium {
-    @apply bg-yellow-500/20 text-yellow-400;
-  }
-
-  .priority-low {
-    @apply bg-green-500/20 text-green-400;
-  }
-
   .empty-state {
-    @apply text-center py-8 text-slate-500;
+    @apply text-center py-8 text-ink-500;
   }
 
-  /* Receipt styles */
-  .receipt-search {
-    @apply mb-4;
+  /* Note: todo-/receipt-/note-item row generations, settings/status/action
+     groups, and the dashboard/activity helpers were dead CSS (views use
+     note-list-* and inline utilities) and have been removed. The canonical
+     row is .list-row (see component catalog below). */
+}
+
+@layer components {
+  /* ---- Maia component catalog (Phase 3) ----
+     Canonical building blocks. Prefer these over one-off utilities so views
+     stay consistent; see src/styles/CATALOG.md for variants and usage. */
+
+  /* Cards (previously phantom classes — now defined) */
+  .panel {
+    @apply rounded-maia-card border border-surface-800 bg-surface-900/40;
   }
 
-  .receipt-form-section {
-    @apply mb-6;
+  .panel-header {
+    @apply px-5 pt-4;
   }
 
-  .receipt-list {
-    @apply space-y-2;
+  .panel-title {
+    @apply text-lg font-semibold text-ink-100;
   }
 
-  .receipt-item {
-    @apply flex items-start gap-3 p-3 bg-slate-900/50 rounded-lg cursor-pointer hover:bg-slate-900/70 transition-colors;
+  .panel-subtitle {
+    @apply mt-0.5 text-sm text-ink-400;
   }
 
-  .receipt-item.active {
-    @apply bg-slate-800/50 border-l-2 border-sky-500;
+  .panel-content {
+    @apply px-5 pb-5 pt-3;
   }
 
-  .receipt-content {
-    @apply flex-1 min-w-0;
+  .section-header {
+    @apply mb-4 flex items-start justify-between gap-4;
   }
 
-  .receipt-title {
-    @apply font-medium block;
+  /* Buttons */
+  .button.accent {
+    @apply border-transparent bg-accent-600 text-white;
+    @apply hover:border-transparent hover:bg-accent-500;
   }
 
-  .receipt-meta {
-    @apply flex flex-wrap gap-2 mt-1 text-sm text-slate-400;
+  .button.danger {
+    @apply border-err-500/50 bg-transparent text-err-400;
+    @apply hover:border-err-500 hover:text-err-400;
   }
 
-  .receipt-date, .receipt-category {
-    @apply flex items-center gap-1;
+  .button.ok {
+    @apply border-transparent bg-ok-600 text-white;
+    @apply hover:border-transparent hover:bg-ok-500;
   }
 
-  .receipt-actions {
-    @apply flex-shrink-0 flex items-center gap-2;
+  /* Divided list container (rows are plain divs; scroll utilities stay inline) */
+  .list-divided {
+    @apply divide-y divide-surface-800 rounded border border-surface-800;
   }
 
-  .receipt-amount {
-    @apply font-mono text-lg;
+  /* Stat cards (dashboard metrics) */
+  .stat {
+    @apply rounded-maia-card bg-surface-900/50 p-4;
   }
 
-  /* Notes styles */
-  .note-search {
-    @apply mb-4;
+  /* Badges (generalizes receipt-status-badge) */
+  .badge {
+    @apply inline-block rounded-maia-control px-1.5 py-0.5 text-[0.65rem] font-medium uppercase tracking-wider;
   }
 
-  .note-form-section {
-    @apply mb-6;
+  .badge-muted {
+    @apply bg-surface-700/50 text-ink-400;
   }
 
-  .note-list {
-    @apply space-y-2;
+  .badge-ok {
+    @apply bg-ok-400/10 text-ok-400;
   }
 
-  .note-item {
-    @apply flex flex-col gap-2 p-3 bg-slate-900/50 rounded-lg cursor-pointer hover:bg-slate-900/70 transition-colors;
+  .badge-warn {
+    @apply bg-warn-400/10 text-warn-400;
   }
 
-  .note-item.active {
-    @apply bg-slate-800/50 border-l-2 border-sky-500;
+  .badge-err {
+    @apply bg-err-400/10 text-err-400;
   }
 
-  .note-content {
-    @apply flex-1;
+  .badge-info {
+    @apply bg-accent-400/10 text-accent-400;
   }
 
-  .note-title {
-    @apply font-medium block;
+  /* List rows (canonical; todo-/receipt-/note-item converge here in Phase 4) */
+  .list-row {
+    @apply flex items-start gap-3 rounded-maia-card bg-surface-900/50 p-3 transition-colors;
   }
 
-  .note-preview {
-    @apply text-slate-400;
+  a.list-row,
+  button.list-row {
+    @apply cursor-pointer hover:bg-surface-900/70;
   }
 
-  .note-tags {
-    @apply flex flex-wrap gap-1 mt-1;
+  .list-row.active {
+    @apply border-l-2 border-l-accent-500 bg-surface-800/50;
   }
 
-  .note-meta {
-    @apply flex items-center gap-3 text-sm text-slate-500;
+  /* Tabs */
+  .tabs {
+    @apply flex gap-1 border-b border-surface-800;
   }
 
-  .note-updated {
-    @apply flex items-center gap-1;
+  .tab {
+    @apply -mb-px border-b-2 border-transparent px-3 py-2 text-sm text-ink-400 transition-colors hover:text-ink-100;
   }
 
-  /* Settings styles */
-  .settings-section {
-    @apply mb-6;
+  .tab.active {
+    @apply border-accent-500 text-ink-100;
   }
 
-  .settings-title {
-    @apply font-medium text-slate-200 mb-2;
+  /* Modal (toggle .modal-open on the overlay; Escape/backdrop handling is per-view JS) */
+  .modal-overlay {
+    @apply fixed inset-0 z-50 hidden items-center justify-center bg-black/60 p-4;
   }
 
-  .settings-description {
-    @apply text-sm text-slate-400 mb-4;
+  .modal-overlay.modal-open {
+    @apply flex;
   }
 
-  .toggle-group {
-    @apply space-y-3;
+  .modal-dialog {
+    @apply w-full max-w-lg rounded-maia-card border border-surface-700 bg-surface-900 p-5 shadow-maia-popover;
   }
 
-  .action-group {
-    @apply flex flex-wrap gap-3;
+  .modal-title {
+    @apply text-base font-semibold text-ink-100;
   }
 
-  .status-grid {
-    @apply grid gap-3;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  .modal-actions {
+    @apply mt-4 flex justify-end gap-2;
   }
 
-  .status-item {
-    @apply flex flex-col gap-1 p-3 bg-slate-900/50 rounded-lg;
+  /* Drawer (toggle .drawer-open; right-side sheet) */
+  .drawer-overlay {
+    @apply fixed inset-0 z-50 hidden bg-black/60;
   }
 
-  .status-label {
-    @apply text-sm text-slate-400;
+  .drawer-overlay.drawer-open {
+    @apply block;
   }
 
-  .status-value {
-    @apply font-medium text-slate-100;
+  .drawer-panel {
+    @apply fixed inset-y-0 right-0 z-50 hidden w-full max-w-md flex-col gap-3 overflow-y-auto border-l border-surface-700 bg-surface-900 p-5 shadow-maia-popover;
+  }
+
+  .drawer-panel.drawer-open {
+    @apply flex;
+  }
+
+  /* Toasts (stack container fixed bottom-right; views append .toast nodes) */
+  .toast-stack {
+    @apply pointer-events-none fixed bottom-4 right-4 z-[60] flex w-80 flex-col gap-2;
+  }
+
+  .toast {
+    @apply pointer-events-auto flex items-start gap-2 rounded-maia-card border border-surface-700 bg-surface-800 px-3 py-2 text-sm text-ink-100 shadow-maia-raised;
+  }
+
+  .toast-ok {
+    @apply border-ok-400/40;
+  }
+
+  .toast-err {
+    @apply border-err-400/40;
+  }
+
+  /* Chips (compact metadata pills: macros, counts, tags) */
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-maia-control border border-surface-700 bg-surface-800 px-1.5 py-0.5 text-xs text-ink-300;
+  }
+
+  /* Status banners (loading/saving/error notices above content) */
+  .banner {
+    @apply rounded-maia-card border border-surface-700 bg-surface-900/70 p-3 text-sm text-ink-300;
+  }
+
+  .banner-err {
+    @apply border-err-700 bg-err-900/30 text-err-300;
+  }
+
+  .banner-ok {
+    @apply border-ok-700 bg-ok-900/30 text-ok-300;
+  }
+
+  /* Tooltip (CSS-only; put data-tip="…" on any positioned-or-inline host) */
+  [data-tip] {
+    @apply relative;
+  }
+
+  [data-tip]:hover::after {
+    content: attr(data-tip);
+    @apply pointer-events-none absolute bottom-full left-1/2 z-50 mb-1 -translate-x-1/2 whitespace-nowrap rounded-maia-control bg-surface-700 px-2 py-1 text-xs text-ink-100 shadow-maia-raised;
+  }
+
+  /* Skeleton loading blocks */
+  .skeleton {
+    @apply animate-pulse rounded-maia-control bg-surface-800;
+  }
+
+  /* Form helpers */
+  .field-hint {
+    @apply mt-1 text-xs text-ink-500;
+  }
+
+  .field-label {
+    @apply mb-1 block text-sm font-medium text-ink-300;
   }
 }
+
+@layer base {
+  /* Visible keyboard focus for all interactive elements (catalog rule). */
+  :where(a, button, input, select, textarea, [tabindex]):focus-visible {
+    outline: 2px solid var(--color-accent-500);
+    outline-offset: 2px;
+  }
+}
+

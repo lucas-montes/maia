@@ -36,6 +36,8 @@ This file indexes all durable context artifacts for the Maia project.
 | `kb-search` | proposed | FTS5 full-text search, vector embeddings, knowledge graph |
 | `fitfat-sync-server` | completed | Standalone `sync-server` crate (Axum+rusqlite) + full FitFat OpenAPI + Tauri 0.0.0.0:3030 deterministic LAN embedding |
 | `fitfat-visualization` | completed | HTTP-leveraged `GET /workouts|/meals|/body-metrics` + Chart.js 4 canvases + per-chart filters + Settings QR auth token |
+| `fix-fitfat-posts` | completed | Fix all 12 FitFat POSTs (camelCase + `deleted[]`), DB nuke to v30 single `maia.db`, UUID v7, missing GET pulls (templates/notes/tasks/goals/transactions/budget-accounts/receipts/experiments/tags), utoipa at `/docs`, WebKit WebVTT gst-plugins-bad |
+| `ui-unified-tabs` | completed | Grouped collapsible sidebar (Training/Nutrition/Health/Planning/Finance) + 13 tabs, virtual scroll, lazy media, per-tab sync |
 
 ## Decisions
 | Decision | Date | Summary |

@@ -1,13 +1,11 @@
 // Database models for the finance module
 
 use chrono::NaiveDateTime;
-use maia_macros::Crud;
 use serde::{Deserialize, Serialize};
 
 use crate::finances::{Money, outils::Currency};
 
-#[derive(Debug, Serialize, Deserialize, Crud)]
-#[table_name = "investments"]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Investment {
     id: Option<i64>,
     name: String,
@@ -16,8 +14,7 @@ pub struct Investment {
     invested_at: NaiveDateTime,
 }
 
-#[derive(Debug, Serialize, Deserialize, Crud)]
-#[table_name = "transactions"]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Transaction {
     id: Option<i64>,
     description: String,

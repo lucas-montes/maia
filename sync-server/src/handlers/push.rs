@@ -1,4 +1,4 @@
-use axum::{extract::State, response::IntoResponse, Json};
+use axum::{body::Bytes, extract::State, http::{HeaderMap, StatusCode}, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 
 use crate::{db, server::AppState};
@@ -36,6 +36,8 @@ pub struct IngredientContribution {
     pub pictures: Vec<IngredientPicturePush>,
     #[serde(default)]
     pub prices: Vec<IngredientPricePush>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -75,6 +77,8 @@ pub struct WorkoutsPush {
     pub workout_exercises: Vec<WorkoutExercisePush>,
     #[serde(rename = "exerciseSets", default)]
     pub exercise_sets: Vec<ExerciseSetPush>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -146,6 +150,8 @@ pub struct TemplatesPush {
     pub workout_template_exercises: Vec<WorkoutTemplateExercisePush>,
     #[serde(rename = "workoutTemplateSets", default)]
     pub workout_template_sets: Vec<WorkoutTemplateSetPush>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -254,6 +260,11 @@ pub async fn push_ingredient(
         )
         .unwrap();
     }
+    for id in payload.deleted {
+        let _ = tx.execute("UPDATE ingredients SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("UPDATE ingredient_pictures SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("UPDATE ingredient_prices SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+    }
 
     tx.commit().unwrap();
     Json(SyncAck { server_time })
@@ -286,6 +297,11 @@ pub async fn push_workouts(
             "INSERT INTO exercise_sets (id, workout_exercise_id, set_number, reps, weight_kg, rest_seconds, actual_reps, actual_weight_kg, actual_rest_seconds, completed_at, duration_minutes, distance_meters, actual_duration_minutes, actual_distance_meters, notes, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, NULL) ON CONFLICT(id) DO UPDATE SET workout_exercise_id=excluded.workout_exercise_id, set_number=excluded.set_number, reps=excluded.reps, weight_kg=excluded.weight_kg, rest_seconds=excluded.rest_seconds, actual_reps=excluded.actual_reps, actual_weight_kg=excluded.actual_weight_kg, actual_rest_seconds=excluded.actual_rest_seconds, completed_at=excluded.completed_at, duration_minutes=excluded.duration_minutes, distance_meters=excluded.distance_meters, actual_duration_minutes=excluded.actual_duration_minutes, actual_distance_meters=excluded.actual_distance_meters, notes=excluded.notes, updated_at=excluded.updated_at, deleted_at=NULL",
             rusqlite::params![s.id, s.workout_exercise_id, s.set_number, s.reps, s.weight_kg, s.rest_seconds, s.actual_reps, s.actual_weight_kg, s.actual_rest_seconds, s.completed_at, s.duration_minutes, s.distance_meters, s.actual_duration_minutes, s.actual_distance_meters, s.notes, server_time],
         ).unwrap();
+    }
+    for id in payload.deleted {
+        let _ = tx.execute("UPDATE workouts SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("UPDATE workout_exercises SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("UPDATE exercise_sets SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
     }
 
     tx.commit().unwrap();
@@ -321,9 +337,28 @@ pub async fn push_templates(
         )
         .unwrap();
     }
+    for id in payload.deleted {
+        let _ = tx.execute("UPDATE workout_templates SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("UPDATE workout_template_exercises SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("UPDATE workout_template_sets SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+    }
 
     tx.commit().unwrap();
     Json(SyncAck { server_time })
+}
+
+#[derive(Deserialize)]
+pub struct NoteAudioPush {
+    pub id: String,
+    #[serde(rename = "noteId")]
+    pub note_id: String,
+    #[serde(rename = "audioPath")]
+    pub audio_path: String,
+    #[serde(rename = "durationMs")]
+    pub duration_ms: i64,
+    pub position: i64,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
 }
 
 #[derive(Deserialize)]
@@ -332,6 +367,10 @@ pub struct NotesPush {
     pub notes: Vec<NotePush>,
     #[serde(rename = "noteTags", default)]
     pub note_tags: Vec<NoteTagPush>,
+    #[serde(rename = "noteAudio", default)]
+    pub note_audio: Vec<NoteAudioPush>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -359,6 +398,8 @@ pub struct TasksPush {
     pub tasks: Vec<TaskPush>,
     #[serde(rename = "taskTags", default)]
     pub task_tags: Vec<TaskTagPush>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -409,6 +450,8 @@ pub struct GoalsPush {
     pub goal_progress_entries: Vec<GoalProgressEntryPush>,
     #[serde(rename = "goalTags", default)]
     pub goal_tags: Vec<GoalTagPush>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -461,9 +504,49 @@ pub struct GoalTagPush {
 
 pub async fn push_notes(
     State(state): State<AppState>,
-    Json(payload): Json<NotesPush>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> impl IntoResponse {
+    let content_type = headers.get(axum::http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let server_time = db::server_time_ms();
+    if content_type.starts_with("multipart/") {
+        let boundary = content_type.split("boundary=").nth(1).unwrap_or("").trim_matches('"').trim().to_string();
+        if boundary.is_empty() {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message":"missing boundary"}))).into_response();
+        }
+        let (note_audio_opt, audio_bytes) = parse_multipart_note_audio(&body, &boundary);
+        let note_audio: NoteAudioPush = if let Some(s) = note_audio_opt {
+            match serde_json::from_str(&s) {
+                Ok(v) => v,
+                Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": e.to_string()}))).into_response(),
+            }
+        } else {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message":"missing noteAudio field"}))).into_response();
+        };
+        let conn = state.db.lock().unwrap();
+        if let Some(bytes) = audio_bytes {
+            let base = state.config.db_path.parent().unwrap_or(std::path::Path::new("/tmp"));
+            let dir = base.join("note_audio");
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join(format!("{}.mp3", note_audio.id));
+            let _ = std::fs::write(&path, &bytes);
+            let stored_path = path.to_string_lossy().to_string();
+            conn.execute(
+                "INSERT INTO note_audio (id, note_id, audio_path, duration_ms, position, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL) ON CONFLICT(id) DO UPDATE SET note_id=excluded.note_id, audio_path=excluded.audio_path, duration_ms=excluded.duration_ms, position=excluded.position, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
+                rusqlite::params![note_audio.id, note_audio.note_id, stored_path, note_audio.duration_ms, note_audio.position, note_audio.created_at, server_time],
+            ).unwrap();
+        } else {
+            conn.execute(
+                "INSERT INTO note_audio (id, note_id, audio_path, duration_ms, position, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL) ON CONFLICT(id) DO UPDATE SET note_id=excluded.note_id, audio_path=excluded.audio_path, duration_ms=excluded.duration_ms, position=excluded.position, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
+                rusqlite::params![note_audio.id, note_audio.note_id, note_audio.audio_path, note_audio.duration_ms, note_audio.position, note_audio.created_at, server_time],
+            ).unwrap();
+        }
+        return (StatusCode::OK, Json(serde_json::json!({"server_time": server_time}))).into_response();
+    }
+    let payload: NotesPush = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": e.to_string()}))).into_response(),
+    };
     let conn = state.db.lock().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
     for n in payload.notes {
@@ -485,8 +568,58 @@ pub async fn push_notes(
         )
         .unwrap();
     }
+    for na in payload.note_audio {
+        tx.execute(
+            "INSERT INTO note_audio (id, note_id, audio_path, duration_ms, position, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL) ON CONFLICT(id) DO UPDATE SET note_id=excluded.note_id, audio_path=excluded.audio_path, duration_ms=excluded.duration_ms, position=excluded.position, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
+            rusqlite::params![na.id, na.note_id, na.audio_path, na.duration_ms, na.position, na.created_at, server_time],
+        )
+        .unwrap();
+    }
+    for id in payload.deleted {
+        let _ = tx.execute("UPDATE notes SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("UPDATE note_audio SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("UPDATE note_tags SET deleted_at=?1 WHERE tag_id=?2 OR note_id=?2", rusqlite::params![server_time, id]);
+    }
     tx.commit().unwrap();
-    Json(SyncAck { server_time })
+    (StatusCode::OK, Json(serde_json::json!({"server_time": server_time}))).into_response()
+}
+
+fn parse_multipart_note_audio(body: &[u8], boundary: &str) -> (Option<String>, Option<Vec<u8>>) {
+    let boundary_bytes = format!("--{boundary}").into_bytes();
+    let parts = split_bytes(body, &boundary_bytes);
+    let mut note_audio_opt=None; let mut audio_opt=None;
+    for part in parts {
+        let text = String::from_utf8_lossy(part);
+        if text.contains("name=\"noteAudio\"") || text.contains("name=noteAudio") {
+            if let Some(start) = find_double_crlf(part) {
+                let json_bytes = &part[start..];
+                let end = find_boundary_end(json_bytes);
+                let s = String::from_utf8_lossy(&json_bytes[..end]).trim().trim_matches('\r').trim_matches('\n').to_string();
+                if !s.is_empty() { note_audio_opt=Some(s); }
+            }
+        } else if text.contains("name=\"audio\"") || text.contains("name=audio") {
+            if let Some(start) = find_double_crlf(part) {
+                let pic_bytes = &part[start..];
+                let end = find_boundary_end(pic_bytes);
+                audio_opt=Some(pic_bytes[..end].to_vec());
+            }
+        }
+    }
+    (note_audio_opt, audio_opt)
+}
+fn split_bytes<'a>(data: &'a [u8], pattern: &[u8]) -> Vec<&'a [u8]> {
+    let mut res=Vec::new(); let mut start=0; let mut i=0;
+    while i+pattern.len() <= data.len() {
+        if &data[i..i+pattern.len()] == pattern { res.push(&data[start..i]); i+=pattern.len(); start=i; } else { i+=1; }
+    }
+    if start < data.len() { res.push(&data[start..]); }
+    res
+}
+fn find_double_crlf(data: &[u8]) -> Option<usize> {
+    data.windows(4).position(|w| w==b"\r\n\r\n").map(|p| p+4).or_else(|| data.windows(2).position(|w| w==b"\n\n").map(|p| p+2))
+}
+fn find_boundary_end(data: &[u8]) -> usize {
+    if let Some(pos)=data.windows(4).position(|w| w==b"\r\n--") { pos } else if let Some(pos)=data.windows(2).position(|w| w==b"\n-") { pos } else { data.len() }
 }
 
 pub async fn push_tasks(
@@ -513,6 +646,10 @@ pub async fn push_tasks(
             rusqlite::params![tt.tag_id, tt.task_id],
         )
         .unwrap();
+    }
+    for id in payload.deleted {
+        let _ = tx.execute("UPDATE tasks SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("UPDATE task_tags SET deleted_at=?1 WHERE tag_id=?2 OR task_id=?2", rusqlite::params![server_time, id]);
     }
     tx.commit().unwrap();
     Json(SyncAck { server_time })
@@ -549,6 +686,11 @@ pub async fn push_goals(
         )
         .unwrap();
     }
+    for id in payload.deleted {
+        let _ = tx.execute("UPDATE goals SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("UPDATE goal_progress_entries SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("UPDATE goal_tags SET deleted_at=?1 WHERE tag_id=?2 OR goal_id=?2", rusqlite::params![server_time, id]);
+    }
     tx.commit().unwrap();
     Json(SyncAck { server_time })
 }
@@ -559,6 +701,8 @@ pub struct MealsPush {
     pub meals: Vec<MealPush>,
     #[serde(rename = "mealIngredients", default)]
     pub meal_ingredients: Vec<MealIngredientPush>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -585,6 +729,8 @@ pub struct MealIngredientPush {
 pub struct TransactionsPush {
     #[serde(default)]
     pub transactions: Vec<TransactionPush>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -618,6 +764,8 @@ pub struct TransactionPush {
 pub struct BudgetAccountsPush {
     #[serde(default)]
     pub accounts: Vec<AccountPush>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -654,6 +802,10 @@ pub async fn push_meals(
         )
         .unwrap();
     }
+    for id in payload.deleted {
+        let _ = tx.execute("UPDATE meals SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("UPDATE meal_ingredients SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+    }
     tx.commit().unwrap();
     Json(SyncAck { server_time })
 }
@@ -671,6 +823,9 @@ pub async fn push_transactions(
             rusqlite::params![t.id, t.type_, t.amount, t.currency_code, t.amount_base, t.rate_used, t.account_id, t.to_account_id, t.category, t.date, t.note, t.receipt_id, if t.is_draft {1} else {0}, t.created_at, server_time],
         ).unwrap();
     }
+    for id in payload.deleted {
+        let _ = tx.execute("UPDATE transactions SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+    }
     tx.commit().unwrap();
     Json(SyncAck { server_time })
 }
@@ -687,6 +842,9 @@ pub async fn push_budget_accounts(
             "INSERT INTO accounts (id, name, type, opening_balance, note, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, opening_balance=excluded.opening_balance, note=excluded.note, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
             rusqlite::params![a.id, a.name, a.type_, a.opening_balance, a.note, a.created_at, server_time],
         ).unwrap();
+    }
+    for id in payload.deleted {
+        let _ = tx.execute("UPDATE accounts SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
     }
     tx.commit().unwrap();
     Json(SyncAck { server_time })

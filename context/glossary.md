@@ -20,3 +20,7 @@
 | **FitFat Visualization** | `maia-ui` `ViewId="fitfat"` reading `sync-server` HTTP (`GET /workouts|/meals|/body-metrics`) with per-chart `since` filters, Chart.js, no duplicate Tauri DB logic |
 | **Per-Chart Filter** | Each FitFat chart owns its `since`/`date` state (`data-fitfat-filter`), `fetch(...?since=<ms>)` re-fetches only that chart |
 | **QR Auth Payload** | Settings QR `{"url":"http://<lan-ip>:3030","apiKey":"<Bearer>","version":1}` via `qrcode` canvas + copy, not logged |
+| **UUID v7** | Time-ordered UUID (`Uuid::now_v7()`) used for all PKs (`TEXT PRIMARY KEY`), `uuid` crate `v7` feature, replaces `v4` for `since` cursor ordering |
+| **Single maia.db v30** | Single SQLite file `maia.db` with FitFat Drift v30 schema (38 tables, TEXT PK, epoch ms, JSON arrays, composite PKs `fx_rates`/`ingredient_prices`), no legacy `INTEGER AUTOINCREMENT` tables; `sync_server::db::create_schema` is source of truth |
+| **deleted[]** | POST `deleted: string[]` + GET `deleted: string[]` via `deleted_at > since`, soft-delete `UPDATE ... SET deleted_at=server_time` (T02-T03) |
+| **Utoipa OpenAPI** | `utoipa 4` + `utoipa-swagger-ui 7` at `/docs` + `/api-docs/openapi.json`, `ApiDoc::openapi()` in `sync-server/src/openapi.rs`, `Bearer` `bearerAuth` |

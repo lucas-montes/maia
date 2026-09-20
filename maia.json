@@ -1,7 +1,8 @@
 {
-  "receipts_path": "test_dir",
+  "nutriments_path": null,
+  "receipts_path": null,
   "bank_statements_path": null,
   "investments_statements_path": null,
   "database": "maia.db",
-  "model_api": "$GEMINI_API"
+  "models_api": []
 }

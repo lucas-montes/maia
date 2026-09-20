@@ -24,7 +24,7 @@ pub fn init_memory() -> anyhow::Result<DbPool> {
     init_db(Path::new(":memory:"))
 }
 
-fn create_schema(conn: &Connection) -> anyhow::Result<()> {
+pub fn create_schema(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS ingredients (
@@ -447,6 +447,23 @@ fn create_schema(conn: &Connection) -> anyhow::Result<()> {
             updated_at INTEGER NOT NULL DEFAULT 0,
             deleted_at INTEGER
         );
+        "#,
+    )?;
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS urls (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            url TEXT NOT NULL,
+            source TEXT,
+            tags TEXT,
+            is_new INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            deleted_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_urls_url ON urls(url);
+        CREATE INDEX IF NOT EXISTS idx_urls_is_new ON urls(is_new);
         "#,
     )?;
     Ok(())

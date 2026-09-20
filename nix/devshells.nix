@@ -30,10 +30,14 @@
       pkgs.sqlite
       pkgs.librsvg
       pkgs.webkitgtk_4_1
+      pkgs.gst_all_1.gstreamer
+      pkgs.gst_all_1.gst-plugins-base
+      pkgs.gst_all_1.gst-plugins-bad
     ];
 
     shellHook = ''
       export XDG_DATA_DIRS="$GSETTINGS_SCHEMAS_PATH" # Needed on Wayland to report the correct display scale
+      export GST_PLUGIN_PATH="${pkgs.gst_all_1.gst-plugins-bad}/lib/gstreamer-1.0:${pkgs.gst_all_1.gst-plugins-base}/lib/gstreamer-1.0:${pkgs.gst_all_1.gstreamer}/lib/gstreamer-1.0:$GST_PLUGIN_PATH"
     '';
   };
 in {
