@@ -5,4 +5,5 @@ pub mod media;
 pub mod pull;
 pub mod push;
 pub mod read;
+pub mod receipt_ocr;
 pub mod receipts;

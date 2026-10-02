@@ -19,22 +19,23 @@ interface NoteWithContent extends Note {
   content: string;
 }
 
+/** Matches the `receipts` table in `sync_server::db` (v30 schema). */
 interface Receipt {
-  id: number;
-  receipt_id: string | null;
-  original_path: string;
-  current_path: string;
-  archived_path: string | null;
-  status: string | null;
-  parsed_json_path: string | null;
-  merchant: string | null;
-  total: string | null;
-  date: string | null;
-  category: string | null;
-  tags: string | null;
-  checksum: string | null;
-  created_at: string;
-  processed_at: string | null;
+  id: string;
+  localPath: string;
+  remotePath: string | null;
+  /** 0 local | 1 uploading | 2 uploaded | 3 error | 4 parsing */
+  uploadStatus: number;
+  parsed: boolean;
+  /** OCR result as a JSON *string*, not a nested object. */
+  parsedJson: string | null;
+  parseError: string | null;
+  transactionId: string | null;
+  archivedPath: string | null;
+  archivedAt: number | null;
+  /** Epoch milliseconds. */
+  createdAt: number;
+  updatedAt: number;
 }
 
 interface SavedUrl {
@@ -92,7 +93,7 @@ interface NotesState {
 
 interface ReceiptsState {
   receipts: Receipt[];
-  selectedId: number | null;
+  selectedId: string | null;
   status: "idle" | "loading" | "error";
   statusMessage: string;
 }
@@ -524,7 +525,7 @@ async function loadReceipts(): Promise<void> {
   render();
 }
 
-async function selectReceipt(id: number): Promise<void> {
+async function selectReceipt(id: string): Promise<void> {
   state.receipts.status = "loading";
   state.receipts.statusMessage = "";
   render();
@@ -546,6 +547,83 @@ async function selectReceipt(id: number): Promise<void> {
     state.receipts.statusMessage = `Failed to read receipt: ${e}`;
   }
   render();
+  await loadReceiptImages();
+}
+
+/** Fills in any `<img data-receipt-image>` placeholder with bytes from disk. */
+async function loadReceiptImages(): Promise<void> {
+  const placeholders = Array.from(
+    document.querySelectorAll<HTMLImageElement>("img[data-receipt-image]"),
+  );
+  await Promise.all(
+    placeholders.map(async (img) => {
+      const id = img.dataset.receiptImage;
+      if (!id || img.dataset.receiptLoaded === "1") return;
+      try {
+        const result = await invoke<{
+          success: boolean;
+          data?: { base64: string; contentType: string };
+          error?: string;
+        }>("read_receipt_picture", { id });
+        if (result.success && result.data) {
+          img.src = `data:${result.data.contentType};base64,${result.data.base64}`;
+          img.dataset.receiptLoaded = "1";
+        } else {
+          img.replaceWith(
+            Object.assign(document.createElement("div"), {
+              className: "p-4 text-center text-xs text-ink-500",
+              textContent: result.error ?? "Image unavailable",
+            }),
+          );
+        }
+      } catch (e) {
+        img.replaceWith(
+          Object.assign(document.createElement("div"), {
+            className: "p-4 text-center text-xs text-ink-500",
+            textContent: `Image unavailable: ${e}`,
+          }),
+        );
+      }
+    }),
+  );
+}
+
+async function archiveSelectedReceipt(id: string): Promise<void> {
+  state.receipts.status = "loading";
+  state.receipts.statusMessage = "";
+  render();
+  try {
+    const result = await invoke<{ success: boolean; error?: string }>("archive_receipt", { id });
+    if (!result.success) {
+      state.receipts.status = "error";
+      state.receipts.statusMessage = result.error ?? "Failed to archive receipt";
+    } else {
+      state.receipts.status = "idle";
+    }
+  } catch (e) {
+    state.receipts.status = "error";
+    state.receipts.statusMessage = `Failed to archive receipt: ${e}`;
+  }
+  await loadReceipts();
+}
+
+async function restoreSelectedReceipt(id: string): Promise<void> {
+  state.receipts.status = "loading";
+  state.receipts.statusMessage = "";
+  render();
+  try {
+    const result = await invoke<{ success: boolean; error?: string }>("restore_receipt", { id });
+    if (!result.success) {
+      state.receipts.status = "error";
+      state.receipts.statusMessage = result.error ?? "Failed to restore receipt";
+    } else {
+      state.receipts.status = "idle";
+    }
+  } catch (e) {
+    state.receipts.status = "error";
+    state.receipts.statusMessage = `Failed to restore receipt: ${e}`;
+  }
+  await loadReceipts();
 }
 
 // ---- Task functions ----
@@ -1216,7 +1294,7 @@ function handleClick(event: MouseEvent): void {
   // Handle receipts list item click
   const receiptItem = target.closest<HTMLElement>("[data-receipt-id]");
   if (receiptItem?.dataset.receiptId) {
-    selectReceipt(Number(receiptItem.dataset.receiptId));
+    selectReceipt(receiptItem.dataset.receiptId);
     return;
   }
 
@@ -1225,6 +1303,19 @@ function handleClick(event: MouseEvent): void {
   if (receiptBackButton) {
     state.receipts.selectedId = null;
     render();
+    return;
+  }
+
+  // Archive / restore the receipt shown in the detail panel.
+  const archiveButton = target.closest<HTMLElement>("[data-action='archive-receipt']");
+  if (archiveButton?.dataset.receiptId) {
+    archiveSelectedReceipt(archiveButton.dataset.receiptId);
+    return;
+  }
+
+  const restoreButton = target.closest<HTMLElement>("[data-action='restore-receipt']");
+  if (restoreButton?.dataset.receiptId) {
+    restoreSelectedReceipt(restoreButton.dataset.receiptId);
     return;
   }
 
@@ -1702,25 +1793,89 @@ function closeAllDatepickers(): void {
 
 // ---- Receipt render functions ----
 
+/** Display status derived from the row; there is no status column in the schema. */
+function receiptDisplayStatus(r: Receipt): string {
+  if (r.archivedAt !== null) return "archived";
+  if (r.parsed) return "parsed";
+  switch (r.uploadStatus) {
+    case 1:
+      return "uploading";
+    case 2:
+    case 4:
+      return "parsing";
+    case 3:
+      return "error";
+    default:
+      return "local";
+  }
+}
+
+function receiptBadgeClass(r: Receipt): string {
+  switch (receiptDisplayStatus(r)) {
+    case "parsed":
+      return "badge-ok";
+    case "archived":
+      return "badge-warn";
+    case "error":
+      return "badge-err";
+    default:
+      return "badge-muted";
+  }
+}
+
+/** The OCR payload, or null when unparsed/unparseable. `parsedJson` is a text blob. */
+function receiptParsed(r: Receipt): Record<string, unknown> | null {
+  if (!r.parsedJson) return null;
+  try {
+    const v = JSON.parse(r.parsedJson);
+    return typeof v === "object" && v !== null ? (v as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function receiptParsedText(r: Receipt, key: string): string | null {
+  const v = receiptParsed(r)?.[key];
+  if (v === null || v === undefined) return null;
+  return typeof v === "object" ? JSON.stringify(v) : String(v);
+}
+
+/** Epoch milliseconds to a short local date. */
+function formatEpoch(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return "";
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function renderReceiptList(): string {
   const items = state.receipts.receipts
-    .map(
-      (r) => `
-        <button class="list-row w-full text-left ${state.receipts.selectedId === r.id ? "active" : ""}" type="button" data-receipt-id="${r.id}">
+    .map((r) => {
+      const merchant = receiptParsedText(r, "merchant");
+      const total = receiptParsedText(r, "total");
+      const date = receiptParsedText(r, "date");
+      const title = merchant || `Receipt ${r.id.slice(0, 8)}`;
+      const image = r.archivedPath || r.remotePath;
+      return `
+        <button class="list-row w-full text-left ${state.receipts.selectedId === r.id ? "active" : ""}" type="button" data-receipt-id="${escapeHtml(r.id)}">
           <div class="min-w-0 flex-1">
-            <div class="truncate text-sm font-medium text-ink-100">${escapeHtml(r.merchant || r.receipt_id || `Receipt #${r.id}`)}</div>
+            <div class="truncate text-sm font-medium text-ink-100">${escapeHtml(title)}</div>
             <div class="mt-1 flex items-center gap-2 text-xs text-ink-500">
-              ${r.date ? `<span>${escapeHtml(formatDate(r.date))}</span>` : ""}
-              ${r.total ? `<span class="font-mono text-accent-400">${escapeHtml(r.total)}</span>` : ""}
-              <span class="badge ${r.status === "reviewed" ? "badge-ok" : r.status === "archived" ? "badge-warn" : "badge-muted"}">${escapeHtml(r.status || "pending")}</span>
+              ${date ? `<span>${escapeHtml(date)}</span>` : ""}
+              ${total ? `<span class="font-mono text-accent-400">${escapeHtml(total)}</span>` : ""}
+              <span class="badge ${receiptBadgeClass(r)}">${escapeHtml(receiptDisplayStatus(r))}</span>
             </div>
-            <div class="mt-1 flex items-center gap-2 text-xs text-ink-500">
-              <span class="truncate text-accent-400/70">${escapeHtml(r.current_path)}</span>
-            </div>
+            ${image ? `<div class="mt-1 truncate text-xs text-accent-400/70">${escapeHtml(image)}</div>` : ""}
           </div>
         </button>
-      `,
-    )
+      `;
+    })
     .join("");
 
   if (!items) {
@@ -1735,71 +1890,81 @@ function renderReceiptDetail(): string {
     return `<div class="flex items-center justify-center h-full text-sm text-ink-500">Receipt not found</div>`;
   }
 
+  const status = receiptDisplayStatus(r);
   const statusColor =
-    r.status === "archived" ? "text-warn-400" :
-    r.status === "reviewed" ? "text-ok-400" :
+    status === "archived" ? "text-warn-400" :
+    status === "parsed" ? "text-ok-400" :
+    status === "error" ? "text-err-400" :
     "text-ink-400";
+
+  const merchant = receiptParsedText(r, "merchant");
+  const total = receiptParsedText(r, "total");
+  const currency = receiptParsedText(r, "currency");
+  const date = receiptParsedText(r, "date");
+  const items = receiptParsed(r)?.items;
+
+  // Archiving requires a parse, and only makes sense once one exists.
+  const canArchive = r.parsed && r.archivedAt === null;
+  const canRestore = r.archivedAt !== null;
 
   return `
     <div class="space-y-4">
       <div class="rounded border border-surface-800 bg-surface-900/30 p-4">
         <h3 class="text-sm font-medium text-ink-200 mb-3">Receipt Info</h3>
         <div class="grid grid-cols-2 gap-3 text-sm">
-          <div><span class="text-ink-500">ID:</span> <span class="text-ink-200">${escapeHtml(r.receipt_id || `#${r.id}`)}</span></div>
-          <div><span class="text-ink-500">Status:</span> <span class="${statusColor}">${escapeHtml(r.status || "pending")}</span></div>
-          ${r.merchant ? `<div class="col-span-2"><span class="text-ink-500">Merchant:</span> <span class="text-ink-200">${escapeHtml(r.merchant)}</span></div>` : ""}
-          ${r.total ? `<div><span class="text-ink-500">Total:</span> <span class="text-ink-200 font-mono">${escapeHtml(r.total)}</span></div>` : ""}
-          ${r.date ? `<div><span class="text-ink-500">Date:</span> <span class="text-ink-200">${escapeHtml(r.date)}</span></div>` : ""}
-          ${r.category ? `<div><span class="text-ink-500">Category:</span> <span class="text-ink-200">${escapeHtml(r.category)}</span></div>` : ""}
+          <div class="col-span-2"><span class="text-ink-500">ID:</span> <span class="font-mono text-xs text-ink-300 break-all">${escapeHtml(r.id)}</span></div>
+          <div><span class="text-ink-500">Status:</span> <span class="${statusColor}">${escapeHtml(status)}</span></div>
+          <div><span class="text-ink-500">Uploaded:</span> <span class="text-ink-300">${escapeHtml(formatEpoch(r.createdAt))}</span></div>
+          ${merchant ? `<div class="col-span-2"><span class="text-ink-500">Merchant:</span> <span class="text-ink-200">${escapeHtml(merchant)}</span></div>` : ""}
+          ${total ? `<div><span class="text-ink-500">Total:</span> <span class="text-ink-200 font-mono">${escapeHtml(total)}${currency ? ` ${escapeHtml(currency)}` : ""}</span></div>` : ""}
+          ${date ? `<div><span class="text-ink-500">Date:</span> <span class="text-ink-200">${escapeHtml(date)}</span></div>` : ""}
+          ${Array.isArray(items) ? `<div><span class="text-ink-500">Items:</span> <span class="text-ink-200">${items.length}</span></div>` : ""}
+          ${r.transactionId ? `<div class="col-span-2"><span class="text-ink-500">Transaction:</span> <span class="font-mono text-xs text-accent-400 break-all">${escapeHtml(r.transactionId)}</span></div>` : ""}
         </div>
+        ${r.parseError
+          ? `<div class="mt-3 rounded border border-surface-800 bg-surface-900/60 p-2 text-xs text-err-400">Parse failed: ${escapeHtml(r.parseError)}</div>`
+          : ""}
       </div>
 
       <div class="rounded border border-surface-800 bg-surface-900/30 p-4">
-        <h3 class="text-sm font-medium text-ink-200 mb-3">File Paths</h3>
-        <div class="space-y-2 text-sm">
-          <div>
-            <span class="text-ink-500">Original:</span>
-            <div class="font-mono text-xs text-ink-300 mt-0.5 break-all">${escapeHtml(r.original_path)}</div>
-          </div>
-          <div>
-            <span class="text-ink-500">Current:</span>
-            <div class="font-mono text-xs text-accent-400 mt-0.5 break-all">${escapeHtml(r.current_path)}</div>
-          </div>
-          ${r.archived_path
-            ? `<div>
-                <span class="text-ink-500">Archived:</span>
-                <div class="font-mono text-xs text-warn-400 mt-0.5 break-all">${escapeHtml(r.archived_path)}</div>
-              </div>`
+        <h3 class="text-sm font-medium text-ink-200 mb-3">Image</h3>
+        <img
+          class="max-h-96 w-full rounded object-contain"
+          alt="Receipt ${escapeHtml(r.id)}"
+          data-receipt-image="${escapeHtml(r.id)}"
+        />
+        <div class="mt-2 space-y-1 text-xs">
+          ${r.archivedPath
+            ? `<div><span class="text-ink-500">Archived:</span> <span class="font-mono text-warn-400 break-all">${escapeHtml(r.archivedPath)}</span></div>`
             : ""}
-          ${r.parsed_json_path
-            ? `<div>
-                <span class="text-ink-500">Parsed JSON:</span>
-                <div class="font-mono text-xs text-ink-300 mt-0.5 break-all">${escapeHtml(r.parsed_json_path)}</div>
-              </div>`
+          ${r.remotePath
+            ? `<div><span class="text-ink-500">Stored:</span> <span class="font-mono text-accent-400 break-all">${escapeHtml(r.remotePath)}</span></div>`
             : ""}
-          ${r.checksum
-            ? `<div>
-                <span class="text-ink-500">Checksum:</span>
-                <div class="font-mono text-xs text-ink-400 mt-0.5">${escapeHtml(r.checksum)}</div>
-              </div>`
+          ${r.localPath
+            ? `<div><span class="text-ink-500">Phone:</span> <span class="font-mono text-ink-400 break-all">${escapeHtml(r.localPath)}</span></div>`
             : ""}
         </div>
       </div>
 
-      <div class="rounded border border-surface-800 bg-surface-900/30 p-4">
-        <h3 class="text-sm font-medium text-ink-200 mb-3">Timestamps</h3>
-        <div class="grid grid-cols-2 gap-2 text-sm">
-          <div><span class="text-ink-500">Created:</span> <span class="text-ink-300">${escapeHtml(formatDate(r.created_at))}</span></div>
-          ${r.processed_at
-            ? `<div><span class="text-ink-500">Processed:</span> <span class="text-ink-300">${escapeHtml(formatDate(r.processed_at))}</span></div>`
-            : `<div><span class="text-ink-500">Processed:</span> <span class="text-ink-500">not yet</span></div>`}
-        </div>
-      </div>
+      ${r.parsedJson
+        ? `<div class="rounded border border-surface-800 bg-surface-900/30 p-4">
+            <h3 class="text-sm font-medium text-ink-200 mb-3">Parsed JSON</h3>
+            <pre class="max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-ink-300">${escapeHtml(
+              JSON.stringify(receiptParsed(r), null, 2) ?? r.parsedJson,
+            )}</pre>
+          </div>`
+        : ""}
 
-      <div class="flex items-center gap-3">
+      <div class="flex flex-wrap items-center gap-3">
         <button class="button secondary" type="button" data-action="receipts-back">
           ← Back to list
         </button>
+        ${canArchive
+          ? `<button class="button" type="button" data-action="archive-receipt" data-receipt-id="${escapeHtml(r.id)}">Archive</button>`
+          : ""}
+        ${canRestore
+          ? `<button class="button secondary" type="button" data-action="restore-receipt" data-receipt-id="${escapeHtml(r.id)}">Restore</button>`
+          : ""}
       </div>
     </div>
   `;
@@ -1824,7 +1989,7 @@ function renderReceipts(): string {
           <p class="panel-subtitle">
             ${(() => {
               const r = s.receipts.find((x) => x.id === s.selectedId);
-              return r ? `ID: ${escapeHtml(r.receipt_id || `#${r.id}`)}` : "";
+              return r ? `ID: ${escapeHtml(r.id)}` : "";
             })()}
           </p>
         </div>

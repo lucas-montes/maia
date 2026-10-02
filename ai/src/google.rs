@@ -120,14 +120,38 @@ pub struct Model {
     client: reqwest::Client,
 }
 
+pub const DEFAULT_MODEL: &str = "gemini-2.5-flash";
+pub const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+/// Vision extraction sends a full-size image and waits on a large model, so the
+/// ceiling is generous — but it must not be unbounded, or a hung upstream call
+/// pins a request forever.
+const REQUEST_TIMEOUT_SECS: u64 = 90;
+
 impl Model {
     pub fn new(api_key: String) -> Self {
+        Self::with_model(api_key, DEFAULT_MODEL.to_string())
+    }
+
+    pub fn with_model(api_key: String, name: String) -> Self {
+        Self::with_base_url(api_key, name, DEFAULT_BASE_URL.to_string())
+    }
+
+    pub fn with_base_url(api_key: String, name: String, base_url: String) -> Self {
+        let base_url = base_url.trim_end_matches('/').to_string();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .build()
+            .unwrap_or_default();
         Self {
-            name: "gemini-2.5-flash".to_string(),
+            name,
             api_key,
-            base_url: "https://generativelanguage.googleapis.com/v1beta/models".to_string(),
-            client: reqwest::Client::new(),
+            base_url,
+            client,
         }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     //TODO: we want to declare the output somewhere instead of using this Value
@@ -136,11 +160,6 @@ impl Model {
         request: &GeminiRequest,
     ) -> Result<GeminiResponse, reqwest::Error> {
         let url = format!("{}/{}:generateContent", self.base_url, self.name);
-
-        assert_eq!(
-            url,
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-        );
 
         self.client
             .post(&url)

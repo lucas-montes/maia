@@ -341,7 +341,10 @@ pub fn create_schema(conn: &Connection) -> anyhow::Result<()> {
             upload_status INTEGER NOT NULL DEFAULT 0,
             parsed INTEGER NOT NULL DEFAULT 0,
             parsed_json TEXT,
+            parse_error TEXT,
             transaction_id TEXT,
+            archived_path TEXT,
+            archived_at INTEGER,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL DEFAULT 0,
             deleted_at INTEGER
@@ -466,7 +469,43 @@ pub fn create_schema(conn: &Connection) -> anyhow::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_urls_is_new ON urls(is_new);
         "#,
     )?;
+    add_missing_columns(conn)
+}
+
+/// Columns added to `receipts` after the initial v30 schema shipped.
+///
+/// [`create_schema`] is a batch of `CREATE TABLE IF NOT EXISTS` statements, so
+/// editing the `receipts` definition only reaches *new* databases. These are
+/// applied with a guarded `ALTER TABLE` so an existing `maia.db` picks them up.
+const RECEIPTS_ADDED_COLUMNS: &[(&str, &str)] = &[
+    // Set when a background OCR job fails, so the phone can report why.
+    ("parse_error", "TEXT"),
+    // Desktop-side archive location and time; see `archive_receipt`.
+    ("archived_path", "TEXT"),
+    ("archived_at", "INTEGER"),
+];
+
+/// Adds any [`RECEIPTS_ADDED_COLUMNS`] not already present. Idempotent.
+fn add_missing_columns(conn: &Connection) -> anyhow::Result<()> {
+    for (name, ty) in RECEIPTS_ADDED_COLUMNS {
+        if column_exists(conn, "receipts", name)? {
+            continue;
+        }
+        // `name`/`ty` come from the const table above, never from user input.
+        conn.execute_batch(&format!("ALTER TABLE receipts ADD COLUMN {name} {ty}"))?;
+    }
     Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn server_time_ms() -> i64 {
@@ -488,6 +527,60 @@ mod tests {
             .query_row("SELECT count(*) FROM sqlite_master WHERE type='table'", [], |r| r.get(0))
             .unwrap();
         assert!(count >= 30);
+    }
+
+    #[test]
+    fn receipts_columns_added_to_pre_existing_table() {
+        // Reproduce a pre-existing v30 `receipts` table that predates the new
+        // columns: `CREATE TABLE IF NOT EXISTS` would leave it untouched.
+        let pool = init_memory().unwrap();
+        let conn = pool.lock().unwrap();
+        conn.execute_batch(
+            "DROP TABLE receipts;
+             CREATE TABLE receipts (
+                 id TEXT PRIMARY KEY,
+                 local_path TEXT NOT NULL,
+                 remote_path TEXT,
+                 upload_status INTEGER NOT NULL DEFAULT 0,
+                 parsed INTEGER NOT NULL DEFAULT 0,
+                 parsed_json TEXT,
+                 transaction_id TEXT,
+                 created_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL DEFAULT 0,
+                 deleted_at INTEGER
+             );",
+        )
+        .unwrap();
+        assert!(!super::column_exists(&conn, "receipts", "parse_error").unwrap());
+
+        super::create_schema(&conn).unwrap();
+
+        for (name, _) in super::RECEIPTS_ADDED_COLUMNS {
+            assert!(
+                super::column_exists(&conn, "receipts", name).unwrap(),
+                "missing column {name}"
+            );
+        }
+
+        // Re-running must not fail on the now-present columns.
+        super::create_schema(&conn).unwrap();
+
+        // And the new columns are usable.
+        conn.execute(
+            "INSERT INTO receipts (id, local_path, created_at, parse_error, archived_path, archived_at)
+             VALUES ('r1', '/tmp/x.jpg', 1000, 'boom', 'receipts_archive/r1', 2000)",
+            [],
+        )
+        .unwrap();
+        let (err, arch): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT parse_error, archived_path FROM receipts WHERE id = 'r1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(err.as_deref(), Some("boom"));
+        assert_eq!(arch.as_deref(), Some("receipts_archive/r1"));
     }
 
     #[test]

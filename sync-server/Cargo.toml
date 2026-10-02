@@ -17,4 +17,5 @@ uuid = { version = "1.0", features = ["v4", "v7", "serde"] }
 anyhow = "1.0"
 utoipa = { version = "4", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "7", features = ["axum"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+ai = { path = "../ai" }

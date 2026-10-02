@@ -1,6 +1,6 @@
 use std::fs;
 use std::net::UdpSocket;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rusqlite::{Connection, params};
@@ -42,24 +42,51 @@ struct NoteWithContent {
     updated_at: String,
 }
 
+/// A receipt row, matching the `receipts` table in `sync_server::db`.
+///
+/// `id` is a UUID v7 string and timestamps are epoch milliseconds, per the v30
+/// schema. The previous struct targeted a long-gone `original_path` /
+/// `current_path` / `archived_path` file-triplet layout with an `INTEGER` id.
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct Receipt {
-    id: i64,
-    receipt_id: Option<String>,
-    original_path: String,
-    current_path: String,
+    id: String,
+    local_path: String,
+    remote_path: Option<String>,
+    /// Mirrors the client's `ReceiptStatus`: 0 local, 1 uploading,
+    /// 2 uploaded, 3 error, 4 parsing.
+    upload_status: i64,
+    parsed: bool,
+    /// The OCR result as a JSON *string*, not a nested object.
+    parsed_json: Option<String>,
+    parse_error: Option<String>,
+    transaction_id: Option<String>,
     archived_path: Option<String>,
-    status: Option<String>,
-    parsed_json_path: Option<String>,
-    merchant: Option<String>,
-    total: Option<String>,
-    date: Option<String>,
-    category: Option<String>,
-    tags: Option<String>,
-    checksum: Option<String>,
-    created_at: String,
-    processed_at: Option<String>,
+    archived_at: Option<i64>,
+    created_at: i64,
+    updated_at: i64,
 }
+
+impl Receipt {
+    /// Display status derived from the row, since there is no status column.
+    fn display_status(&self) -> &'static str {
+        if self.archived_at.is_some() {
+            "archived"
+        } else if self.parsed {
+            "parsed"
+        } else {
+            match self.upload_status {
+                1 => "uploading",
+                2 | 4 => "parsing",
+                3 => "error",
+                _ => "local",
+            }
+        }
+    }
+}
+
+const RECEIPT_COLUMNS: &str = "id, local_path, remote_path, upload_status, parsed, parsed_json, \
+     parse_error, transaction_id, archived_path, archived_at, created_at, updated_at";
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Task {
@@ -180,6 +207,42 @@ fn get_sync_api_key_value() -> String {
     "fitfat-sync-key".to_string()
 }
 
+/// Vision-model key for receipt OCR, read from the flat `model_api` field that
+/// the settings form writes (`CONFIG_FIELD_DEFS` in `src/main.ts`).
+///
+/// A leading `$` is treated as an environment-variable name, matching the
+/// `"e.g. $GEMINI_API"` placeholder shown in that field. Falls back to
+/// `MAIA_MODEL_API_KEY`.
+fn get_model_api_key_value() -> String {
+    let raw = fs::read_to_string("maia.json")
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|config| {
+            config
+                .get("model_api")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+
+    if let Some(var) = raw.strip_prefix('$') {
+        return std::env::var(var).unwrap_or_default();
+    }
+    if !raw.is_empty() {
+        return raw;
+    }
+    std::env::var("MAIA_MODEL_API_KEY").unwrap_or_default()
+}
+
+/// Vision model id. The settings form exposes a single `model_api` field for
+/// the key, so the model name stays fixed at the `ai` crate default. (It is a
+/// separate constant rather than an inline literal so `with_model` has one
+/// place to change.)
+fn get_model_name_value() -> String {
+    "gemini-2.5-flash".to_string()
+}
+
 #[tauri::command]
 fn get_sync_port(state: tauri::State<Mutex<SyncServerState>>) -> u16 {
     state.lock().map(|s| s.port).unwrap_or(0)
@@ -245,8 +308,24 @@ fn get_server_diagnostics(state: tauri::State<Mutex<SyncServerState>>) -> serde_
         "isListening": is_listening,
         "lanIp": lan_ip,
         "apiKeyMasked": masked,
-        "hasApiKey": !api_key.is_empty()
+        "hasApiKey": !api_key.is_empty(),
+        // Receipt OCR needs a vision-model key; without one the sync server
+        // answers the parse endpoints with 503.
+        "modelApiKeyMasked": mask_secret(&get_model_api_key_value()),
+        "hasModelApiKey": !get_model_api_key_value().is_empty()
     })
+}
+
+/// Shows only the first and last few characters of a secret, mirroring how the
+/// sync API key is displayed.
+fn mask_secret(secret: &str) -> String {
+    if secret.is_empty() {
+        return String::new();
+    }
+    if secret.len() <= 8 {
+        return "***".to_string();
+    }
+    format!("{}...{}", &secret[..4], &secret[secret.len() - 4..])
 }
 
 /// Slugify a title for use as a filename.
@@ -364,77 +443,155 @@ fn read_note(state: tauri::State<AppState>, id: i64) -> CommandResult<NoteWithCo
 
 // ---- Receipt commands ----
 
-#[tauri::command]
-fn list_receipts(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
-    let mut stmt = match conn.prepare("SELECT id, local_path, remote_path, upload_status, parsed, parsed_json, transaction_id, created_at, updated_at FROM receipts WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 500") { Ok(s)=>s, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
-    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"localPath":r.get::<_,String>(1)?,"remotePath":r.get::<_,Option<String>>(2)?,"uploadStatus":r.get::<_,i64>(3)?,"parsed":r.get::<_,i64>(4)?!=0,"parsedJson":r.get::<_,Option<String>>(5)?,"transactionId":r.get::<_,Option<String>>(6)?,"createdAt":r.get::<_,i64>(7)?,"updatedAt":r.get::<_,i64>(8)?}))).unwrap().filter_map(|r|r.ok()).collect();
-    CommandResult{success:true,data:Some(rows),error:None}
+/// Directory holding receipt pictures, relative to the database file.
+fn receipt_picture_dir() -> PathBuf {
+    PathBuf::from(get_database_path())
+        .parent()
+        .map(|p| p.to_path_buf())
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("receipt_pictures")
+}
+
+/// Resolves a stored (relative) receipt path against the picture directory.
+///
+/// Stored paths come from the sync server and must not be able to escape it.
+fn resolve_receipt_file(base: &Path, stored: &str) -> Option<PathBuf> {
+    if stored.is_empty() {
+        return None;
+    }
+    let relative = Path::new(stored);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    Some(base.join(relative))
+}
+
+/// Builds a [`Receipt`] from a `receipts` row, columns in `RECEIPT_COLUMNS` order.
+fn map_receipt(r: &rusqlite::Row<'_>) -> rusqlite::Result<Receipt> {
+    Ok(Receipt {
+        id: r.get(0)?,
+        local_path: r.get(1)?,
+        remote_path: r.get(2)?,
+        upload_status: r.get(3)?,
+        parsed: r.get::<_, i64>(4)? != 0,
+        parsed_json: r.get(5)?,
+        parse_error: r.get(6)?,
+        transaction_id: r.get(7)?,
+        archived_path: r.get(8)?,
+        archived_at: r.get(9)?,
+        created_at: r.get(10)?,
+        updated_at: r.get(11)?,
+    })
 }
 
 #[tauri::command]
-fn read_receipt(state: tauri::State<AppState>, id: i64) -> CommandResult<Receipt> {
+fn list_receipts(state: tauri::State<AppState>) -> CommandResult<Vec<Receipt>> {
     let conn = match state.db.lock() {
         Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
+        Err(e) => return CommandResult { success: false, data: None, error: Some(format!("lock {e}")) },
     };
+    let sql = format!(
+        "SELECT {RECEIPT_COLUMNS} FROM receipts WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 500"
+    );
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(e) => return CommandResult { success: false, data: None, error: Some(format!("{e}")) },
+    };
+    let rows: Vec<Receipt> = stmt
+        .query_map([], map_receipt)
+        .unwrap_or_else(|e| panic!("query receipts: {e}"))
+        .filter_map(|r| r.ok())
+        .collect();
+    CommandResult { success: true, data: Some(rows), error: None }
+}
 
-    let receipt = match conn.query_row(
-        "SELECT id, receipt_id, original_path, current_path, archived_path,
-                status, parsed_json_path, merchant, total, date, category,
-                tags, checksum, created_at, processed_at
-         FROM receipts WHERE id = ?1",
-        params![id],
-        |row| {
-            Ok(Receipt {
-                id: row.get(0)?,
-                receipt_id: row.get(1)?,
-                original_path: row.get(2)?,
-                current_path: row.get(3)?,
-                archived_path: row.get(4)?,
-                status: row.get(5)?,
-                parsed_json_path: row.get(6)?,
-                merchant: row.get(7)?,
-                total: row.get(8)?,
-                date: row.get(9)?,
-                category: row.get(10)?,
-                tags: row.get(11)?,
-                checksum: row.get(12)?,
-                created_at: row.get::<_, String>(13).unwrap_or_default(),
-                processed_at: row.get(14)?,
-            })
-        },
-    ) {
-        Ok(r) => r,
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
+/// Loads one receipt, shared by the Tauri command and the archive/restore
+/// commands that need to re-read the row after updating it.
+fn load_receipt(state: &AppState, id: &str) -> Result<Receipt, String> {
+    let conn = state.db.lock().map_err(|e| format!("Database lock error: {e}"))?;
+    let sql = format!("SELECT {RECEIPT_COLUMNS} FROM receipts WHERE id = ?1 AND deleted_at IS NULL");
+    conn.query_row(&sql, params![id], map_receipt).map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => "Receipt not found".to_string(),
+        other => format!("Query error: {other}"),
+    })
+}
+
+#[tauri::command]
+fn read_receipt(state: tauri::State<AppState>, id: String) -> CommandResult<Receipt> {
+    match load_receipt(&state, &id) {
+        Ok(receipt) => CommandResult { success: true, data: Some(receipt), error: None },
+        Err(e) => CommandResult { success: false, data: None, error: Some(e) },
+    }
+}
+
+/// Raw bytes for a receipt image, for the detail view's `<img>`.
+///
+/// Wraps [`load_receipt`] in the `CommandResult` envelope the commands return.
+fn finish_receipt(state: &AppState, id: &str) -> CommandResult<Receipt> {
+    match load_receipt(state, id) {
+        Ok(r) => CommandResult { success: true, data: Some(r), error: None },
+        Err(e) => CommandResult { success: false, data: None, error: Some(e) },
+    }
+}
+
+/// Raw bytes for a receipt image, for the detail view.s `<img>`.: that
+/// endpoint sits behind Bearer auth, which a plain image tag cannot send.
+#[tauri::command]
+fn read_receipt_picture(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
+    let row = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => return CommandResult { success: false, data: None, error: Some(format!("Database lock error: {e}")) },
+        };
+        conn.query_row(
+            "SELECT remote_path, archived_path FROM receipts WHERE id = ?1 AND deleted_at IS NULL",
+            params![id],
+            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+    };
+    let (remote_path, archived_path) = match row {
+        Ok(v) => v,
+        Err(_) => {
             return CommandResult {
                 success: false,
                 data: None,
                 error: Some("Receipt not found".to_string()),
-            };
-        }
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Query error: {e}")),
-            };
+            }
         }
     };
 
-    CommandResult {
-        success: true,
-        data: Some(receipt),
-        error: None,
+    // Archived folders win: archiving *moved* the file.
+    let base = receipt_picture_dir();
+    let path = archived_path
+        .or(remote_path)
+        .and_then(|p| resolve_receipt_file(&base, &p));
+    let Some(path) = path else {
+        return CommandResult { success: false, data: None, error: Some("Receipt image not found".to_string()) };
+    };
+    match fs::read(&path) {
+        Ok(bytes) => CommandResult {
+            success: true,
+            data: Some(serde_json::json!({
+                "base64": base64_encode(&bytes),
+                "contentType": content_type_for_receipt(&path),
+            })),
+            error: None,
+        },
+        Err(e) => CommandResult {
+            success: false,
+            data: None,
+            error: Some(format!("Cannot read receipt image: {e}")),
+        },
     }
 }
 
+/// Archive directory for receipts, from `receipts.archived_dir` in maia.json.
+///
 /// Read the archive directory from maia.json's `receipts.archived_dir`, or default.
 fn get_archive_dir() -> PathBuf {
     if let Ok(content) = fs::read_to_string("maia.json") {
@@ -457,91 +614,134 @@ fn get_archive_dir() -> PathBuf {
     fallback
 }
 
+/// Content type for a stored receipt image, from its extension.
+fn content_type_for_receipt(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .as_deref()
+        .unwrap_or("")
+    {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "heic" => "image/heic",
+        "heif" => "image/heif",
+        _ => "image/jpeg",
+    }
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// The `receipt.json` sidecar written beside an archived image, so the archive
+/// folder stays meaningful without the database.
+fn archive_manifest(receipt: &Receipt, source: &str, archived_at: i64) -> serde_json::Value {
+    // `parsed_json` is stored as a text blob; surface it as a real object when
+    // it parses, and fall back to the raw string if it ever doesn't.
+    let parsed = match &receipt.parsed_json {
+        Some(text) => serde_json::from_str::<serde_json::Value>(text)
+            .unwrap_or_else(|_| serde_json::Value::String(text.clone())),
+        None => serde_json::Value::Null,
+    };
+    serde_json::json!({
+        "id": receipt.id,
+        "archivedAt": archived_at,
+        "source": source,
+        "uploadStatus": receipt.upload_status,
+        "parsed": receipt.parsed,
+        "transactionId": receipt.transaction_id,
+        "parsedJson": parsed,
+    })
+}
+
+/// Moves a parsed receipt's image into the archive directory, next to a
+/// `receipt.json` copy of its parsed data.
+///
+/// `remote_path` is deliberately left untouched: it records where the image
+/// lived, which is what makes [`restore_receipt`] possible.
 #[tauri::command]
-fn archive_receipt(state: tauri::State<AppState>, id: i64) -> CommandResult<Receipt> {
-    // Read current receipt from DB
-    let (current_path, _receipt_id) = {
-        let conn = match state.db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return CommandResult {
-                    success: false,
-                    data: None,
-                    error: Some(format!("Database lock error: {e}")),
-                };
-            }
-        };
-
-        let result: Result<(String, Option<String>), _> = conn.query_row(
-            "SELECT current_path, receipt_id FROM receipts WHERE id = ?1",
-            params![id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        );
-
-        match result {
-            Ok(r) => r,
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                return CommandResult {
-                    success: false,
-                    data: None,
-                    error: Some("Receipt not found".to_string()),
-                };
-            }
-            Err(e) => {
-                return CommandResult {
-                    success: false,
-                    data: None,
-                    error: Some(format!("Query error: {e}")),
-                };
-            }
-        }
+fn archive_receipt(state: tauri::State<AppState>, id: String) -> CommandResult<Receipt> {
+    let receipt = match load_receipt(&state, &id) {
+        Ok(r) => r,
+        Err(e) => return CommandResult { success: false, data: None, error: Some(e) },
     };
 
-    let source = PathBuf::from(&current_path);
+    if receipt.archived_at.is_some() {
+        return CommandResult {
+            success: false,
+            data: None,
+            error: Some("Receipt is already archived".to_string()),
+        };
+    }
+    if !receipt.parsed {
+        return CommandResult {
+            success: false,
+            data: None,
+            error: Some("Receipt has not been parsed yet".to_string()),
+        };
+    }
+
+    let base = receipt_picture_dir();
+    let Some(source_rel) = receipt.remote_path.clone() else {
+        return CommandResult {
+            success: false,
+            data: None,
+            error: Some("Receipt has no stored image to archive".to_string()),
+        };
+    };
+    let Some(source) = resolve_receipt_file(&base, &source_rel) else {
+        return CommandResult {
+            success: false,
+            data: None,
+            error: Some("Receipt image path is invalid".to_string()),
+        };
+    };
     if !source.exists() {
         return CommandResult {
             success: false,
             data: None,
-            error: Some(format!("Receipt file not found at '{current_path}'")),
+            error: Some(format!("Receipt image not found at {}", source.display())),
         };
     }
 
-    // Determine destination filename
-    let archive_dir = get_archive_dir();
-    let filename = source
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| format!("receipt_{id}.jpg"));
-    let dest = archive_dir.join(&filename);
+    let folder = get_archive_dir().join(&id);
+    if let Err(e) = fs::create_dir_all(&folder) {
+        return CommandResult {
+            success: false,
+            data: None,
+            error: Some(format!("Cannot create archive folder: {e}")),
+        };
+    }
+    // One folder per receipt id, so the destination name is unambiguous.
+    let ext = source
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_else(|| "jpg".to_string());
+    let dest = folder.join(format!("receipt.{ext}"));
 
-    // If dest already exists, prepend receipt_id
-    let dest = if dest.exists() {
-        let stem = source
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "receipt".to_string());
-        let ext = source
-            .extension()
-            .map(|e| format!(".{}", e.to_string_lossy()))
-            .unwrap_or_else(|| ".jpg".to_string());
-        let dedup = format!("{}_{}{}", stem, id, ext);
-        archive_dir.join(dedup)
-    } else {
-        dest
-    };
-
-    // Move the file
     if let Err(e) = fs::rename(&source, &dest) {
         return CommandResult {
             success: false,
             data: None,
-            error: Some(format!("Failed to move file to '{}': {e}", dest.display())),
+            error: Some(format!("Cannot archive image: {e}")),
         };
     }
 
-    let dest_str = dest.to_string_lossy().to_string();
+    let archived_at = chrono::Utc::now().timestamp_millis();
+    let manifest = archive_manifest(&receipt, &source_rel, archived_at);
+    if let Err(e) = fs::write(folder.join("receipt.json"), manifest.to_string()) {
+        // Roll the move back so the receipt is not left without its JSON.
+        let _ = fs::rename(&dest, &source);
+        return CommandResult {
+            success: false,
+            data: None,
+            error: Some(format!("Cannot write archive manifest: {e}")),
+        };
+    }
 
-    // Update the database
+    let archived_folder = folder.to_string_lossy().to_string();
     let conn = match state.db.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -549,65 +749,106 @@ fn archive_receipt(state: tauri::State<AppState>, id: i64) -> CommandResult<Rece
                 success: false,
                 data: None,
                 error: Some(format!("Database lock error: {e}")),
-            };
+            }
         }
     };
-
     if let Err(e) = conn.execute(
-        "UPDATE receipts SET status = 'archived', archived_path = current_path, current_path = ?1, processed_at = datetime('now') WHERE id = ?2",
-        params![dest_str, id],
+        "UPDATE receipts SET archived_path = ?1, archived_at = ?2, updated_at = ?2 WHERE id = ?3",
+        params![archived_folder, archived_at, id],
     ) {
+        return CommandResult { success: false, data: None, error: Some(format!("{e}")) };
+    }
+    drop(conn);
+
+    finish_receipt(&state, &id)
+}
+
+/// Inverse of [`archive_receipt`]: moves the image back to `remote_path` and
+/// drops the sidecar. `remote_path` was never rewritten, so the original
+/// location is still known.
+#[tauri::command]
+fn restore_receipt(state: tauri::State<AppState>, id: String) -> CommandResult<Receipt> {
+    let receipt = match load_receipt(&state, &id) {
+        Ok(r) => r,
+        Err(e) => return CommandResult { success: false, data: None, error: Some(e) },
+    };
+
+    let Some(archived_folder) = receipt.archived_path.clone() else {
         return CommandResult {
             success: false,
             data: None,
-            error: Some(format!("Failed to update receipt: {e}")),
+            error: Some("Receipt is not archived".to_string()),
+        };
+    };
+    let folder = PathBuf::from(&archived_folder);
+    let image = fs::read_dir(&folder)
+        .ok()
+        .and_then(|entries| {
+            entries.flatten().find_map(|e| {
+                let p = e.path();
+                let is_json = p.extension().map(|x| x == "json").unwrap_or(false);
+                (!is_json && p.is_file()).then_some(p)
+            })
+        });
+    let Some(image) = image else {
+        return CommandResult {
+            success: false,
+            data: None,
+            error: Some(format!("No archived image found in {archived_folder}")),
+        };
+    };
+
+    // `remote_path` is relative to the picture directory.
+    let Some(source_rel) = receipt.remote_path.clone() else {
+        return CommandResult {
+            success: false,
+            data: None,
+            error: Some("Receipt has no recorded image path to restore to".to_string()),
+        };
+    };
+    let Some(dest) = resolve_receipt_file(&receipt_picture_dir(), &source_rel) else {
+        return CommandResult {
+            success: false,
+            data: None,
+            error: Some("Receipt image path is invalid".to_string()),
+        };
+    };
+    if let Some(parent) = dest.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Err(e) = fs::rename(&image, &dest) {
+        return CommandResult {
+            success: false,
+            data: None,
+            error: Some(format!("Cannot restore image: {e}")),
         };
     }
 
-    // Read back the updated receipt
-    let receipt = match conn.query_row(
-        "SELECT id, receipt_id, original_path, current_path, archived_path,
-                status, parsed_json_path, merchant, total, date, category,
-                tags, checksum, created_at, processed_at
-         FROM receipts WHERE id = ?1",
-        params![id],
-        |row| {
-            Ok(Receipt {
-                id: row.get(0)?,
-                receipt_id: row.get(1)?,
-                original_path: row.get(2)?,
-                current_path: row.get(3)?,
-                archived_path: row.get(4)?,
-                status: row.get(5)?,
-                parsed_json_path: row.get(6)?,
-                merchant: row.get(7)?,
-                total: row.get(8)?,
-                date: row.get(9)?,
-                category: row.get(10)?,
-                tags: row.get(11)?,
-                checksum: row.get(12)?,
-                created_at: row.get::<_, String>(13).unwrap_or_default(),
-                processed_at: row.get(14)?,
-            })
-        },
-    ) {
-        Ok(r) => r,
+    // The archive folder is now redundant once the JSON sidecar is gone.
+    let _ = fs::remove_file(folder.join("receipt.json"));
+    let _ = fs::remove_dir(&folder);
+
+    let conn = match state.db.lock() {
+        Ok(c) => c,
         Err(e) => {
             return CommandResult {
                 success: false,
                 data: None,
-                error: Some(format!("Failed to read back receipt: {e}")),
-            };
+                error: Some(format!("Database lock error: {e}")),
+            }
         }
     };
-
-    CommandResult {
-        success: true,
-        data: Some(receipt),
-        error: None,
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e) = conn.execute(
+        "UPDATE receipts SET archived_path = NULL, archived_at = NULL, updated_at = ?1 WHERE id = ?2",
+        params![now, id],
+    ) {
+        return CommandResult { success: false, data: None, error: Some(format!("{e}")) };
     }
-}
+    drop(conn);
 
+    finish_receipt(&state, &id)
+}
 // ---- Task commands ----
 
 #[tauri::command]
@@ -1123,7 +1364,9 @@ pub fn run() {
 
     let sync_db_path = get_sync_db_path();
     let sync_api_key = get_sync_api_key_value();
-    let sync_config = SyncConfig::new(sync_db_path, sync_api_key);
+    let model_api_key = get_model_api_key_value();
+    let model_name = get_model_name_value();
+    let sync_config = SyncConfig::new(sync_db_path, sync_api_key).with_model(model_api_key, model_name);
     let sync_state = Mutex::new(SyncServerState { port: 0, url: String::new() });
 
     tauri::Builder::default()
@@ -1164,7 +1407,9 @@ pub fn run() {
             read_note,
             list_receipts,
             read_receipt,
+            read_receipt_picture,
             archive_receipt,
+            restore_receipt,
             list_tasks,
             list_goals,
             get_counts,

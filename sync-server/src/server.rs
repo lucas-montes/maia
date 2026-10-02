@@ -1,18 +1,41 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::{extract::ConnectInfo, http::HeaderName, middleware, routing::get, Router};
+use axum::extract::DefaultBodyLimit;
 use axum::http::Method;
+use axum::routing::post;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tower_http::cors::{Any, CorsLayer};
 
 use utoipa::OpenApi as _;
 use crate::{auth, config::Config, db, handlers::health, logs, openapi::ApiDoc};
 
+/// Ceiling for a single receipt upload. Comfortably above a modern phone photo
+/// while still bounded, so a bad actor cannot stream indefinitely.
+const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub db: db::DbPool,
     pub logs: logs::LogBuffer,
+    /// Vision model for receipt OCR, `None` when no model key is configured.
+    /// Handlers check this to report `503` instead of calling the model.
+    pub ocr: Option<Arc<ai::Model>>,
+}
+
+impl AppState {
+    pub fn new(config: Config, db: db::DbPool) -> Self {
+        let ocr = config
+            .ocr_enabled()
+            .then(|| Arc::new(ai::Model::with_model(config.model_api_key.clone(), config.model_name.clone())));
+        Self {
+            config: Arc::new(config),
+            db,
+            logs: logs::new_buffer(200),
+            ocr,
+        }
+    }
 }
 
 pub fn create_router(state: AppState) -> Router {
@@ -49,6 +72,15 @@ pub fn create_router(state: AppState) -> Router {
         .route("/transactions", get(crate::handlers::pull::pull_transactions))
         .route("/budget-accounts", get(crate::handlers::pull::pull_accounts))
         .route("/receipt-pictures", get(crate::handlers::pull::pull_receipts).post(crate::handlers::receipts::push_receipt_pictures))
+        .route(
+            "/receipt-pictures/upload",
+            post(crate::handlers::receipt_ocr::upload_receipt_picture)
+                // axum defaults to a 2 MB body cap, which is below what a phone
+                // camera produces. Raise it for the upload route only.
+                .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        .route("/receipt-pictures/:id/parse", get(crate::handlers::receipt_ocr::get_receipt_parse))
+        .route("/receipt-pictures/:id/picture", get(crate::handlers::receipt_ocr::get_receipt_picture))
         .route("/experiments", get(crate::handlers::pull::pull_experiments))
         .route("/tags", get(crate::handlers::pull::pull_tags))
         .route("/backup/latest", get(crate::handlers::backup::get_backup))
@@ -127,11 +159,7 @@ pub async fn start_server(config: Config) -> anyhow::Result<(u16, JoinHandle<()>
     }
     let listener = TcpListener::bind(&config.bind_addr).await?;
     let port = listener.local_addr()?.port();
-    let state = AppState {
-        config: Arc::new(config),
-        db,
-        logs: logs::new_buffer(200),
-    };
+    let state = AppState::new(config, db);
     let router = create_router(state);
     let handle = tokio::spawn(async move {
         axum::serve(
@@ -151,14 +179,19 @@ pub async fn start_test_server() -> (u16, JoinHandle<()>) {
 
 #[cfg(test)]
 pub async fn start_test_server_with_db(db: db::DbPool) -> (u16, JoinHandle<()>) {
-    let config = Config::default();
+    start_test_server_with_config(Config::default(), db).await
+}
+
+/// Starts a server with an explicit [config], for tests that need a specific
+/// binding or a configured model key.
+#[cfg(test)]
+pub async fn start_test_server_with_config(
+    config: Config,
+    db: db::DbPool,
+) -> (u16, JoinHandle<()>) {
     let listener = TcpListener::bind(&config.bind_addr).await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let state = AppState {
-        config: Arc::new(config),
-        db,
-        logs: logs::new_buffer(200),
-    };
+    let state = AppState::new(config, db);
     let router = create_router(state);
     let handle = tokio::spawn(async move {
         axum::serve(

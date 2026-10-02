@@ -53,7 +53,7 @@ pub async fn get_media(State(state): State<AppState>, Path(id): Path<String>) ->
     (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({"message":"not found"}))).into_response()
 }
 
-async fn serve_file(path: PathBuf, content_type: &str) -> Response {
+pub(crate) async fn serve_file(path: PathBuf, content_type: &str) -> Response {
     match tokio::fs::read(&path).await {
         Ok(bytes) => Response::builder()
             .status(StatusCode::OK)
@@ -64,6 +64,19 @@ async fn serve_file(path: PathBuf, content_type: &str) -> Response {
     }
 }
 
-fn is_safe_id(id: &str) -> bool {
+/// Rejects ids that could escape their directory when used as a path segment.
+pub(crate) fn is_safe_id(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+/// Content type for a file extension, used when serving stored receipts.
+pub(crate) fn content_type_for_ext(ext: &str) -> &'static str {
+    match ext.to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "heic" => "image/heic",
+        "heif" => "image/heif",
+        _ => "application/octet-stream",
+    }
 }

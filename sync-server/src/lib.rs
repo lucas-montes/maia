@@ -6,6 +6,7 @@ pub mod handlers;
 pub mod logs;
 pub mod openapi;
 pub mod openfoodfacts;
+pub mod receipt_ocr;
 pub mod seed;
 pub mod server;
 
@@ -410,6 +411,387 @@ mod tests {
         assert_eq!(resp.status(), 404);
         let resp = client.get(format!("http://127.0.0.1:{port}/backup/latest")).header("Authorization","Bearer test-key").send().await.unwrap();
         assert_eq!(resp.status(), 404);
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Receipt OCR pipeline
+    //
+    // These exercise the request/response and persistence contract. The model
+    // call itself is not mocked: `receipt_ocr_live_gemini` covers it and only
+    // runs when `MAIA_TEST_GEMINI_KEY` is set.
+    // -----------------------------------------------------------------------
+
+    /// Spins up a server on a temp DB with a (fake) model key so `state.ocr` is
+    /// populated, and returns the temp dir so the caller can clean up.
+    async fn start_receipt_ocr_server(model_key: Option<&str>) -> (u16, tokio::task::JoinHandle<()>, std::path::PathBuf) {
+        use crate::db;
+        let dir = std::env::temp_dir().join(format!("maia-test-ocr-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("maia.db");
+        let mut config = crate::config::Config::new(db_path, "test-key".to_string()).with_bind_addr("0.0.0.0:0");
+        if let Some(k) = model_key {
+            config = config.with_model(k, "gemini-2.5-flash");
+        }
+        let pool = db::init_db(&config.db_path).unwrap();
+        let (port, handle) = crate::server::start_test_server_with_config(config, pool).await;
+        (port, handle, dir)
+    }
+
+    fn ocr_form(id: &str, bytes: &[u8], mime: &str) -> reqwest::multipart::Form {
+        let part = reqwest::multipart::Part::bytes(bytes.to_vec())
+            .file_name(format!("{id}.jpg"))
+            .mime_str(mime)
+            .unwrap();
+        reqwest::multipart::Form::new()
+            .text("receiptId", id.to_string())
+            .part("picture", part)
+    }
+
+    #[tokio::test]
+    async fn receipt_ocr_upload_requires_auth() {
+        let (port, handle, dir) = start_receipt_ocr_server(Some("fake-key")).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/receipt-pictures/upload"))
+            .multipart(ocr_form("r-auth", b"\xff\xd8\xff", "image/jpeg"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn receipt_ocr_without_model_key_is_503() {
+        let (port, handle, dir) = start_receipt_ocr_server(None).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/receipt-pictures/upload"))
+            .header("Authorization", "Bearer test-key")
+            .multipart(ocr_form("r-nokey", b"\xff\xd8\xff", "image/jpeg"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 503);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(
+            body["message"].as_str().unwrap().contains("ocr not configured"),
+            "unexpected body {body}"
+        );
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn receipt_ocr_upload_persists_image_and_row() {
+        let (port, handle, dir) = start_receipt_ocr_server(Some("fake-key")).await;
+        let client = reqwest::Client::new();
+        // A PNG payload, so the stored extension follows the declared MIME.
+        let png = b"\x89PNG\r\n\x1a\nfake".to_vec();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/receipt-pictures/upload"))
+            .header("Authorization", "Bearer test-key")
+            .multipart(ocr_form("r-persist", &png, "image/png"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 202);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["id"], "r-persist");
+        assert_eq!(body["status"], "parsing");
+
+        // Image is on disk under the DB directory, and the row points at it
+        // with a *relative* path so no server layout leaks to clients.
+        let stored = dir.join("receipt_pictures").join("r-persist.png");
+        assert!(stored.exists(), "expected {} to exist", stored.display());
+        assert_eq!(std::fs::read(&stored).unwrap(), png);
+
+        let pool = crate::db::init_db(&dir.join("maia.db")).unwrap();
+        let conn = pool.lock().unwrap();
+        let row: (String, i64, i64) = conn
+            .query_row(
+                "SELECT remote_path, upload_status, parsed FROM receipts WHERE id = 'r-persist'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "receipt_pictures/r-persist.png");
+        assert_eq!(row.1, 4, "expected upload_status parsing(4)");
+        assert_eq!(row.2, 0, "parsed must start false");
+        drop(conn);
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn receipt_ocr_parse_and_picture_endpoints() {
+        let (port, handle, dir) = start_receipt_ocr_server(Some("fake-key")).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/receipt-pictures/upload"))
+            .header("Authorization", "Bearer test-key")
+            .multipart(ocr_form("r-poll", b"\xff\xd8\xff", "image/jpeg"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 202);
+
+        // The image is served back byte-for-byte.
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/receipt-pictures/r-poll/picture"))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()["content-type"].to_str().unwrap(),
+            "image/jpeg"
+        );
+        assert_eq!(resp.bytes().await.unwrap().as_ref(), b"\xff\xd8\xff");
+
+        // The parse eventually reaches a terminal state. The fake key means the
+        // upstream call fails, which lands in `error` — the point is that the
+        // row always stops being `parsing`.
+        let mut status = String::new();
+        for _ in 0..60 {
+            let body: serde_json::Value = client
+                .get(format!("http://127.0.0.1:{port}/receipt-pictures/r-poll/parse"))
+                .header("Authorization", "Bearer test-key")
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            status = body["status"].as_str().unwrap().to_string();
+            if status == "error" || status == "parsed" {
+                assert_eq!(body["id"], "r-poll");
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        assert!(
+            status == "error" || status == "parsed",
+            "parse never left `parsing`, last status {status}"
+        );
+
+        // Unknown ids 404 rather than erroring.
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/receipt-pictures/nope/parse"))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn receipt_ocr_rejects_bad_input() {
+        let (port, handle, dir) = start_receipt_ocr_server(Some("fake-key")).await;
+        let client = reqwest::Client::new();
+
+        // No `picture` part at all.
+        let form = reqwest::multipart::Form::new().text("receiptId", "r-empty".to_string());
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/receipt-pictures/upload"))
+            .header("Authorization", "Bearer test-key")
+            .multipart(form)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+
+        // An empty picture part.
+        let form = reqwest::multipart::Form::new()
+            .text("receiptId", "r-empty2".to_string())
+            .part(
+                "picture",
+                reqwest::multipart::Part::bytes(Vec::new())
+                    .file_name("r-empty2.jpg")
+                    .mime_str("image/jpeg")
+                    .unwrap(),
+            );
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/receipt-pictures/upload"))
+            .header("Authorization", "Bearer test-key")
+            .multipart(form)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+
+        // A `receiptId` that would escape the picture directory.
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/receipt-pictures/upload"))
+            .header("Authorization", "Bearer test-key")
+            .multipart(ocr_form("../../escape", b"\xff\xd8\xff", "image/jpeg"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+
+        // And the traversal target was not created.
+        assert!(!dir.parent().unwrap().join("escape.jpg").exists());
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn receipt_push_preserves_archive_state() {
+        // A phone push must not wipe archive bookkeeping recorded by the
+        // desktop: the legacy handler's ON CONFLICT clause lists columns
+        // explicitly, so archived_* are left alone.
+        use crate::db;
+        let pool = db::init_memory().unwrap();
+        {
+            let conn = pool.lock().unwrap();
+            conn.execute(
+                "INSERT INTO receipts (id, local_path, upload_status, parsed, created_at, archived_path, archived_at)
+                 VALUES ('r-arch', '/tmp/a.jpg', 2, 1, 1000, 'receipts_archive/r-arch', 5000)",
+                [],
+            )
+            .unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let payload = serde_json::json!({"receipts":[{"id":"r-arch","localPath":"/tmp/a.jpg","remotePath":"receipt_pictures/r-arch.jpg","uploadStatus":2,"parsed":true,"createdAt":1000}]});
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/receipt-pictures"))
+            .header("Authorization", "Bearer test-key")
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let conn = pool.lock().unwrap();
+        let (arch_path, arch_at): (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT archived_path, archived_at FROM receipts WHERE id='r-arch'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(arch_path.as_deref(), Some("receipts_archive/r-arch"));
+        assert_eq!(arch_at, Some(5000));
+        drop(conn);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn receipt_push_stores_relative_remote_path() {
+        // `remote_path` reaches the phone via `pull_receipts`, so it must stay
+        // relative rather than leaking the server's absolute directory.
+        let dir = std::env::temp_dir().join(format!("maia-test-rel-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("maia.db");
+        let config = crate::config::Config::new(db_path.clone(), "test-key".to_string())
+            .with_bind_addr("0.0.0.0:0");
+        let pool = crate::db::init_db(&config.db_path).unwrap();
+        let (port, handle) = crate::server::start_test_server_with_config(config, pool.clone()).await;
+
+        // Exercise the multipart branch: `receipt` JSON field + `picture` bytes.
+        let boundary = "----maiaTestBoundary";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"receipt\"\r\n\r\n\
+             {}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"picture\"; filename=\"r-rel.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n{}\r\n--{boundary}--\r\n",
+            serde_json::json!({
+                "id": "r-rel",
+                "localPath": "/phone/path/r-rel.jpg",
+                "uploadStatus": 2,
+                "parsed": false,
+                "createdAt": 1000
+            }),
+            "JPEGDATA"
+        );
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/receipt-pictures"))
+            .header("Authorization", "Bearer test-key")
+            .header(
+                "Content-Type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let conn = pool.lock().unwrap();
+        let remote: Option<String> = conn
+            .query_row(
+                "SELECT remote_path FROM receipts WHERE id='r-rel'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        let remote = remote.expect("remote_path should be set by the multipart branch");
+        assert_eq!(remote, "receipt_pictures/r-rel.jpg");
+        assert!(
+            !std::path::Path::new(&remote).is_absolute(),
+            "remote_path must not be absolute: {remote}"
+        );
+        assert!(!remote.contains(std::env::temp_dir().to_string_lossy().as_ref()));
+        assert!(dir.join("receipt_pictures").join("r-rel.jpg").exists());
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Live end-to-end parse against Gemini. Ignored by default; run with
+    /// `MAIA_TEST_GEMINI_KEY=... cargo test -p sync-server -- --ignored`.
+    #[tokio::test]
+    #[ignore = "requires MAIA_TEST_GEMINI_KEY"]
+    async fn receipt_ocr_live_gemini() {
+        let Ok(key) = std::env::var("MAIA_TEST_GEMINI_KEY") else {
+            panic!("MAIA_TEST_GEMINI_KEY not set");
+        };
+        let (port, handle, dir) = start_receipt_ocr_server(Some(&key)).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/receipt-pictures/upload"))
+            .header("Authorization", "Bearer test-key")
+            .multipart(ocr_form("r-live", b"\xff\xd8\xff", "image/jpeg"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 202);
+
+        let mut body = serde_json::Value::Null;
+        for _ in 0..150 {
+            body = client
+                .get(format!("http://127.0.0.1:{port}/receipt-pictures/r-live/parse"))
+                .header("Authorization", "Bearer test-key")
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let s = body["status"].as_str().unwrap();
+            if s == "parsed" || s == "error" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+        assert_eq!(
+            body["status"], "parsed",
+            "live parse failed: {}",
+            body["error"]
+        );
+        // The keys the mobile draft builder reads.
+        assert!(body["parsed"]["merchant"].is_string(), "{body}");
+        assert!(body["parsed"]["total"].is_number(), "{body}");
+        assert!(body["parsed"]["currency"].is_string(), "{body}");
+        assert!(body["parsed"]["items"].is_array(), "{body}");
         handle.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
