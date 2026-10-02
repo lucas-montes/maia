@@ -32,9 +32,8 @@
         };
 
         packages = import ./nix/packages.nix { inherit pkgs; };
-        android = import ./nix/android.nix { inherit pkgs; };
         devShells = import ./nix/devshells.nix {
-          inherit pkgs android;
+          inherit pkgs;
           rust-bin = pkgs.rust-bin;
           sce = sce.packages.${system}.default;
         };

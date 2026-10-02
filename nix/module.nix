@@ -1,15 +1,12 @@
-{ self }:
-{
+{self}: {
   config,
   lib,
   pkgs,
   ...
 }:
-with lib;
-let
+with lib; let
   cfg = config.services.maia;
-in
-{
+in {
   options.services.maia = {
     enable = mkEnableOption "Maia personal management assistant";
 
@@ -29,8 +26,8 @@ in
   config = mkIf cfg.enable {
     systemd.services.maia = {
       description = "Maia Personal Management Assistant";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ];
+      wantedBy = ["multi-user.target"];
+      after = ["network.target"];
 
       environment = {
         MAIA_DB_PATH = "${cfg.dataDir}/maia.db";
@@ -59,6 +56,6 @@ in
       createHome = true;
     };
 
-    users.groups.maia = { };
+    users.groups.maia = {};
   };
 }
