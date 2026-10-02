@@ -11,7 +11,16 @@ result
 *.db*
 /data
 /test_dir
-/receips
+/receipts
 maia.json
 context/tmp
 exercise_media
+
+# Receipt images live next to maia.db (repo root). Personal documents — never commit.
+/receipt_pictures
+/receipts_archive
+
+# Live-OCR fixtures: the image is personal, the directory scaffolding is not.
+/sync-server/testdata/*
+!/sync-server/testdata/.gitkeep
+!/sync-server/testdata/README.md

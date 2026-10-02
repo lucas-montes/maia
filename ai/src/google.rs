@@ -150,25 +150,55 @@ impl Model {
         }
     }
 
-    pub fn name(&self) -> &str {
+pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Sends [request] to Gemini and decodes the response.
+    ///
+    /// Non-2xx responses become [`GeminiError::Api`] carrying the status and
+    /// Gemini's `error.message`, so a rejected API key reads as
+    /// "API key not valid" instead of a deserialization failure.
     //TODO: we want to declare the output somewhere instead of using this Value
     pub async fn generate_content(
         &self,
         request: &GeminiRequest,
-    ) -> Result<GeminiResponse, reqwest::Error> {
+    ) -> Result<GeminiResponse, GeminiError> {
         let url = format!("{}/{}:generateContent", self.base_url, self.name);
 
-        self.client
+        let response = self
+            .client
             .post(&url)
             .header("x-goog-api-key", &self.api_key)
             .json(request)
             .send()
-            .await?
-            .json()
-            .await
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            let message = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/error/message")
+                        .and_then(|m| m.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| {
+                    if body.trim().is_empty() {
+                        status.canonical_reason().unwrap_or("request failed").to_string()
+                    } else {
+                        body
+                    }
+                });
+            tracing::error!(%status, %message, "gemini request rejected");
+            return Err(GeminiError::Api {
+                status: status.as_u16(),
+                message,
+            });
+        }
+
+        response.json().await.map_err(GeminiError::Http)
     }
 }
 #[derive(Debug, Deserialize)]
@@ -236,4 +266,35 @@ struct PromptTokensDetail {
     modality: Option<String>,
     #[serde(rename = "tokenCount")]
     token_count: Option<u32>,
+}
+
+/// Failure from a Gemini request.
+///
+/// Split out from [`reqwest::Error`] because a non-2xx response (rejected key,
+/// bad request, quota) carries Gemini's own `error.message`, which is far more
+/// useful than a bare status — and which decoding the error envelope as a
+/// success would otherwise turn into a confusing "missing field `candidates`".
+#[derive(Debug)]
+pub enum GeminiError {
+    /// Transport-level failure, or a response that did not match the schema.
+    Http(reqwest::Error),
+    /// The API answered with a non-2xx status.
+    Api { status: u16, message: String },
+}
+
+impl std::fmt::Display for GeminiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GeminiError::Http(e) => write!(f, "{e}"),
+            GeminiError::Api { status, message } => write!(f, "gemini {status}: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for GeminiError {}
+
+impl From<reqwest::Error> for GeminiError {
+    fn from(err: reqwest::Error) -> Self {
+        GeminiError::Http(err)
+    }
 }

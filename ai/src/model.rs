@@ -14,11 +14,25 @@ pub enum ModelError {
     ReqwestError(reqwest::Error),
     SerdeError(serde_json::Error),
     Io(std::io::Error),
+    /// The model API rejected the request (bad key, quota, malformed request).
+    /// Carries Gemini's own `error.message` so the cause is legible.
+    Api { status: u16, message: String },
 }
 
 impl From<reqwest::Error> for ModelError {
     fn from(err: reqwest::Error) -> Self {
         ModelError::ReqwestError(err)
+    }
+}
+
+impl From<crate::google::GeminiError> for ModelError {
+    fn from(err: crate::google::GeminiError) -> Self {
+        match err {
+            crate::google::GeminiError::Http(e) => ModelError::ReqwestError(e),
+            crate::google::GeminiError::Api { status, message } => {
+                ModelError::Api { status, message }
+            }
+        }
     }
 }
 
@@ -138,7 +152,7 @@ impl Model {
     pub async fn extract_receipt<T: DeserializeOwned>(
         &self,
         image_base64: String,
-    ) -> Result<Option<T>, reqwest::Error> {
+    ) -> Result<Option<T>, ModelError> {
         //TODO: maybe change this first sentence as the system instruction and use some id to pass multiple images at once
         let content = google::Content::new(
             None,
@@ -199,5 +213,6 @@ impl Model {
             .generate_content(&request)
             .await
             .map(|r| r.inner_to_struct())
+            .map_err(ModelError::from)
     }
 }

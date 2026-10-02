@@ -746,54 +746,213 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Live end-to-end parse against Gemini. Ignored by default; run with
-    /// `MAIA_TEST_GEMINI_KEY=... cargo test -p sync-server -- --ignored`.
+    /// Live domain-logic check for the OCR pipeline, calling the vision model
+    /// directly. Deliberately excludes the DB and the axum endpoints: this
+    /// covers only the conversion chain (image bytes → base64 → Gemini → JSON
+    /// text → `ParsedReceipt`), so a failure points at the model, the prompt or
+    /// the schema rather than at request plumbing.
+    ///
+    /// Ignored by default because it needs a real key and costs one API call:
+    /// ```sh
+    /// GEMINI_API_KEY=... cargo test -p sync-server receipt_ocr_live -- --ignored --nocapture
+    /// ```
+    /// Requires a receipt image in `sync-server/testdata/` — see
+    /// `sync-server/testdata/README.md`. That directory is gitignored.
     #[tokio::test]
-    #[ignore = "requires MAIA_TEST_GEMINI_KEY"]
+    #[ignore = "needs a real Gemini key and a receipt image; run with --ignored --nocapture"]
     async fn receipt_ocr_live_gemini() {
-        let Ok(key) = std::env::var("MAIA_TEST_GEMINI_KEY") else {
-            panic!("MAIA_TEST_GEMINI_KEY not set");
-        };
-        let (port, handle, dir) = start_receipt_ocr_server(Some(&key)).await;
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(format!("http://127.0.0.1:{port}/receipt-pictures/upload"))
-            .header("Authorization", "Bearer test-key")
-            .multipart(ocr_form("r-live", b"\xff\xd8\xff", "image/jpeg"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
+        /// Hardcoded input, relative to this crate; change here for a different
+        /// filename. Anchored to the manifest because `cargo test` runs with the
+        /// crate directory as CWD, not the workspace root.
+        const RECEIPT_IMAGE: &str = "testdata/receipt.jpg";
+        const MODEL: &str = "gemini-2.5-flash";
 
-        let mut body = serde_json::Value::Null;
-        for _ in 0..150 {
-            body = client
-                .get(format!("http://127.0.0.1:{port}/receipt-pictures/r-live/parse"))
-                .header("Authorization", "Bearer test-key")
-                .send()
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
-            let s = body["status"].as_str().unwrap();
-            if s == "parsed" || s == "error" {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        }
-        assert_eq!(
-            body["status"], "parsed",
-            "live parse failed: {}",
-            body["error"]
+        let key = ["GEMINI_API_KEY", "MAIA_TEST_GEMINI_KEY"]
+            .into_iter()
+            .find_map(|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()))
+            .unwrap_or_else(|| {
+                panic!("set GEMINI_API_KEY (or MAIA_TEST_GEMINI_KEY) to run the live OCR test")
+            });
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(RECEIPT_IMAGE);
+        assert!(
+            path.exists(),
+            "receipt image not found at {} — see sync-server/testdata/README.md",
+            path.display()
         );
-        // The keys the mobile draft builder reads.
-        assert!(body["parsed"]["merchant"].is_string(), "{body}");
-        assert!(body["parsed"]["total"].is_number(), "{body}");
-        assert!(body["parsed"]["currency"].is_string(), "{body}");
-        assert!(body["parsed"]["items"].is_array(), "{body}");
+        let bytes = std::fs::read(&path).expect("read receipt image");
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_else(|| "jpg".to_string());
+        let mime = crate::handlers::media::content_type_for_ext(&ext);
+        println!("input: {} ({} bytes, {mime})", path.display(), bytes.len());
+
+        use ai::Vllm;
+        use crate::receipt_ocr::ParsedReceipt;
+        let model = ai::Model::with_model(key, MODEL.to_string());
+
+        // The whole conversion: bytes → base64 → Gemini → JSON text → struct.
+        let parsed = match model.extract_image_bytes::<ParsedReceipt>(bytes, mime).await {
+            Ok(Some(p)) => p,
+            Ok(None) => panic!("model returned no content for {}", path.display()),
+            Err(e) => panic!("model call failed for {}: {e:?}", path.display()),
+        };
+
+        // Fields the mobile draft builder reads out of this map.
+        assert!(
+            !parsed.merchant.trim().is_empty(),
+            "merchant is empty; got {parsed:?}"
+        );
+        assert!(
+            !parsed.currency.trim().is_empty(),
+            "currency is empty; got {parsed:?}"
+        );
+        assert!(parsed.total > 0.0, "total is not positive; got {parsed:?}");
+        assert!(
+            !parsed.date.trim().is_empty(),
+            "date is empty; got {parsed:?}"
+        );
+
+        // Round-trip through JSON: these are the exact keys the client depends
+        // on, and the pre-rename names must stay gone.
+        let json = serde_json::to_value(&parsed).expect("serialise parsed receipt");
+        assert!(json.get("merchant").is_some(), "missing `merchant`: {json}");
+        assert!(json.get("items").is_some(), "missing `items`: {json}");
+        assert!(json.get("store").is_none(), "legacy `store` leaked: {json}");
+        assert!(
+            json.get("products").is_none(),
+            "legacy `products` leaked: {json}"
+        );
+
+        println!("parsed {} line item(s)", parsed.items.len());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json).expect("pretty-print parsed receipt")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Domain-logic conversion chain, against a stub Gemini.
+    //
+    // These two are NOT ignored: they run in the default suite and need no API
+    // key or network. They cover the same conversion the live test does —
+    // bytes → base64 → request JSON → response JSON text → `ParsedReceipt` —
+    // plus the rejected-key path, by pointing `ai::Model::with_base_url` at a
+    // local server that imitates Gemini's envelopes.
+    // -----------------------------------------------------------------------
+
+    /// Starts a stub Gemini and returns its base URL plus a handle to abort.
+    async fn stub_gemini(
+        status: axum::http::StatusCode,
+        body: serde_json::Value,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        async fn handler(
+            axum::extract::State(state): axum::extract::State<(
+                axum::http::StatusCode,
+                serde_json::Value,
+            )>,
+        ) -> impl axum::response::IntoResponse {
+            let (status, body) = state;
+            (status, axum::Json(body))
+        }
+        // The client appends `/{model}:generateContent` to the base URL, so match on
+        // a fallback rather than hard-coding that path.
+        let app = axum::Router::new()
+            .fallback(axum::routing::post(handler))
+            .with_state((status, body));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://127.0.0.1:{port}"), handle)
+    }
+
+    #[tokio::test]
+    async fn receipt_ocr_converts_gemini_response_into_parsed_receipt() {
+        use ai::Vllm;
+        use crate::receipt_ocr::ParsedReceipt;
+
+        // The JSON the model is expected to emit, embedded as the text part.
+        let inner = serde_json::json!({
+            "merchant": "Carrefour",
+            "date": "2026-08-15 14:30:00",
+            "total": 42.75,
+            "currency": "EUR",
+            "items": [{"name": "Milk", "price": 1.2, "currency": "EUR"}],
+            "discounts": [{"description": "loyalty", "amount": 2.0}]
+        });
+        let (base_url, handle) = stub_gemini(
+            axum::http::StatusCode::OK,
+            serde_json::json!({
+                "candidates": [{
+                    "content": {"role": "model", "parts": [{"text": inner.to_string()}]},
+                    "finishReason": "STOP"
+                }],
+                "modelVersion": "gemini-2.5-flash"
+            }),
+        )
+        .await;
+
+        let model = ai::Model::with_base_url("test-key".into(), "gemini-2.5-flash".into(), base_url);
+        let parsed = model
+            .extract_image_bytes::<ParsedReceipt>(b"\xff\xd8\xffnot-a-real-jpeg".to_vec(), "image/jpeg")
+            .await
+            .expect("call stub gemini")
+            .expect("stub returned content");
+
+        // Domain object is populated from the model's JSON text.
+        assert_eq!(parsed.merchant, "Carrefour");
+        assert_eq!(parsed.date, "2026-08-15 14:30:00");
+        assert_eq!(parsed.total, 42.75);
+        assert_eq!(parsed.currency, "EUR");
+        assert_eq!(parsed.items.len(), 1);
+        assert_eq!(parsed.items[0].name, "Milk");
+        assert_eq!(parsed.discounts.len(), 1);
+        assert_eq!(parsed.discounts[0].amount, 2.0);
+
+        // And the keys the mobile draft builder reads are present, with the
+        // pre-rename names absent.
+        let json = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(json["merchant"], "Carrefour");
+        assert!(json["items"].is_array());
+        assert!(json.get("store").is_none());
+        assert!(json.get("products").is_none());
         handle.abort();
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn receipt_ocr_surfaces_gemini_rejection_instead_of_decode_error() {
+        use ai::Vllm;
+        use crate::receipt_ocr::ParsedReceipt;
+
+        // Gemini answers a bad key with a non-2xx and an `error.message`
+        // envelope. Decoding that as a success used to surface as
+        // "missing field `candidates`", hiding the real cause.
+        let (base_url, handle) = stub_gemini(
+            axum::http::StatusCode::BAD_REQUEST,
+            serde_json::json!({"error": {"code": 400, "message": "API key not valid. Please pass a valid API key.", "status": "INVALID_ARGUMENT"}}),
+        )
+        .await;
+
+        let model = ai::Model::with_base_url("bad-key".into(), "gemini-2.5-flash".into(), base_url);
+        let err = model
+            .extract_image_bytes::<ParsedReceipt>(b"\xff\xd8\xff".to_vec(), "image/jpeg")
+            .await
+            .expect_err("a 400 must not be reported as success");
+
+        match err {
+            ai::ModelError::Api { status, ref message } => {
+                assert_eq!(status, 400);
+                assert!(
+                    message.contains("API key not valid"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected ModelError::Api, got {other:?}"),
+        }
+        handle.abort();
     }
 
     #[tokio::test]
