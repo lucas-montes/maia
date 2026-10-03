@@ -4,7 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import Chart from "chart.js/auto";
 import QRCode from "qrcode";
 
-type ViewId = "dashboard" | "exercises" | "workouts" | "templates" | "ingredients" | "stores" | "meals" | "bodyMetrics" | "experiments" | "todos" | "receipts" | "notes" | "settings" | "goals" | "urls" | "fitfat" | "tags" | "accounts" | "transactions" | "fxRates";
+type ViewId = "dashboard" | "exercises" | "workouts" | "templates" | "ingredients" | "foods" | "stores" | "meals" | "bodyMetrics" | "experiments" | "todos" | "receipts" | "notes" | "settings" | "goals" | "urls" | "fitfat" | "tags" | "accounts" | "transactions" | "fxRates";
 
 interface Note {
   id: number;
@@ -151,6 +151,13 @@ interface FitFatState {
 
 interface ExercisesState { items: any[]; filtered: any[]; search: string; bodyPart: string; equipment: string; hasImage: string; selectedId: string | null; status: "idle"|"loading"|"error"; statusMessage: string; }
 interface IngredientsState { items: any[]; search: string; selectedId: string | null; status: "idle"|"loading"|"error"; statusMessage: string; showAddModal: boolean; }
+/**
+ * Foods (recipes) — a food is a name plus the ingredients it is built from.
+ * `nutrition` is resolved server-side on every read and is null when the
+ * composition cannot be resolved, so the UI can say so rather than showing
+ * zeros that look like a real value.
+ */
+interface FoodsState { items: any[]; status: "idle"|"loading"|"error"; statusMessage: string; editingId: string | null; editingName: string; draft: {ingredientId: string; amount: number}[]; search: string; }
 interface StoresState { items: any[]; search: string; status: "idle"|"loading"|"error"; statusMessage: string; }
 interface MealsState { items: any[]; search: string; status: "idle"|"loading"|"error"; statusMessage: string; }
 interface BodyMetricsState { items: any[]; status: "idle"|"loading"|"error"; statusMessage: string; }
@@ -179,6 +186,7 @@ interface AppState {
   fitfat: FitFatState;
   exercises: ExercisesState;
   ingredients: IngredientsState;
+  foods: FoodsState;
   stores: StoresState;
   meals: MealsState;
   bodyMetrics: BodyMetricsState;
@@ -323,6 +331,7 @@ const defaultAppState = (): AppState => ({
   },
   exercises: { items: [], filtered: [], search: "", bodyPart: "", equipment: "", hasImage: "", selectedId: null, status: "idle", statusMessage: "" },
   ingredients: { items: [], search: "", selectedId: null, status: "idle", statusMessage: "", showAddModal: false },
+  foods: { items: [], status: "idle", statusMessage: "", editingId: null, editingName: "", draft: [], search: "" },
   stores: { items: [], search: "", status: "idle", statusMessage: "" },
   meals: { items: [], search: "", status: "idle", statusMessage: "" },
   bodyMetrics: { items: [], status: "idle", statusMessage: "" },
@@ -357,6 +366,7 @@ function setView(view: ViewId): void {
   else if (view === "exercises") loadExercises();
   else if (view === "workouts" || view === "templates") loadFitFat();
   else if (view === "ingredients") loadIngredients();
+  else if (view === "foods") { loadFoods(); loadIngredients(); }
   else if (view === "stores") loadStores();
   else if (view === "meals") loadMeals();
   else if (view === "bodyMetrics") loadBodyMetrics();
@@ -1025,7 +1035,7 @@ async function openUrlExternal(url: string): Promise<void> {
 function renderSidebar(): string {
   const groups: Array<{ name: string; items: Array<[ViewId, string, string]> }> = [
     { name: "Training", items: [["exercises","Exercises","💪"],["workouts","Workouts","🏋️"],["templates","Templates","📋"]] },
-    { name: "Nutrition", items: [["ingredients","Ingredients","🥗"],["stores","Stores","🏪"],["meals","Meals","🍽️"]] },
+    { name: "Nutrition", items: [["ingredients","Ingredients","🥗"],["foods","Recipes","🍴"],["stores","Stores","🏪"],["meals","Meals","🍽️"]] },
     { name: "Health", items: [["bodyMetrics","Body","⚖️"],["experiments","Experiments","🧪"]] },
     { name: "Planning", items: [["todos","Tasks","✓"],["goals","Goals","★"],["notes","Notes","📝"],["urls","URLs","🔗"]] },
     { name: "Finance", items: [["accounts","Accounts","🏦"],["transactions","Transactions","💳"],["receipts","Receipts","🧾"]] },
@@ -1075,6 +1085,7 @@ function renderContent(): string {
     case "workouts": return renderWorkouts();
     case "templates": return renderTemplates();
     case "ingredients": return renderIngredients();
+    case "foods": return renderFoods() + renderFoodEditor(state.ingredients, state.foods);
     case "stores": return renderStores();
     case "meals": return renderMeals();
     case "bodyMetrics": return renderBodyMetrics();
@@ -1458,6 +1469,37 @@ function handleClick(event: MouseEvent): void {
   }
   const ingEdit = target.closest<HTMLElement>("[data-action='ing-edit']");
   if (ingEdit?.dataset.id) { const id=ingEdit.dataset.id; const it=state.ingredients.items.find((e:any)=>e.id===id); if(it){ const name=prompt("New name",it.name); if(name) invoke("update_ingredient",{id, name, caloriesPer100g:it.calories_per100g, proteinPer100g:it.protein_per100g, carbsPer100g:it.carbs_per100g, fatPer100g:it.fat_per100g}).then(()=>loadIngredients()); } return; }
+  // --- Foods (recipes) ----------------------------------------------------
+  // A food stores only its name and composition. Its nutrition is resolved
+  // server-side on every read, so nothing here computes macros — the draft is
+  // the composition, and the numbers follow from it.
+  const foodNew = target.closest<HTMLElement>("[data-action='food-new']");
+  if (foodNew) { state.foods.editingId=null; state.foods.editingName=""; state.foods.draft=[]; state.foods.search=""; render(); return; }
+  const foodEdit = target.closest<HTMLElement>("[data-action='food-edit']");
+  if (foodEdit?.dataset.id) { const f=state.foods.items.find((e:any)=>e.id===foodEdit.dataset.id); if(f){ state.foods.editingId=f.id; state.foods.editingName=f.name; state.foods.draft=(f.components||[]).map((cp:any)=>({ingredientId:cp.ingredientId,amount:Number(cp.amount)})); state.foods.search=""; render(); } return; }
+  const foodClose = target.closest<HTMLElement>("[data-action='food-close']");
+  if (foodClose) { state.foods.editingId=null; state.foods.editingName=""; state.foods.draft=[]; render(); return; }
+  const foodArchive = target.closest<HTMLElement>("[data-action='food-archive']");
+  if (foodArchive?.dataset.id) { invoke<any>("archive_food",{id:foodArchive.dataset.id}).then(()=>loadFoods()).catch((e)=>toast(`Could not archive: ${e}`,"err")); return; }
+  const foodRestore = target.closest<HTMLElement>("[data-action='food-restore']");
+  if (foodRestore?.dataset.id) { invoke<any>("restore_food",{id:foodRestore.dataset.id}).then(()=>loadFoods()).catch((e)=>toast(`Could not restore: ${e}`,"err")); return; }
+  const foodAddPart = target.closest<HTMLElement>("[data-action='food-add-part']");
+  if (foodAddPart?.dataset.id) { const id=foodAddPart.dataset.id; if(state.foods.draft.some((d)=>d.ingredientId===id)) return; state.foods.draft=[...state.foods.draft,{ingredientId:id,amount:100}]; render(); return; }
+  const foodRmPart = target.closest<HTMLElement>("[data-action='food-rm-part']");
+  if (foodRmPart?.dataset.id) { state.foods.draft=state.foods.draft.filter((d)=>d.ingredientId!==foodRmPart.dataset.id); render(); return; }
+  const foodSave = target.closest<HTMLElement>("[data-action='food-save']");
+  if (foodSave) {
+    const name=state.foods.editingName.trim();
+    if(!name){ toast("Please enter a name","err"); return; }
+    if(!state.foods.draft.length){ toast("Add at least one ingredient","err"); return; }
+    if(state.foods.draft.some((d)=>!(d.amount>0))){ toast("Every amount must be greater than 0","err"); return; }
+    const components=state.foods.draft.map((d)=>({ingredientId:d.ingredientId,amount:d.amount}));
+    const id=state.foods.editingId;
+    const call=id?invoke<any>("update_food",{id,name,components}):invoke<any>("create_food",{name,components});
+    call.then((res)=>{ if(res&&res.success===false){ toast(`Could not save: ${res.error||"unknown error"}`,"err"); return; } state.foods.editingId=null; state.foods.editingName=""; state.foods.draft=[]; loadFoods(); }).catch((e)=>toast(`Could not save: ${e}`,"err"));
+    return;
+  }
+
   const tplCreate = target.closest<HTMLElement>("[data-action='tpl-create']");
   if (tplCreate) { const inp=document.getElementById("tpl-name") as HTMLInputElement; const name=inp?.value.trim(); if(name){ const id=crypto.randomUUID(); invoke<any>("create_template",{id, name}).then((res)=>{ if(res&&res.success===false){ toast(`Couldn't create template: ${res.error||"unknown error"}`, "err"); return; } if(inp) inp.value=""; loadFitFat(); }).catch((e)=>toast(`Couldn't create template: ${e}`, "err")); } return; }
   const tplEdit = target.closest<HTMLElement>("[data-action='tpl-edit']");
@@ -2554,6 +2596,7 @@ function applyExerciseFilter(): void {
   });
 }
 async function loadIngredients(): Promise<void> { state.ingredients.status="loading"; render(); try{ const r=await invoke<any>("list_ingredients"); const d=r?.data??r; state.ingredients.items=Array.isArray(d)?d:(d?.items??[]); state.ingredients.status="idle"; }catch(e){state.ingredients.status="error"; state.ingredients.statusMessage=String(e);} render(); }
+async function loadFoods(): Promise<void> { state.foods.status="loading"; render(); try{ const r=await invoke<any>("list_foods"); const d=r?.data??r; state.foods.items=Array.isArray(d)?d:(d?.items??[]); state.foods.status="idle"; }catch(e){state.foods.status="error"; state.foods.statusMessage=String(e);} render(); }
 async function loadStores(): Promise<void> { state.stores.status="loading"; render(); try{ const r=await invoke<any>("list_stores"); const d=r?.data??r; state.stores.items=Array.isArray(d)?d:(d?.items??[]); state.stores.status="idle"; }catch(e){state.stores.status="error"; state.stores.statusMessage=String(e);} render(); }
 async function loadMeals(): Promise<void> { state.meals.status="loading"; render(); try{ const r=await invoke<any>("list_meals"); const d=r?.data??r; state.meals.items=Array.isArray(d)?d:(d?.meals??d?.items??[]); state.meals.status="idle"; }catch(e){state.meals.status="error"; state.meals.statusMessage=String(e);} render(); }
 async function loadBodyMetrics(): Promise<void> { state.bodyMetrics.status="loading"; render(); try{ const r=await invoke<any>("list_body_metrics"); const d=r?.data??r; state.bodyMetrics.items=Array.isArray(d)?d:(d?.items??[]); state.bodyMetrics.status="idle"; }catch(e){state.bodyMetrics.status="error"; state.bodyMetrics.statusMessage=String(e);} render(); }
@@ -2689,8 +2732,94 @@ function renderIngredients(): string {
     </div>` : "";
   return `<section class="panel"><div class="panel-header flex items-start justify-between gap-4"><div><h2 class="panel-title">Ingredients — ${c.items.length}</h2><p class="panel-subtitle">Manage foods • search, edit, and build meals</p></div><button class="button ok shrink-0" data-action="ing-open-modal">+ Add Ingredient</button></div><div class="panel-content space-y-3"><div class="flex gap-2"><div class="relative flex-1"><span class="absolute left-3 top-2.5 text-ink-500 text-sm">🔍</span><input id="ing-search" placeholder="Search by name, brand or barcode..." value="${escapeHtml(c.search)}" class="w-full pl-9 pr-3 py-2 bg-surface-800 border border-surface-700 rounded-lg focus:outline-none focus:border-surface-600 text-sm" /></div><button class="button secondary" data-action="ing-search">Search</button></div><div class="grid gap-2 max-h-[60vh] overflow-auto pr-1">${c.items.slice(0,50).map((it:any)=>`<div class="group border border-surface-800 rounded-xl p-3 bg-surface-900/30 hover:bg-surface-900/50 hover:border-surface-700 transition-colors"><div class="flex justify-between gap-3"><div class="min-w-0"><div class="text-sm font-medium text-ink-100 truncate">${escapeHtml(it.name)} ${it.is_archived?`<span class="badge badge-warn ml-2">archived</span>`:""}</div><div class="text-xs text-ink-400 mt-1 flex flex-wrap gap-1.5"><span class="chip">${it.calories_per100g} kcal</span><span class="chip">P ${it.protein_per100g}</span><span class="chip">C ${it.carbs_per100g}</span><span class="chip">F ${it.fat_per100g}</span>${it.brand?`<span class="text-ink-500">• ${escapeHtml(it.brand)}</span>`:""} ${it.barcode?`<span class="font-mono text-[11px] text-ink-500">• ${escapeHtml(it.barcode)}</span>`:""}</div></div><button class="button secondary text-xs opacity-0 group-hover:opacity-100 transition-opacity shrink-0 self-start" data-action="ing-edit" data-id="${escapeHtml(it.id)}">Edit</button></div>${(it.pictures||[]).length?`<div class="flex gap-2 mt-3">${(it.pictures||[]).slice(0,3).map((p:any)=>`<img src="${escapeHtml(p.imagePath)}" class="w-12 h-12 rounded-lg object-cover bg-surface-800 border border-surface-700" loading="lazy" onerror="this.style.display='none'" />`).join("")}</div>`:""}${(it.prices||[]).length?`<div class="mt-2 text-xs text-ink-400 flex flex-wrap gap-2">${(it.prices||[]).slice(0,5).map((pr:any)=>`<span class="px-2 py-1 rounded-full bg-surface-800 border border-surface-700">${escapeHtml(pr.storeId)}: <b class="text-ink-200">${pr.price}${pr.currencyCode}</b> • ${new Date(pr.recordedAt).toLocaleDateString()}</span>`).join("")}</div><canvas data-spark="${escapeHtml(it.id)}" height="30" class="w-full mt-1"></canvas>`:""}</div>`).join("")}</div></div>${modal}</section>`;
 }
+/**
+ * Editor for a food's composition: which ingredients go in, and how much.
+ *
+ * Amounts are absolute amounts in the batch, not percentages — their sum is the
+ * weight the per-100g figures are divided by. The draft is the composition and
+ * nothing else; nutrition is derived server-side on save, so there is no number
+ * here that could drift from what gets stored.
+ */
+function renderFoodEditor(ingredients: IngredientsState, foods: FoodsState): string {
+  const editing = foods.editingId ? foods.items.find((f:any)=>f.id===foods.editingId) : null;
+  const open = !!editing || (foods.editingId===null && foods.editingName!==null && foods.editingName!==undefined && (foods.editingName.length>0 || foods.draft.length>0));
+  if(!open) return "";
+  const q=foods.search.trim().toLowerCase();
+  const used=new Set(foods.draft.map((d)=>d.ingredientId));
+  const candidates=ingredients.items.filter((e:any)=>!e.is_archived && !used.has(e.id) && (!q || (e.name||"").toLowerCase().includes(q)));
+  const nameOf=(id:string)=>{ const e=ingredients.items.find((x:any)=>x.id===id); return e?e.name:"(unknown ingredient)"; };
+  const rows=foods.draft.map((d)=>`<div class="flex items-center gap-2 border border-surface-800 rounded-lg px-3 py-2"><div class="text-sm text-ink-100 flex-1 truncate">${escapeHtml(nameOf(d.ingredientId))}</div><input data-action="food-amount" data-id="${escapeHtml(d.ingredientId)}" type="number" step="any" min="0" value="${d.amount}" class="w-20 px-2 py-1 bg-surface-800 border border-surface-700 rounded text-xs" /><button class="button danger text-xs" data-action="food-rm-part" data-id="${escapeHtml(d.ingredientId)}">Remove</button></div>`).join("");
+  const total=foods.draft.reduce((s:number,d)=>s+Number(d.amount||0),0);
+  return `<div class="modal-overlay modal-open">
+    <div class="absolute inset-0" data-action="food-close"></div>
+    <div class="modal-dialog max-w-2xl max-h-[90vh] overflow-hidden flex flex-col" role="dialog" aria-modal="true" aria-label="${editing?"Edit":"New"} Recipe">
+      <div class="px-6 py-4 border-b border-surface-800 flex items-center justify-between shrink-0">
+        <div>
+          <h3 class="modal-title">${editing?"Edit":"New"} Recipe</h3>
+          <p class="text-xs text-ink-500 mt-1">Nutrition per 100g is worked out from the amounts below · batch weighs ${total.toFixed(0)} g</p>
+        </div>
+        <button class="w-8 h-8 rounded-lg bg-surface-800 hover:bg-surface-700 text-ink-400 hover:text-ink-200 flex items-center justify-center" data-action="food-close" aria-label="Close">✕</button>
+      </div>
+      <div class="flex-1 overflow-auto p-6 space-y-5">
+        <div>
+          <label class="text-xs font-semibold tracking-widest uppercase text-ink-400" for="food-name">Name</label>
+          <input id="food-name" placeholder="e.g. Granola" value="${escapeHtml(foods.editingName)}" class="w-full px-3 py-2 mt-2 bg-surface-800 border border-surface-700 rounded-lg focus:outline-none focus:border-surface-600 text-sm" />
+        </div>
+        <div>
+          <div class="text-xs font-semibold tracking-widest uppercase text-ink-400 mb-3">Ingredients (${foods.draft.length})</div>
+          <div class="space-y-2">${rows||`<div class="text-xs text-ink-400">Nothing added yet.</div>`}</div>
+        </div>
+        <div>
+          <div class="text-xs font-semibold tracking-widest uppercase text-ink-400 mb-3">Add an ingredient</div>
+          <input id="food-search" placeholder="Search ingredients..." value="${escapeHtml(foods.search)}" class="w-full px-3 py-2 mb-3 bg-surface-800 border border-surface-700 rounded-lg focus:outline-none focus:border-surface-600 text-sm" />
+          <div class="space-y-2 max-h-64 overflow-auto">
+            ${candidates.length?candidates.slice(0,25).map((e:any)=>`<div class="flex items-center gap-2 border border-surface-800 rounded-lg px-3 py-2"><div class="text-sm text-ink-200 flex-1 truncate">${escapeHtml(e.name)}</div><div class="text-xs text-ink-500">${e.calories_per100g} kcal/100g</div><button class="button secondary text-xs" data-action="food-add-part" data-id="${escapeHtml(e.id)}">Add</button></div>`).join(""):`<div class="text-xs text-ink-400">${q?"No ingredient matches your search.":"No other ingredients available yet."}</div>`}
+          </div>
+        </div>
+      </div>
+      <div class="modal-actions mt-0 px-6 py-4 bg-surface-800/30 border-t border-surface-800 items-center justify-between">
+        <span class="text-xs text-ink-500 hidden sm:block">Press Esc to close</span>
+        <button class="button ok" data-action="food-save">Save Recipe</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/**
+ * Foods: named recipes with their live per-100g profile.
+ *
+ * `nutrition` is null when a part's ingredient row is missing — that is shown as
+ * such rather than as zeros, because zeros would read as a real value.
+ */
+function renderFoods(): string {
+  const f=state.foods;
+  if(f.status==="loading") return `<section class="panel"><div class="p-6 text-sm text-ink-400">Loading recipes...</div></section>`;
+  const rows=f.items.map((it:any)=>{
+    const n=it.nutrition;
+    const macros=n?`<span class="chip">${Number(n.caloriesPer100g).toFixed(0)} kcal</span><span class="chip">P ${Number(n.proteinPer100g).toFixed(1)}</span><span class="chip">C ${Number(n.carbsPer100g).toFixed(1)}</span><span class="chip">F ${Number(n.fatPer100g).toFixed(1)}</span>`:`<span class="badge badge-warn">ingredients missing — cannot calculate</span>`;
+    const parts=(it.components||[]).map((cp:any)=>`<span class="px-2 py-1 rounded-full bg-surface-800 border border-surface-700">${escapeHtml(cp.name)} <b class="text-ink-200">${cp.amount}g</b></span>`).join("");
+    const action=it.archivedAt?`<button class="button secondary text-xs" data-action="food-restore" data-id="${escapeHtml(it.id)}">Restore</button>`:`<button class="button danger text-xs" data-action="food-archive" data-id="${escapeHtml(it.id)}">Archive</button>`;
+    return `<div class="group border border-surface-800 rounded-xl p-3 bg-surface-900/30 hover:bg-surface-900/50 hover:border-surface-700 transition-colors">
+      <div class="flex justify-between gap-3">
+        <div class="min-w-0">
+          <div class="text-sm font-medium text-ink-100 truncate">${escapeHtml(it.name)}${it.archivedAt?` <span class="badge badge-warn ml-2">archived</span>`:""}</div>
+          <div class="text-xs text-ink-400 mt-1 flex flex-wrap gap-1.5">${macros}</div>
+        </div>
+        <div class="flex gap-2 shrink-0 self-start">${action}<button class="button secondary text-xs" data-action="food-edit" data-id="${escapeHtml(it.id)}">Edit</button></div>
+      </div>
+      <div class="mt-2 text-xs text-ink-400 flex flex-wrap items-center gap-2">${parts||`<span class="text-ink-500">No ingredients yet</span>`}</div>
+    </div>`;
+  }).join("");
+  return `<section class="panel">
+    <div class="panel-header flex items-start justify-between gap-4">
+      <div><h2 class="panel-title">Recipes — ${f.items.length}</h2><p class="panel-subtitle">Foods built from ingredients · nutrition is calculated from the composition</p></div>
+      <button class="button ok shrink-0" data-action="food-new">+ New Recipe</button>
+    </div>
+    <div class="panel-content"><div class="grid gap-2 max-h-[60vh] overflow-auto pr-1">${rows||`<div class="p-3 text-xs text-ink-400">No recipes yet. Combine two or more ingredients into a food you can log in one go.</div>`}</div></div>
+  </section>`;
+}
 function renderStores(): string { const s=state.stores; if(s.status==="loading") return `<section class="panel"><div class="p-6 text-sm text-ink-400">Loading stores...</div></section>`; return `<section class="panel"><div class="panel-header"><h2 class="panel-title">Stores — ${s.items.length}</h2></div><div class="panel-content space-y-3"><div class="flex gap-2"><input id="store-name" placeholder="New store name" class="bg-surface-800 border border-surface-700 rounded px-3 py-2 text-sm flex-1" /><button class="button" data-action="store-create">Create</button></div><div class="list-divided">${s.items.map((st:any)=>`<div class="p-3 flex justify-between"><span class="text-sm text-ink-100">${escapeHtml(st.name)}</span><span class="text-xs text-ink-400">${new Date(st.createdAt).toLocaleDateString()}</span></div>`).join("")||`<div class="p-3 text-xs text-ink-400">No stores</div>`}</div></div></section>`; }
-function renderMeals(): string { const m=state.meals; if(m.status==="loading") return `<section class="panel"><div class="p-6">Loading meals...</div></section>`; return `<section class="panel"><div class="panel-header"><h2 class="panel-title">Meals — ${m.items.length} (read-only)</h2><p class="panel-subtitle">Auto-calc all macros (cal/prot/carb/fat + sodium/fiber/sugar)</p></div><div class="panel-content space-y-2 max-h-[60vh] overflow-auto">${m.items.slice(0,50).map((meal:any)=>`<div class="border border-surface-800 rounded p-3 bg-surface-900/30"><div class="text-sm text-ink-100">${escapeHtml(meal.name)} — ${new Date(meal.eatenAt).toLocaleString()}</div><div class="text-xs text-ink-400">${(meal.ingredients||meal.mealIngredients||[]).map((mi:any)=>`${escapeHtml(mi.ingredientId)} ${mi.grams}g`).join(" • ")||"No ingredients"}</div></div>`).join("")||`<div class="text-xs text-ink-400">No meals</div>`}</div></section>`; }
+function renderMeals(): string { const m=state.meals; if(m.status==="loading") return `<section class="panel"><div class="p-6">Loading meals...</div></section>`; return `<section class="panel"><div class="panel-header"><h2 class="panel-title">Meals — ${m.items.length} (read-only)</h2><p class="panel-subtitle">Auto-calc all macros (cal/prot/carb/fat + sodium/fiber/sugar)</p></div><div class="panel-content space-y-2 max-h-[60vh] overflow-auto">${m.items.slice(0,50).map((meal:any)=>`<div class="border border-surface-800 rounded p-3 bg-surface-900/30"><div class="text-sm text-ink-100">${escapeHtml(meal.name)} — ${new Date(meal.eatenAt).toLocaleString()}</div><div class="text-xs text-ink-400">${(meal.foods||[]).map((mf:any)=>`${escapeHtml(mf.foodName||mf.foodId)} ${mf.amount}g · ${Number(mf.calories).toFixed(0)} kcal`).join(" • ")||"No foods"}</div></div>`).join("")||`<div class="text-xs text-ink-400">No meals</div>`}</div></section>`; }
 function renderBodyMetrics(): string { const b=state.bodyMetrics; return `<section class="panel"><div class="panel-header"><h2 class="panel-title">Body Metrics — ${b.items.length} (read-only)</h2></div><div class="panel-content"><canvas id="body-metrics-chart" height="120"></canvas><div class="mt-3 max-h-64 overflow-auto list-divided">${b.items.map((x:any)=>`<div class="p-2 flex justify-between text-xs"><span>${new Date(x.date).toLocaleDateString()}</span><span>${x.weightKg??""} kg • ${x.heightCm??""} cm</span></div>`).join("")||`<div class="p-2 text-xs text-ink-400">No data</div>`}</div></div></section>`; }
 function renderExperiments(): string { const e=state.experiments; if(e.status==="loading") return `<section class="panel"><div class="p-6">Loading experiments...</div></section>`; return `<section class="panel"><div class="panel-header"><h2 class="panel-title">Experiments — ${e.items.length} (read-only)</h2><p class="panel-subtitle">Linked tasks/goals/notes/tags + heatmap</p></div><div class="panel-content space-y-3"><div class="grid gap-2 max-h-[60vh] overflow-auto">${e.items.map((ex:any)=>`<div class="border border-surface-800 rounded p-3 bg-surface-900/30"><div class="text-sm text-ink-100">${escapeHtml(ex.name)} — ${escapeHtml(ex.status)}</div><div class="text-xs text-ink-400">${escapeHtml(ex.purpose||"")}</div><div class="text-xs text-ink-500">${new Date(ex.startDate).toLocaleDateString()} → ${ex.endDate?new Date(ex.endDate).toLocaleDateString():"open"} • ${escapeHtml(ex.categories||"")}</div><div class="mt-2 grid grid-cols-7 gap-1">${Array.from({length:30}).map((_,i)=>`<div class="w-4 h-4 rounded ${["bg-surface-800","bg-ok-900","bg-ok-700","bg-ok-500","bg-ok-300"][Math.floor(Math.random()*5)]}" title="day ${i}"></div>`).join("")}</div></div>`).join("")||`<div class="text-xs text-ink-400">No experiments</div>`}</div></div></section>`; }
 function renderTags(): string { const t=state.tags; if(t.status==="loading") return `<section class="panel"><div class="p-6">Loading tags...</div></section>`; return `<section class="panel"><div class="panel-header"><h2 class="panel-title">Tags — ${t.items.length} (read-only)</h2><p class="panel-subtitle">Usage per entity</p></div><div class="panel-content list-divided">${t.items.map((tag:any)=>`<div class="p-3 flex justify-between"><span class="text-sm" style="color:${tag.color?`#${tag.color.toString(16).padStart(6,"0")}`:"#cbd5e1"}">${escapeHtml(tag.name)}</span><span class="text-xs text-ink-400">tasks:${tag.taskCount??0} exp:${tag.experimentCount??0} goals:${tag.goalCount??0} notes:${tag.noteCount??0}</span></div>`).join("")||`<div class="p-3 text-xs text-ink-400">No tags</div>`}</div></section>`; }
@@ -2700,6 +2829,26 @@ function renderFxRates(): string { const f=state.fxRates; if(f.status==="loading
 
 function handleInput(event: Event): void {
   const target = event.target as HTMLElement;
+
+  if (target.id === "food-search") {
+    state.foods.search = (target as HTMLInputElement).value;
+    render();
+    const box = document.getElementById("food-search") as HTMLInputElement | null;
+    box?.focus();
+    box?.setSelectionRange(box.value.length, box.value.length);
+    return;
+  }
+  if (target.id === "food-name") {
+    state.foods.editingName = (target as HTMLInputElement).value;
+    return;
+  }
+  const amount = target.closest<HTMLElement>("[data-action='food-amount']");
+  if (amount?.dataset.id) {
+    const id=amount.dataset.id;
+    const parsed=Number.parseFloat((target as HTMLInputElement).value);
+    state.foods.draft=state.foods.draft.map((d)=>d.ingredientId===id?{...d,amount:Number.isNaN(parsed)?0:parsed}:d);
+    return;
+  }
 
   if (target.hasAttribute("data-fitfat-filter")) {
     const key = (target as HTMLElement).getAttribute("data-fitfat-filter");
@@ -2720,6 +2869,13 @@ window.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("click", handleClick);
   document.addEventListener("input", handleInput);
   document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && (state.foods.editingId || state.foods.draft.length || state.foods.editingName)) {
+      state.foods.editingId = null;
+      state.foods.editingName = "";
+      state.foods.draft = [];
+      render();
+      return;
+    }
     if (e.key === "Escape" && state.ingredients.showAddModal) {
       state.ingredients.showAddModal = false;
       render();

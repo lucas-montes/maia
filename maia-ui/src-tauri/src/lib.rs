@@ -1092,8 +1092,24 @@ fn list_meals(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Va
     let meals: Vec<(String,String,i64,i64)> = stmt.query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap().filter_map(|r|r.ok()).collect();
     let mut out=Vec::new();
     for (id,name,eaten,created) in meals {
-        let ings: Vec<serde_json::Value> = conn.prepare("SELECT id, ingredient_id, grams FROM meal_ingredients WHERE meal_id=?1").unwrap().query_map([&id], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"ingredientId":r.get::<_,String>(1)?,"grams":r.get::<_,f64>(2)?}))).unwrap().filter_map(|r|r.ok()).collect();
-        out.push(serde_json::json!({"id":id,"name":name,"eatenAt":eaten,"createdAt":created,"ingredients":ings}));
+        // Logged foods with their frozen portion snapshot, and the food name
+        // joined live so a rename shows up in an old meal without its numbers
+        // moving.
+        let foods: Vec<serde_json::Value> = conn.prepare(
+            "SELECT mf.id, mf.food_id, f.name, mf.amount, mf.calories, mf.protein, mf.carbs, mf.fat \
+             FROM meal_foods mf LEFT JOIN foods f ON f.id = mf.food_id \
+             WHERE mf.meal_id = ?1 AND mf.deleted_at IS NULL",
+        ).unwrap().query_map([&id], |r| Ok(serde_json::json!({
+            "id":r.get::<_,String>(0)?,
+            "foodId":r.get::<_,String>(1)?,
+            "foodName":r.get::<_,Option<String>>(2)?,
+            "amount":r.get::<_,f64>(3)?,
+            "calories":r.get::<_,f64>(4)?,
+            "protein":r.get::<_,f64>(5)?,
+            "carbs":r.get::<_,f64>(6)?,
+            "fat":r.get::<_,f64>(7)?,
+        }))).unwrap().filter_map(|r|r.ok()).collect();
+        out.push(serde_json::json!({"id":id,"name":name,"eatenAt":eaten,"createdAt":created,"foods":foods}));
     }
     CommandResult{success:true,data:Some(out),error:None}
 }
@@ -1192,6 +1208,269 @@ fn create_ingredient(state: tauri::State<AppState>, name: String, caloriesPer100
     if let Err(e)=conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, sodium_per100g, fiber_per100g, sugar_per100g, brand, barcode, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)", rusqlite::params![id, name, caloriesPer100g, proteinPer100g, carbsPer100g, fatPer100g, sodiumPer100g, fiberPer100g, sugarPer100g, brand, barcode, now, now]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
     CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
 }
+
+// --- Foods (recipes) ------------------------------------------------------
+//
+// A food is a named collection of ingredients with amounts, and carries **no
+// nutrition of its own**. Every number is derived from
+// foods -> food_ingredients -> ingredients on read, so an ingredient edit is
+// visible in every food built from it with nothing to recompute or invalidate.
+
+/// The live per-100g profile of a food, derived from its composition.
+///
+/// `None` when the food cannot be resolved: no composition, no weight in it, or
+/// a part whose ingredient row is missing. That last case matters — summing the
+/// parts that happen to be present would report a confident number for a recipe
+/// that is really missing an ingredient, and would drop those parts from the
+/// weight denominator, inflating the rest.
+fn resolve_food_nutrition(
+    conn: &rusqlite::Connection,
+    food_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT fi.amount, i.calories_per100g, i.protein_per100g, i.carbs_per100g, \
+             i.fat_per100g, i.sodium_per100g, i.fiber_per100g, i.sugar_per100g \
+             FROM food_ingredients fi JOIN ingredients i ON i.id = fi.ingredient_id \
+             WHERE fi.food_id = ?1 AND fi.deleted_at IS NULL",
+        )
+        .map_err(|e| format!("prep {e}"))?;
+    let rows: Vec<(f64, f64, f64, f64, f64, Option<f64>, Option<f64>, Option<f64>)> = stmt
+        .query_map([food_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+        })
+        .map_err(|e| format!("query {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("collect {e}"))?;
+
+    // Every part must be present. An inner join would silently shorten the list.
+    let parts: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM food_ingredients WHERE food_id = ?1 AND deleted_at IS NULL",
+            [food_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("count {e}"))?;
+    if rows.is_empty() || rows.len() as i64 != parts {
+        return Ok(None);
+    }
+
+    let mut total_amount = 0.0;
+    let (mut cal, mut prot, mut carb, mut fat) = (0.0, 0.0, 0.0, 0.0);
+    let (mut sod, mut fib, mut sug) = (0.0, 0.0, 0.0);
+    let (mut saw_sod, mut saw_fib, mut saw_sug) = (false, false, false);
+    for (amount, c, p, cb, f, s, fb, sg) in rows {
+        total_amount += amount;
+        cal += c * amount;
+        prot += p * amount;
+        carb += cb * amount;
+        fat += f * amount;
+        if let Some(v) = s { saw_sod = true; sod += v * amount; }
+        if let Some(v) = fb { saw_fib = true; fib += v * amount; }
+        if let Some(v) = sg { saw_sug = true; sug += v * amount; }
+    }
+    if total_amount <= 0.0 {
+        return Ok(None);
+    }
+
+    // Each term is already an absolute amount (per-100g x amount), so dividing
+    // by the total weight lands directly on a per-100g figure.
+    let f = 1.0 / total_amount;
+    Ok(Some(serde_json::json!({
+        "caloriesPer100g": cal * f,
+        "proteinPer100g": prot * f,
+        "carbsPer100g": carb * f,
+        "fatPer100g": fat * f,
+        "sodiumPer100g": if saw_sod { Some(sod * f) } else { None },
+        "fiberPer100g": if saw_fib { Some(fib * f) } else { None },
+        "sugarPer100g": if saw_sug { Some(sug * f) } else { None },
+        "totalAmount": total_amount,
+    })))
+}
+
+/// One food with its composition and its resolved nutrition.
+#[tauri::command]
+fn list_foods(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    let mut stmt = match conn.prepare("SELECT id, name, created_at, archived_at FROM foods WHERE deleted_at IS NULL ORDER BY name") {
+        Ok(s)=>s,
+        Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))},
+    };
+    let rows: Vec<(String, String, i64, Option<i64>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    let mut out = Vec::new();
+    for (id, name, created_at, archived_at) in rows {
+        // Parts come back ordered by ingredient name: there is no stored sort
+        // order, because the order carries no meaning.
+        let mut cs = match conn.prepare(
+            "SELECT fi.ingredient_id, fi.amount, i.name FROM food_ingredients fi \
+             JOIN ingredients i ON i.id = fi.ingredient_id \
+             WHERE fi.food_id = ?1 AND fi.deleted_at IS NULL ORDER BY i.name",
+        ) { Ok(s)=>s, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("prep {e}"))} };
+        let components: Vec<serde_json::Value> = cs
+            .query_map([&id], |r| Ok(serde_json::json!({
+                "ingredientId": r.get::<_,String>(0)?,
+                "amount": r.get::<_,f64>(1)?,
+                "name": r.get::<_,String>(2)?,
+            })))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        let nutrition = match resolve_food_nutrition(&conn, &id) {
+            Ok(n) => n,
+            Err(e) => return CommandResult{success:false,data:None,error:Some(e)},
+        };
+        out.push(serde_json::json!({
+            "id": id, "name": name, "createdAt": created_at,
+            "archivedAt": archived_at, "components": components,
+            "nutrition": nutrition,
+        }));
+    }
+    CommandResult{success:true,data:Some(out),error:None}
+}
+
+/// Creates a food with its whole composition.
+///
+/// The composition is written wholesale rather than appended to, so a corrected
+/// recipe cannot leave a stale part behind.
+#[tauri::command]
+fn create_food(
+    state: tauri::State<AppState>,
+    name: String,
+    components: Vec<serde_json::Value>,
+) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    if name.trim().is_empty() { return CommandResult{success:false,data:None,error:Some("Name is required".into())}; }
+    if components.is_empty() { return CommandResult{success:false,data:None,error:Some("A food needs at least one ingredient".into())}; }
+    let id = uuid::Uuid::now_v7().to_string();
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e) = conn.execute(
+        "INSERT INTO foods (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+        rusqlite::params![id, name.trim(), now],
+    ) { return CommandResult{success:false,data:None,error:Some(format!("insert {e}"))}; }
+
+    match write_food_components(&conn, &id, &components) {
+        Ok(()) => {
+            let nutrition = resolve_food_nutrition(&conn, &id).ok().flatten();
+            CommandResult{success:true,data:Some(serde_json::json!({"id":id,"nutrition":nutrition})),error:None}
+        }
+        Err(e) => CommandResult{success:false,data:None,error:Some(e)},
+    }
+}
+
+#[tauri::command]
+fn update_food(
+    state: tauri::State<AppState>,
+    id: String,
+    name: String,
+    components: Vec<serde_json::Value>,
+) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    if name.trim().is_empty() { return CommandResult{success:false,data:None,error:Some("Name is required".into())}; }
+    if components.is_empty() { return CommandResult{success:false,data:None,error:Some("A food needs at least one ingredient".into())}; }
+    let exists: i64 = conn
+        .query_row("SELECT count(*) FROM foods WHERE id=?1", [&id], |r| r.get(0))
+        .unwrap_or(0);
+    if exists == 0 { return CommandResult{success:false,data:None,error:Some("Food not found".into())}; }
+
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e) = conn.execute(
+        "UPDATE foods SET name=?1, updated_at=?2 WHERE id=?3",
+        rusqlite::params![name.trim(), now, id],
+    ) { return CommandResult{success:false,data:None,error:Some(format!("update {e}"))}; }
+
+    match write_food_components(&conn, &id, &components) {
+        Ok(()) => {
+            let nutrition = resolve_food_nutrition(&conn, &id).ok().flatten();
+            CommandResult{success:true,data:Some(serde_json::json!({"nutrition":nutrition})),error:None}
+        }
+        Err(e) => CommandResult{success:false,data:None,error:Some(e)},
+    }
+}
+
+/// Replaces a food's composition.
+///
+/// Part deletion travels by omission, which is why the whole list is rewritten
+/// instead of diffed: there is no way to express "remove this part" otherwise.
+fn write_food_components(
+    conn: &rusqlite::Connection,
+    food_id: &str,
+    components: &[serde_json::Value],
+) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp_millis();
+    conn.execute(
+        "DELETE FROM food_ingredients WHERE food_id=?1",
+        rusqlite::params![food_id],
+    )
+    .map_err(|e| format!("clear {e}"))?;
+
+    let mut seen: Vec<String> = Vec::new();
+    for component in components {
+        let ingredient_id = component
+            .get("ingredientId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "component is missing ingredientId".to_string())?;
+        let amount = component
+            .get("amount")
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| "component is missing amount".to_string())?;
+        // The amounts are the denominator of the per-100g derivation, so a zero
+        // one leaves the food unresolvable.
+        if amount <= 0.0 {
+            return Err("Every amount must be greater than 0".into());
+        }
+        if seen.iter().any(|s| s == ingredient_id) {
+            return Err("The same ingredient cannot appear twice in one food".into());
+        }
+        seen.push(ingredient_id.to_string());
+        // An unknown or archived part is rejected rather than inserted: foreign
+        // keys are enforced, so it would otherwise abort the whole write.
+        let known: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM ingredients WHERE id=?1 AND is_archived=0",
+                [ingredient_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if known == 0 {
+            return Err("An ingredient in this food is unknown or archived".into());
+        }
+        conn.execute(
+            "INSERT INTO food_ingredients (food_id, ingredient_id, amount, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![food_id, ingredient_id, amount, now],
+        )
+        .map_err(|e| format!("insert {e}"))?;
+    }
+    Ok(())
+}
+
+/// Archives a food rather than deleting it, so meals that logged it keep
+/// rendering from their own snapshot.
+#[tauri::command]
+fn archive_food(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e) = conn.execute(
+        "UPDATE foods SET archived_at=?1, updated_at=?1 WHERE id=?2",
+        rusqlite::params![now, id],
+    ) { return CommandResult{success:false,data:None,error:Some(format!("archive {e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+}
+
+#[tauri::command]
+fn restore_food(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e) = conn.execute(
+        "UPDATE foods SET archived_at=NULL, updated_at=?1 WHERE id=?2",
+        rusqlite::params![now, id],
+    ) { return CommandResult{success:false,data:None,error:Some(format!("restore {e}"))}; }
+    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+}
+
 #[tauri::command]
 fn create_template(state: tauri::State<AppState>, id: String, name: String) -> CommandResult<serde_json::Value> {
     let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
@@ -1432,6 +1711,11 @@ pub fn run() {
             update_exercise,
             update_ingredient,
             create_ingredient,
+            list_foods,
+            create_food,
+            update_food,
+            archive_food,
+            restore_food,
             create_template,
             update_template,
             delete_template,
