@@ -73,8 +73,8 @@ pub struct ExerciseSetRead {
 pub struct PullMealsResponse {
     pub server_time: i64,
     pub meals: Vec<MealRead>,
-    #[serde(rename = "mealIngredients")]
-    pub meal_ingredients: Vec<MealIngredientRead>,
+    #[serde(rename = "mealFoods")]
+    pub meal_foods: Vec<MealFoodRead>,
     pub deleted: Vec<String>,
 }
 
@@ -91,13 +91,27 @@ pub struct MealRead {
 }
 
 #[derive(Serialize)]
-pub struct MealIngredientRead {
+/// A logged food with its portion snapshot.
+///
+/// The macros are replayed exactly as they were frozen at log time, and the
+/// food name is joined live so a renamed recipe shows up in old meals without
+/// their numbers moving.
+pub struct MealFoodRead {
     pub id: String,
     #[serde(rename = "mealId")]
     pub meal_id: String,
-    #[serde(rename = "ingredientId")]
-    pub ingredient_id: String,
-    pub grams: f64,
+    #[serde(rename = "foodId")]
+    pub food_id: String,
+    #[serde(rename = "foodName")]
+    pub food_name: Option<String>,
+    pub amount: f64,
+    pub calories: f64,
+    pub protein: f64,
+    pub carbs: f64,
+    pub fat: f64,
+    pub sodium: Option<f64>,
+    pub fiber: Option<f64>,
+    pub sugar: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -243,16 +257,24 @@ pub async fn pull_meals(
     let mut mis = Vec::new();
     if !meal_ids.is_empty() {
         let ph = meal_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("SELECT id, meal_id, ingredient_id, grams FROM meal_ingredients WHERE meal_id IN ({}) AND deleted_at IS NULL", ph);
+        let sql = format!("SELECT mf.id, mf.meal_id, mf.food_id, f.name, mf.amount, mf.calories, mf.protein, mf.carbs, mf.fat, mf.sodium, mf.fiber, mf.sugar FROM meal_foods mf LEFT JOIN foods f ON f.id = mf.food_id WHERE mf.meal_id IN ({}) AND mf.deleted_at IS NULL", ph);
         let mut stmt2 = conn.prepare(&sql).unwrap();
         let params: Vec<&dyn rusqlite::ToSql> = meal_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
         mis = stmt2
             .query_map(params.as_slice(), |row| {
-                Ok(MealIngredientRead {
+                Ok(MealFoodRead {
                     id: row.get(0)?,
                     meal_id: row.get(1)?,
-                    ingredient_id: row.get(2)?,
-                    grams: row.get(3)?,
+                    food_id: row.get(2)?,
+                    food_name: row.get(3)?,
+                    amount: row.get(4)?,
+                    calories: row.get(5)?,
+                    protein: row.get(6)?,
+                    carbs: row.get(7)?,
+                    fat: row.get(8)?,
+                    sodium: row.get(9)?,
+                    fiber: row.get(10)?,
+                    sugar: row.get(11)?,
                 })
             })
             .unwrap()
@@ -272,7 +294,7 @@ pub async fn pull_meals(
     Json(PullMealsResponse {
         server_time,
         meals,
-        meal_ingredients: mis,
+        meal_foods: mis,
         deleted,
     })
 }

@@ -36,6 +36,7 @@ pub struct IngredientContribution {
     pub pictures: Vec<IngredientPicturePush>,
     #[serde(default)]
     pub prices: Vec<IngredientPricePush>,
+    /// Recipe components, applied with replace semantics (see push_ingredient).
     #[serde(default)]
     pub deleted: Vec<String>,
 }
@@ -264,6 +265,109 @@ pub async fn push_ingredient(
         let _ = tx.execute("UPDATE ingredients SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
         let _ = tx.execute("UPDATE ingredient_pictures SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
         let _ = tx.execute("UPDATE ingredient_prices SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+    }
+
+    tx.commit().unwrap();
+    Json(SyncAck { server_time })
+}
+
+/// Foods: a named recipe and the ingredients it is built from.
+///
+/// The composition arrives **nested inside each food**, which is what lets a
+/// pull deliver a usable recipe in one request instead of making every client
+/// fetch a second endpoint and stitch the join itself.
+#[derive(Deserialize)]
+pub struct FoodsPush {
+    #[serde(default)]
+    pub items: Vec<FoodPush>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct FoodPush {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+    #[serde(rename = "archivedAt", default)]
+    pub archived_at: Option<i64>,
+    #[serde(default)]
+    pub components: Vec<FoodComponentPush>,
+}
+
+/// One ingredient in a food, with the amount used. There is no id of its own:
+/// the pair (food, ingredient) is the identity, which is what makes the same
+/// ingredient twice in one food impossible rather than merely discouraged.
+#[derive(Deserialize)]
+pub struct FoodComponentPush {
+    #[serde(rename = "ingredientId")]
+    pub ingredient_id: String,
+    pub amount: f64,
+}
+
+pub async fn push_foods(
+    State(state): State<AppState>,
+    Json(payload): Json<FoodsPush>,
+) -> impl IntoResponse {
+    let server_time = db::server_time_ms();
+    let conn = state.db.lock().unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+
+    for food in payload.items {
+        tx.execute(
+            "INSERT INTO foods (id, name, created_at, archived_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name, created_at=excluded.created_at, archived_at=excluded.archived_at, updated_at=excluded.updated_at, deleted_at=NULL",
+            rusqlite::params![
+                food.id,
+                food.name,
+                food.created_at,
+                food.archived_at,
+                server_time
+            ],
+        )
+        .unwrap();
+
+        // Replace semantics: the incoming list IS the recipe, so a part the
+        // user removed disappears without needing a per-part tombstone.
+        // Tombstoned rows are left alone so a deletion is never resurrected.
+        tx.execute(
+            "DELETE FROM food_ingredients WHERE food_id=?1 AND deleted_at IS NULL",
+            rusqlite::params![food.id],
+        )
+        .unwrap();
+        for component in food.components {
+            // `PRAGMA foreign_keys` is ON and every execute() unwraps, so a
+            // part referencing an ingredient this server has never seen would
+            // abort the whole request. Clients pull ingredients before foods for
+            // exactly this reason; skip as a safety net rather than 500.
+            let known: i64 = tx
+                .query_row(
+                    "SELECT count(*) FROM ingredients WHERE id=?1 AND deleted_at IS NULL",
+                    rusqlite::params![component.ingredient_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if known == 0 {
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO food_ingredients (food_id, ingredient_id, amount, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, NULL) ON CONFLICT(food_id, ingredient_id) DO UPDATE SET amount=excluded.amount, updated_at=excluded.updated_at, deleted_at=NULL",
+                rusqlite::params![
+                    food.id,
+                    component.ingredient_id,
+                    component.amount,
+                    server_time
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    for id in payload.deleted {
+        let _ = tx.execute(
+            "UPDATE foods SET deleted_at=?1, updated_at=?1 WHERE id=?2",
+            rusqlite::params![server_time, id],
+        );
     }
 
     tx.commit().unwrap();
@@ -699,8 +803,8 @@ pub async fn push_goals(
 pub struct MealsPush {
     #[serde(default)]
     pub meals: Vec<MealPush>,
-    #[serde(rename = "mealIngredients", default)]
-    pub meal_ingredients: Vec<MealIngredientPush>,
+    #[serde(rename = "mealFoods", default)]
+    pub meal_foods: Vec<MealFoodPush>,
     #[serde(default)]
     pub deleted: Vec<String>,
 }
@@ -715,14 +819,31 @@ pub struct MealPush {
     pub created_at: i64,
 }
 
+/// A food logged in a meal.
+///
+/// The macro fields are a **portion snapshot** the client resolved and froze at
+/// log time, not a per-100g profile the server should recompute: the whole
+/// reason a meal can be read without walking the ingredient graph, and the
+/// reason editing an ingredient later cannot restate it. The server stores what
+/// it is given.
 #[derive(Deserialize)]
-pub struct MealIngredientPush {
+pub struct MealFoodPush {
     pub id: String,
     #[serde(rename = "mealId")]
     pub meal_id: String,
-    #[serde(rename = "ingredientId")]
-    pub ingredient_id: String,
-    pub grams: f64,
+    #[serde(rename = "foodId")]
+    pub food_id: String,
+    pub amount: f64,
+    pub calories: f64,
+    pub protein: f64,
+    pub carbs: f64,
+    pub fat: f64,
+    #[serde(default)]
+    pub sodium: Option<f64>,
+    #[serde(default)]
+    pub fiber: Option<f64>,
+    #[serde(default)]
+    pub sugar: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -795,16 +916,46 @@ pub async fn push_meals(
         )
         .unwrap();
     }
-    for mi in payload.meal_ingredients {
+    for mf in payload.meal_foods {
+        // A logged food may reference a recipe this server has never seen — the
+        // client can log a food before pushing it as a shareable recipe.
+        // `PRAGMA foreign_keys` is ON and every execute() unwraps, so
+        // inserting it would abort the whole request with a 500 and take the
+        // meal down with it. Skip instead: the row is self-contained (it carries
+        // its own frozen macros), so totals stay correct; it just cannot be
+        // linked back to the recipe until that is pushed too.
+        let known: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM foods WHERE id=?1 AND deleted_at IS NULL",
+                rusqlite::params![mf.food_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if known == 0 {
+            continue;
+        }
         tx.execute(
-            "INSERT INTO meal_ingredients (id, meal_id, ingredient_id, grams, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL) ON CONFLICT(id) DO UPDATE SET meal_id=excluded.meal_id, ingredient_id=excluded.ingredient_id, grams=excluded.grams, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![mi.id, mi.meal_id, mi.ingredient_id, mi.grams, server_time],
+            "INSERT INTO meal_foods (id, meal_id, food_id, amount, calories, protein, carbs, fat, sodium, fiber, sugar, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL) ON CONFLICT(id) DO UPDATE SET meal_id=excluded.meal_id, food_id=excluded.food_id, amount=excluded.amount, calories=excluded.calories, protein=excluded.protein, carbs=excluded.carbs, fat=excluded.fat, sodium=excluded.sodium, fiber=excluded.fiber, sugar=excluded.sugar, updated_at=excluded.updated_at, deleted_at=NULL",
+            rusqlite::params![
+                mf.id,
+                mf.meal_id,
+                mf.food_id,
+                mf.amount,
+                mf.calories,
+                mf.protein,
+                mf.carbs,
+                mf.fat,
+                mf.sodium,
+                mf.fiber,
+                mf.sugar,
+                server_time
+            ],
         )
         .unwrap();
     }
     for id in payload.deleted {
         let _ = tx.execute("UPDATE meals SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
-        let _ = tx.execute("UPDATE meal_ingredients SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("UPDATE meal_foods SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
     }
     tx.commit().unwrap();
     Json(SyncAck { server_time })

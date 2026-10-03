@@ -61,6 +61,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/ingredients/lookup", get(crate::handlers::lookup::lookup_ingredient))
         .route("/ingredients/import-from-barcode", axum::routing::post(crate::handlers::lookup::import_from_barcode))
         .route("/ingredients/item/:id", get(crate::handlers::pull::get_ingredient_item))
+        .route("/foods", get(crate::handlers::pull::pull_foods).post(crate::handlers::push::push_foods))
         .route("/fx-rates", get(crate::handlers::pull::pull_fx_rates))
         .route("/workouts", get(crate::handlers::read::pull_workouts))
         .route("/templates", get(crate::handlers::pull::pull_templates).post(crate::handlers::push::push_templates))

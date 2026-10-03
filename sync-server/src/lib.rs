@@ -133,6 +133,7 @@ mod tests {
             conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i1','Oats',100,10,20,5,1000,1000)", []).unwrap();
             conn.execute("INSERT INTO ingredient_pictures (id, ingredient_id, image_path, sort_order, created_at, updated_at) VALUES ('p1','i1','/tmp/a.jpg',0,1000,1000)", []).unwrap();
             conn.execute("INSERT INTO ingredient_prices (id, ingredient_id, store_id, price, currency_code, recorded_at, created_at, updated_at) VALUES ('pr1','i1','s1',2.4,'EUR',1000,1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i2','Oats raw',400,13,60,7,1000,1000)", []).unwrap();
         }
         let (port, handle) = crate::server::start_test_server_with_db(pool).await;
         let client = reqwest::Client::new();
@@ -144,12 +145,15 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["items"].as_array().unwrap().len(), 2);
         assert_eq!(body["stores"].as_array().unwrap().len(), 1);
         let ing = &body["items"][0];
         assert_eq!(ing["pictures"].as_array().unwrap().len(), 1);
         assert_eq!(ing["prices"].as_array().unwrap().len(), 1);
         assert_eq!(ing["pictures"][0]["imagePath"], "/tmp/a.jpg");
+        // An ingredient is a leaf again: it carries its own nutrition and no
+        // recipe. Composition lives on foods.
+        assert!(ing.get("components").is_none());
         handle.abort();
     }
 
@@ -165,6 +169,7 @@ mod tests {
             conn.execute("INSERT INTO stores (id, name, created_at, updated_at) VALUES ('s1','Carrefour',1000,1000)", []).unwrap();
             conn.execute("INSERT INTO ingredient_pictures (id, ingredient_id, image_path, sort_order, created_at, updated_at) VALUES ('p1','i1','/tmp/a.jpg',0,1000,1000)", []).unwrap();
             conn.execute("INSERT INTO ingredient_prices (id, ingredient_id, store_id, price, currency_code, recorded_at, created_at, updated_at) VALUES ('pr1','i1','s1',2.4,'EUR',1000,1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i2','Oats raw',400,13,60,7,1000,1000)", []).unwrap();
         }
         let (port, handle) = crate::server::start_test_server_with_db(pool).await;
         let client = reqwest::Client::new();
@@ -185,7 +190,7 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = resp.json().await.unwrap();
         let items = body["items"].as_array().unwrap();
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 2);
         assert_eq!(items[0]["barcode"], "123");
         assert!(items[0].get("pictures").is_none());
         assert!(items[0].get("prices").is_none());
@@ -208,6 +213,9 @@ mod tests {
         assert_eq!(body["pictures"].as_array().unwrap().len(), 1);
         assert!(body.get("prices").is_none());
         assert!(body.get("stores").is_none());
+        // Selective import carries nutrition only. Composition belongs to foods,
+        // so it is not part of an ingredient payload at all.
+        assert!(body.get("components").is_none());
 
         let resp = client.get(format!("{base}/ingredients/item/missing")).header(auth.0, auth.1).send().await.unwrap();
         assert_eq!(resp.status(), 404);
@@ -301,6 +309,10 @@ mod tests {
     async fn push_ingredient_idempotent() {
         use crate::db;
         let pool = db::init_memory().unwrap();
+        {
+            let conn = pool.lock().unwrap();
+            conn.execute("INSERT INTO stores (id, name, created_at, updated_at) VALUES ('s1','Carrefour',1000,1000)", []).unwrap();
+        }
         let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
         let client = reqwest::Client::new();
         let url = format!("http://127.0.0.1:{port}/ingredients");
@@ -327,6 +339,129 @@ mod tests {
             let count_p: i64 = conn.query_row("SELECT count(*) FROM ingredient_pictures WHERE id='p1'", [], |r| r.get(0)).unwrap();
             assert_eq!(count_p, 1);
         }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn push_foods_idempotent_and_replaces_composition() {
+        use crate::db;
+        let pool = db::init_memory().unwrap();
+        {
+            let conn = pool.lock().unwrap();
+            // Composition parts must already exist: food_ingredients has a real
+            // FK and push unwraps, so an unknown part is skipped rather than
+            // aborting the whole request.
+            conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i2','Oats raw',400,13,60,7,1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i3','Honey',300,0,80,0,1000,1000)", []).unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/foods");
+        let payload = serde_json::json!({
+            "items": [{
+                "id": "f1",
+                "name": "Granola",
+                "createdAt": 1000,
+                "archivedAt": serde_json::Value::Null,
+                "components": [
+                    {"ingredientId": "i2", "amount": 80.0},
+                    {"ingredientId": "i3", "amount": 20.0}
+                ]
+            }]
+        });
+        let resp = client.post(&url).header("Authorization","Bearer test-key").json(&payload).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        // Re-pushing must not duplicate the food or its composition.
+        let resp2 = client.post(&url).header("Authorization","Bearer test-key").json(&payload).send().await.unwrap();
+        assert_eq!(resp2.status(), 200);
+        {
+            let conn = pool.lock().unwrap();
+            let count: i64 = conn.query_row("SELECT count(*) FROM foods WHERE id='f1'", [], |r| r.get(0)).unwrap();
+            assert_eq!(count, 1);
+            let count_c: i64 = conn.query_row("SELECT count(*) FROM food_ingredients WHERE food_id='f1'", [], |r| r.get(0)).unwrap();
+            assert_eq!(count_c, 2);
+            // The same ingredient twice in one food is impossible by schema,
+            // not merely rejected by the server.
+            let dup: i64 = conn.query_row("SELECT count(*) FROM (SELECT ingredient_id FROM food_ingredients WHERE food_id='f1' GROUP BY ingredient_id HAVING count(*)>1)", [], |r| r.get(0)).unwrap();
+            assert_eq!(dup, 0);
+        }
+
+        // Replace semantics: pushing a shorter composition drops the missing
+        // part instead of accumulating a union of both versions.
+        let trimmed = serde_json::json!({
+            "items": [{
+                "id": "f1", "name": "Granola", "createdAt": 1000,
+                "components": [{"ingredientId": "i2", "amount": 150.0}]
+            }]
+        });
+        let resp = client.post(&url).header("Authorization","Bearer test-key").json(&trimmed).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        {
+            let conn = pool.lock().unwrap();
+            let rows: Vec<(String, f64)> = conn
+                .prepare("SELECT ingredient_id, amount FROM food_ingredients WHERE food_id='f1' AND deleted_at IS NULL")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(rows, vec![("i2".to_string(), 150.0)]);
+        }
+
+        // A part whose ingredient this server has never seen is skipped without
+        // failing the whole push — and it leaves the food with no composition
+        // rather than a partial one.
+        let unknown = serde_json::json!({
+            "items": [{
+                "id": "f1", "name": "Granola", "createdAt": 1000,
+                "components": [{"ingredientId": "never-pushed", "amount": 10.0}]
+            }]
+        });
+        let resp = client.post(&url).header("Authorization","Bearer test-key").json(&unknown).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        {
+            let conn = pool.lock().unwrap();
+            let count_c: i64 = conn.query_row("SELECT count(*) FROM food_ingredients WHERE food_id='f1' AND deleted_at IS NULL", [], |r| r.get(0)).unwrap();
+            assert_eq!(count_c, 0);
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn pull_foods_nests_composition_without_nutrition() {
+        use crate::db;
+        let pool = db::init_memory().unwrap();
+        {
+            let conn = pool.lock().unwrap();
+            conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i2','Oats raw',400,13,60,7,1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i3','Honey',300,0,80,0,1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO foods (id, name, created_at, updated_at) VALUES ('f1','Granola',1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO food_ingredients (food_id, ingredient_id, amount, updated_at) VALUES ('f1','i3',20,1000)", []).unwrap();
+            conn.execute("INSERT INTO food_ingredients (food_id, ingredient_id, amount, updated_at) VALUES ('f1','i2',80,1000)", []).unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/foods?since=0"))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["name"], "Granola");
+        // Components come back nested, ordered by ingredient name.
+        let components = items[0]["components"].as_array().unwrap();
+        assert_eq!(components.len(), 2);
+        assert_eq!(components[0]["ingredientId"], "i3"); // Honey
+        assert_eq!(components[0]["amount"], 20.0);
+        assert_eq!(components[1]["ingredientId"], "i2"); // Oats raw
+        assert_eq!(components[1]["amount"], 80.0);
+        // A food carries no nutrition of its own: it is always resolved from the
+        // ingredient rows, so the server must not store or send a stale copy.
+        assert!(items[0].get("caloriesPer100g").is_none());
         handle.abort();
     }
 
@@ -999,7 +1134,10 @@ mod tests {
             conn.execute("INSERT INTO exercise_sets (id, workout_exercise_id, set_number, reps, weight_kg, updated_at) VALUES ('s1','we1',1,8,80,1000)", []).unwrap();
             conn.execute("INSERT INTO meals (id, name, eaten_at, created_at, updated_at) VALUES ('m1','Lunch',1000,1000,1000)", []).unwrap();
             conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i1','Oats',100,10,20,5,1000,1000)", []).unwrap();
-            conn.execute("INSERT INTO meal_ingredients (id, meal_id, ingredient_id, grams, updated_at) VALUES ('mi1','m1','i1',100,1000)", []).unwrap();
+            conn.execute("INSERT INTO foods (id, name, created_at, updated_at) VALUES ('f1','Oats bowl',1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO food_ingredients (food_id, ingredient_id, amount, updated_at) VALUES ('f1','i1',100,1000)", []).unwrap();
+            // A portion snapshot, frozen at log time.
+            conn.execute("INSERT INTO meal_foods (id, meal_id, food_id, amount, calories, protein, carbs, fat, sodium, fiber, sugar, updated_at) VALUES ('mf1','m1','f1',200,200,20,40,10,NULL,NULL,NULL,1000)", []).unwrap();
             conn.execute("INSERT INTO body_metrics (id, date, weight_kg, created_at, updated_at) VALUES ('b1',1000,70.5,1000,1000)", []).unwrap();
         }
         let (port, handle) = crate::server::start_test_server_with_db(pool).await;
@@ -1014,7 +1152,14 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["meals"].as_array().unwrap().len(), 1);
-        assert_eq!(body["mealIngredients"].as_array().unwrap().len(), 1);
+        let meal_foods = body["mealFoods"].as_array().unwrap();
+        assert_eq!(meal_foods.len(), 1);
+        // The frozen portion is replayed verbatim, and the food name is joined
+        // live so a rename shows up in old meals without moving the numbers.
+        assert_eq!(meal_foods[0]["foodId"], "f1");
+        assert_eq!(meal_foods[0]["foodName"], "Oats bowl");
+        assert_eq!(meal_foods[0]["amount"], 200.0);
+        assert_eq!(meal_foods[0]["calories"], 200.0);
         let resp = client.get(format!("http://127.0.0.1:{port}/body-metrics?since=0")).header("Authorization","Bearer test-key").send().await.unwrap();
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = resp.json().await.unwrap();

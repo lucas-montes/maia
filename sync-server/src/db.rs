@@ -91,14 +91,70 @@ pub fn create_schema(conn: &Connection) -> anyhow::Result<()> {
             deleted_at INTEGER
         );
 
-        CREATE TABLE IF NOT EXISTS meal_ingredients (
+        -- A food logged in a meal, with the amount eaten.
+        --
+        -- The macro columns are a **snapshot of this portion**, resolved by the
+        -- client at log time through foods -> food_ingredients -> ingredients
+        -- and stored verbatim. Reading a meal is therefore join-free, and
+        -- editing an ingredient afterwards cannot restate a meal that was
+        -- already logged.
+        --
+        -- The food_id reference is deliberately NO ACTION: an archived food
+        -- stays referenced so the snapshot keeps rendering.
+        CREATE TABLE IF NOT EXISTS meal_foods (
             id TEXT PRIMARY KEY,
             meal_id TEXT NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
-            ingredient_id TEXT NOT NULL REFERENCES ingredients(id) ON DELETE CASCADE,
-            grams REAL NOT NULL,
+            food_id TEXT NOT NULL REFERENCES foods(id),
+            amount REAL NOT NULL,
+            calories REAL NOT NULL,
+            protein REAL NOT NULL,
+            carbs REAL NOT NULL,
+            fat REAL NOT NULL,
+            sodium REAL,
+            fiber REAL,
+            sugar REAL,
             updated_at INTEGER NOT NULL DEFAULT 0,
             deleted_at INTEGER
         );
+        CREATE INDEX IF NOT EXISTS idx_meal_foods_meal ON meal_foods(meal_id);
+
+        -- A food is a recipe: a named collection of ingredients with amounts.
+        -- It carries no nutrition of its own — that is always resolved through
+        -- food_ingredients -> ingredients, so editing an ingredient is
+        -- immediately visible in every food built from it.
+        --
+        -- Deliberately no per-100g macro columns here. A stored copy would go
+        -- stale the moment an ingredient is edited, and the whole point of the
+        -- foods layer is that composition is the single source of truth.
+        CREATE TABLE IF NOT EXISTS foods (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            archived_at INTEGER,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            deleted_at INTEGER
+        );
+
+        -- The composition of a food: which ingredients go in it, and how much
+        -- of each. The sum of `amount` across a food is the batch weight its
+        -- per-100g figures are derived from, so there is no yield column.
+        --
+        -- Components are presented alphabetically by ingredient name; there is
+        -- no stored sort order, because the order carries no meaning.
+        --
+        -- Cascade rules:
+        --   * food_id CASCADE — deleting the food drops its composition.
+        --   * ingredient_id NO ACTION — a part is never implicitly detached,
+        --     because that would silently change what a logged food means.
+        CREATE TABLE IF NOT EXISTS food_ingredients (
+            food_id TEXT NOT NULL REFERENCES foods(id) ON DELETE CASCADE,
+            ingredient_id TEXT NOT NULL REFERENCES ingredients(id),
+            amount REAL NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            deleted_at INTEGER,
+            PRIMARY KEY (food_id, ingredient_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_food_ingredients_ingredient ON food_ingredients(ingredient_id);
 
         CREATE TABLE IF NOT EXISTS exercises (
             id TEXT PRIMARY KEY,

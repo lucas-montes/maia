@@ -106,6 +106,7 @@ pub struct Ingredient {
     pub prices: Vec<IngredientPrice>,
 }
 
+
 #[derive(Serialize)]
 pub struct IngredientPicture {
     pub id: String,
@@ -287,6 +288,7 @@ pub async fn pull_ingredients(
             .collect::<Result<Vec<_>, _>>()
             .unwrap_or_default();
 
+
         items.push(Ingredient {
             id,
             name,
@@ -368,6 +370,8 @@ pub async fn pull_fx_rates(
 #[derive(Serialize)]
 pub struct PullTemplatesResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, pub deleted: Vec<String> }
 #[derive(Serialize)]
+pub struct PullFoodsResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, pub deleted: Vec<String> }
+#[derive(Serialize)]
 pub struct PullNotesResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, pub deleted: Vec<String> }
 #[derive(Serialize)]
 pub struct PullTasksResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, pub deleted: Vec<String> }
@@ -384,6 +388,52 @@ pub struct PullExperimentsResponse { pub server_time: i64, pub items: Vec<serde_
 #[derive(Serialize)]
 pub struct PullTagsResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, pub deleted: Vec<String> }
 
+/// Foods, each with its composition nested inside it.
+///
+/// The nesting is the point: a client can store a usable recipe from one
+/// response, instead of fetching every food and then a second endpoint per food
+/// to discover what it is made of.
+///
+/// No nutrition is returned. Foods carry none — the client resolves it from the
+/// ingredients it already has, which keeps the server from storing a number that
+/// goes stale as soon as an ingredient is edited.
+pub async fn pull_foods(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
+    let since = q.since.unwrap_or(0);
+    let server_time = db::server_time_ms();
+    let conn = state.db.lock().unwrap();
+
+    // One query for every food that changed, then one for the composition of
+    // exactly those. Ordering by ingredient name matches how clients present
+    // the parts; there is no stored sort order to read.
+    let mut stmt = conn.prepare("SELECT id, name, created_at, archived_at FROM foods WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
+    let rows: Vec<(String, String, i64, Option<i64>)> = stmt
+        .query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let items: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|(id, name, created_at, archived_at)| {
+            let mut comp_stmt = conn.prepare("SELECT fi.ingredient_id, fi.amount, i.name FROM food_ingredients fi JOIN ingredients i ON i.id = fi.ingredient_id WHERE fi.food_id = ?1 AND fi.deleted_at IS NULL ORDER BY i.name").unwrap();
+            let components: Vec<serde_json::Value> = comp_stmt
+                .query_map([id], |r| Ok(serde_json::json!({"ingredientId": r.get::<_,String>(0)?, "amount": r.get::<_,f64>(1)?})))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            serde_json::json!({
+                "id": id,
+                "name": name,
+                "createdAt": created_at,
+                "archivedAt": archived_at,
+                "components": components,
+            })
+        })
+        .collect();
+
+    let deleted: Vec<String> = conn.prepare("SELECT id FROM foods WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
+    Json(PullFoodsResponse{server_time, items, deleted})
+}
 pub async fn pull_templates(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
     let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.lock().unwrap();
     let mut stmt = conn.prepare("SELECT id, name, notes, start_date, recurrence, excluded_dates, source_routine_id, created_at, updated_at FROM workout_templates WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
@@ -616,6 +666,7 @@ pub async fn get_ingredient_item(
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap_or_default();
+
 
     let body = serde_json::json!({
         "id": id,
