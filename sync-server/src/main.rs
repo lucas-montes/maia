@@ -5,8 +5,10 @@
 //! window was. This binary serves the same API without a GUI, so it can run as a
 //! long-lived service.
 //!
-//! Configuration comes from the environment; see [`sync_server::config`] for the
-//! variables and their defaults.
+//! Configuration comes from a JSON file; see [`sync_server::config`] for the
+//! resolution order and the keys it understands.
+
+use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -16,6 +18,11 @@ use sync_server::db;
 #[derive(Parser)]
 #[command(name = "sync-server", about = "Maia sync API server")]
 struct Cli {
+    /// Configuration file. Defaults to /etc/maia/config.json, then to the
+    /// checkout's maia.json.
+    #[arg(long, short = 'c', value_name = "PATH", global = true)]
+    config: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -33,7 +40,8 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let config = Config::from_env();
+    // Read once, here, so every subcommand reports the same problem the same way.
+    let config = Config::load(cli.config.as_deref())?;
 
     match cli.command {
         Command::Serve => serve(config).await,
