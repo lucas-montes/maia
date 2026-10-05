@@ -137,6 +137,25 @@ in
         normal user and opens the same SQLite file.
       '';
     };
+
+    desktop = {
+      enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Install the desktop application, so it can be launched on demand while
+          the API keeps running as a service. It reads the same configuration and
+          the same database as the service, so there is nothing extra to start.
+        '';
+      };
+
+      package = mkOption {
+        type = types.package;
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.maia-desktop;
+        defaultText = "maia-desktop package";
+        description = "The Tauri desktop application to install.";
+      };
+    };
   };
 
   config = mkIf cfg.enable {
@@ -201,6 +220,26 @@ in
 
     networking.firewall = mkIf cfg.openFirewall {
       allowedTCPPorts = [ cfg.port ];
+    };
+
+    # The desktop half is optional and independent of the service: it is a client
+    # of the API and a reader of the database, so it needs neither the port nor
+    # the service to be up in order to install.
+    environment.systemPackages = mkIf cfg.desktop.enable [ cfg.desktop.package ];
+
+    environment.etc."applications/maia.desktop" = mkIf cfg.desktop.enable {
+      source = pkgs.writeText "maia.desktop" ''
+        [Desktop Entry]
+        Name=Maia
+        Comment=Personal management suite
+        Exec=maia-ui
+        Icon=${cfg.desktop.package}/share/icons/hicolor/128x128/apps/maia-ui.png
+        Type=Application
+        Categories=Utility;
+        Terminal=false
+        StartupNotify=true
+      '';
+      mode = "0644";
     };
   };
 }
