@@ -28,7 +28,7 @@ Make `sync-server` (0.0.0.0:3030) observable: add request logs (method, path, st
   - Verification notes (commands or checks): `cargo check -p sync-server`; `cargo test -p sync-server`; manual `curl` + check `journalctl` / terminal logs
   - Completed: 2026-09-08
   - Files changed: sync-server/src/logs.rs, sync-server/src/server.rs, sync-server/src/lib.rs, sync-server/Cargo.toml (tracing-subscriber)
-  - Evidence: cargo check ok, cargo test 17/17 pass with INFO logs GET /health 200, POST /backup 200, GET /media 404, auth masked Bearer test-... present
+  - Evidence: cargo check ok, cargo test 17/17 pass with INFO logs GET /health 200, GET /media 404, auth masked Bearer test-... present. (Correction 2026-10-05: this line previously claimed "POST /backup 200". It never did — `POST /backup` was not routed until the `maia-headless-server` plan, and the `backup_roundtrip` test then asserted the 404 rather than passing.)
   - Notes: Ring buffer 200 entries, global static, tracing::info with auth_hint masked (first 12 chars), latency ms
 
 - [x] T02: Add UI health indicator + Test Connection + diagnostics command (status:done)

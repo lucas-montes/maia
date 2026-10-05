@@ -11,7 +11,7 @@
 | **Knowledge Base** | System for storing notes, bookmarks, and links with similarity search (not yet implemented) |
 | **Native Messaging Host** | Chrome extension companion binary that receives browser events and saves them locally |
 | **Saved URL** | A link captured from the Chrome tool or added manually, stored as a DB-only record with title, URL, source, tags, and is_new flag. No snapshot files or note/goal linking — opened externally via `tauri-plugin-opener`. |
-| **Sync Server** | Standalone crate `sync-server` (Axum+rusqlite+tokio) implementing FitFat OpenAPI; embedded in Tauri on deterministic `0.0.0.0:3030` for LAN sync |
+| **Sync Server** | Crate `sync-server` (Axum+rusqlite+tokio) implementing FitFat OpenAPI on deterministic `0.0.0.0:3030`; runs as the `maia` NixOS service as well as being embedded in Tauri for development. Schema versioned by `PRAGMA user_version` (v3), history in `MIGRATIONS` in `db.rs` |
 | **SyncAck** | Push response `{server_time}` (OpenAPI `SyncAck`); client ignores body, `204` also accepted |
 | **server_time** | Epoch-ms cursor returned by every Pull (`server_time`); persisted as next `since` per resource |
 | **since cursor** | Epoch-ms query param `?since=<ms>`; server returns only rows where `updated_at > since` and `deleted_at > since` for `deleted[]` |
@@ -21,6 +21,6 @@
 | **Per-Chart Filter** | Each FitFat chart owns its `since`/`date` state (`data-fitfat-filter`), `fetch(...?since=<ms>)` re-fetches only that chart |
 | **QR Auth Payload** | Settings QR `{"url":"http://<lan-ip>:3030","apiKey":"<Bearer>","version":1}` via `qrcode` canvas + copy, not logged |
 | **UUID v7** | Time-ordered UUID (`Uuid::now_v7()`) used for all PKs (`TEXT PRIMARY KEY`), `uuid` crate `v7` feature, replaces `v4` for `since` cursor ordering |
-| **Single maia.db v30** | Single SQLite file `maia.db` with FitFat Drift v30 schema (38 tables, TEXT PK, epoch ms, JSON arrays, composite PKs `fx_rates`/`ingredient_prices`), no legacy `INTEGER AUTOINCREMENT` tables; `sync_server::db::create_schema` is source of truth |
+| **Schema versioning** | `PRAGMA user_version` is the only version signal; migrations are the append-only `MIGRATIONS` list in `sync-server/src/db.rs`. No migrations table. A database newer than the binary (a Nix rollback) is refused. See `context/plans/maia-headless-server.md` |
 | **deleted[]** | POST `deleted: string[]` + GET `deleted: string[]` via `deleted_at > since`, soft-delete `UPDATE ... SET deleted_at=server_time` (T02-T03) |
 | **Utoipa OpenAPI** | `utoipa 4` + `utoipa-swagger-ui 7` at `/docs` + `/api-docs/openapi.json`, `ApiDoc::openapi()` in `sync-server/src/openapi.rs`, `Bearer` `bearerAuth` |

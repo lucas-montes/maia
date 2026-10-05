@@ -1,4 +1,17 @@
- # Maia SQLite Schema (draft)
+ # Maia SQLite Schema (draft, SUPERSEDED)
+
+> **Obsolete, do not implement.** Written before the schema settled, and it
+> contradicts the implementation in two ways that matter:
+>
+> - It proposes `INTEGER PRIMARY KEY AUTOINCREMENT`; every domain table uses a
+>   UUID v7 `TEXT` primary key.
+> - It proposes a `migrations` table; schema versioning is
+>   `PRAGMA user_version`, with the history in the `MIGRATIONS` list in
+>   `sync-server/src/db.rs`.
+>
+> It also predates the `foods` / `food_ingredients` / `meal_foods` layer and the
+> `receipts` columns added after the v1 schema was frozen. The current schema is
+> the `V1_SCHEMA` constant in `sync-server/src/db.rs`.
 
 This file drafts the SQLite schema for the Maia desktop app (notes, tasks, goals, receipts, urls, settings).
 

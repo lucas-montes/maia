@@ -41,7 +41,9 @@ Target deployment: NixOS system service `maia`, `0.0.0.0:3030`, DB at `/var/lib/
 
 Each task is one atomic commit.
 
-- [ ] T01: Versioned migrations keyed on `PRAGMA user_version` (status:todo)
+- [x] T01: Versioned migrations keyed on `PRAGMA user_version` (status:done)
+  - Completed: 2026-10-05
+  - Commit: 6bfd564
   - Task ID: T01
   - Goal: Ordered transactional migration runner replacing `create_schema` boot DDL, with legacy-baseline detection, a Nix-rollback downgrade guard, and pre-migration `VACUUM INTO` snapshots (keep 10).
   - Boundaries (in/out of scope): In — `db.rs`: lift existing inline DDL as `MIGRATIONS[0]` (v1 verbatim), add `migrate()`/`user_version()`/`has_legacy_schema()`/`snapshot()` + rotation, **delete** `RECEIPTS_ADDED_COLUMNS`/`add_missing_columns`/`column_exists` so there is one mechanism not two; retarget `server.rs:147` **and** `maia-ui/src-tauri/src/lib.rs:151` to `migrate()`; v2 = `DROP TABLE IF EXISTS meal_ingredients` (verified orphan — no `server/**/*.rs` reference); unit tests for fresh/legacy/newer-than-binary/snapshot. Out — CLI (T03), other schema changes, docs (T09).
@@ -50,61 +52,87 @@ Each task is one atomic commit.
   - Files changed: `sync-server/src/db.rs`, `sync-server/src/server.rs`, `maia-ui/src-tauri/src/lib.rs`
   - Notes: `meal_ingredients` drop is safe — the only references are in `mobile/lib/src/database/app_database.dart`, which is the **separate** Drift DB and already drops it at line 776.
 
-- [ ] T02: Env-first config + explicit media/seed dirs (status:todo)
+- [x] T02: Env-first config + explicit media/seed dirs (status:done)
+  - Completed: 2026-10-05
+  - Commit: e355263
   - Task ID: T02
   - Goal: `Config` resolvable from `MAIA_*` env vars, and media/seed dirs as real config instead of CWD- and `db_path.parent()`-derived.
   - Boundaries (in/out of scope): In — `config.rs`: `media_dir`/`seed_dir` fields + `from_env()` + builders; honour `MAIA_DB_PATH`/`MAIA_BIND_ADDR`/`MAIA_API_KEY`/`MAIA_MODEL_API_KEY`; `server.rs:150-159` seeder path selection; `handlers/media.rs:11-18` `media_dir()` prefers `config.media_dir`. Out — `maia-ui/src-tauri/src/lib.rs` key/path helpers (desktop keeps `maia.json` probing), CLI (T03), packaging (T06).
   - Done when: with env set, those exact paths are used; with no env set, behaviour is byte-identical to today so the dev shell is unaffected.
   - Verification notes (commands or checks): `cargo test -p sync-server`; unit test that `from_env` prefers env over probing; `rg MAIA_DB_PATH sync-server/src/`
 
-- [ ] T03: Headless binary + graceful shutdown (status:todo)
+- [x] T03: Headless binary + graceful shutdown (status:done)
+  - Completed: 2026-10-05
+  - Commit: a6cd495
   - Task ID: T03
   - Goal: Give `sync-server` a real entrypoint so it runs without the GUI — `src/main.rs` with clap subcommands `serve`/`migrate`/`status`, plus SIGTERM/SIGINT shutdown of the axum listener.
   - Boundaries (in/out of scope): In — new `sync-server/src/main.rs`; `sync-server/Cargo.toml` (`clap.workspace = true`, already a workspace dep at `Cargo.toml:8`); **workspace `Cargo.toml`: add `"signal"` to tokio features — currently absent, so graceful shutdown will not compile without it**; `server.rs:160-166` `.with_graceful_shutdown(shutdown_signal())`. Out — Nix packaging (T06), the Tauri spawn path, config semantics (T02).
   - Done when: `cargo build --release -p sync-server` yields a binary; `serve` answers `/health`; `SIGTERM` exits 0 after in-flight requests drain; `status` prints `user_version` vs `LATEST_VERSION`.
   - Verification notes (commands or checks): `cargo build -p sync-server`; run + `curl localhost:3030/health` + `kill -TERM` → clean exit; `cargo test --workspace`
 
-- [ ] T04: Fix backup route + write logic (status:todo)
+- [x] T04: Fix backup route + write logic (status:done)
+  - Completed: 2026-10-05
+  - Commit: 7dd164a
   - Task ID: T04
   - Goal: Expose `POST /backup` and harden the write path; replace the fake test with a real round-trip.
   - Boundaries (in/out of scope): In — `server.rs`: route `POST /backup` with its own `DefaultBodyLimit` (axum's 2MB default rejects a real DB — mirror the `MAX_UPLOAD_BYTES` pattern from `/receipt-pictures/upload`); `handlers/backup.rs`: write `.tmp` + `rename` for atomicity, stop swallowing the `create_dir_all` error (`let _ =` today), add `Content-Disposition: attachment` to `get_backup`; `lib.rs:535`: rewrite `backup_roundtrip` to POST-then-GET asserting byte equality. Out — mobile client, auth model (already behind global `bearer_auth`), retention/scheduling.
   - Done when: `POST /backup` → 200 (was 404); `GET /backup/latest` returns the exact bytes; oversized body → 413 not 500; an interrupted write cannot leave a corrupt `fitfat.sqlite`.
   - Verification notes (commands or checks): `cargo test -p sync-server backup`; `curl -X POST --data-binary @server/maia.db -H "Authorization: Bearer $KEY" localhost:3030/backup -w '%{http_code}'` → 200; `curl .../backup/latest -o /tmp/out.sqlite && cmp /tmp/out.sqlite server/maia.db`
 
-- [ ] T05: Flake nixpkgs `follows` (repo `server`) (status:todo)
+- [x] T05: Flake nixpkgs `follows` (repo `server`) (status:done)
+  - Completed: 2026-10-05
+  - Commit: 14f297d
   - Task ID: T05
   - Goal: Stop `server/flake.nix` hardcoding `nixos-25.11` so a 26.05 system can consume its module and package.
   - Boundaries (in/out of scope): In — `server/flake.nix` only. Out — packaging, module options, the dotfiles flake.
   - Done when: evaluating from a 26.05 flake builds against the 26.05 stdenck.
   - Verification notes (commands or checks): `nix eval --raw .#packages.x86_64-linux.default.drvPath`; `rg "nixos-25.11" flake.nix` → empty
 
-- [ ] T06: Nix package for `sync-server` (repo `server`) (status:todo)
+- [x] T06: Nix package for `sync-server` (repo `server`) (status:done)
+  - Completed: 2026-10-05
+  - Commit: 14f297d
   - Task ID: T06
   - Goal: Add a derivation for the module to run, and make `packageData` use cargo's build hooks so it caches.
   - Boundaries (in/out of scope): In — `nix/packages.nix`: new `sync-server` via `packageData "sync-server" ../sync-server/Cargo.toml`, exposed as `packages.sync-server`; replace the hand-rolled `cargo build --release` + `cp` with `cargoBuildHook`/`cargoInstallHook`. Out — `module.nix` (T07), devshell.
   - Done when: `nix build .#sync-server` succeeds, `$out/bin/sync-server --help` runs, and it builds with **no** GTK/WebKit/Tauri deps (pure axum + bundled rusqlite).
   - Verification notes (commands or checks): `nix build .#sync-server && ./result/bin/sync-server --help`; `nix why-depends .#sync-server webkitgtk_4_1` → not found
 
-- [ ] T07: Rewrite the NixOS module (repo `server`) (status:todo)
+- [x] T07: Rewrite the NixOS module (repo `server`) (status:done)
+  - Completed: 2026-10-05
+  - Commit: 87afadb
   - Task ID: T07
   - Goal: Replace `services.maia` with a correct unit for the headless server — real binary, env wiring, shared-DB group permissions, declarative firewall.
   - Boundaries (in/out of scope): In — `nix/module.nix`: options `enable`/`package`/`dataDir`/`sourceDir`/`port`/`apiKeyFile`/`openFirewall`; unit with `ExecStart = lib.getExe cfg.package "sync-server" serve`, `StateDirectory = "maia"`, `UMask = "0007"`, `ProtectHome = "read-only"` (media stays in repo), `ProtectSystem = "strict"`, `ReadWritePaths = [dataDir]`, `environmentFiles = [apiKeyFile]`; `users.users.maia` + `users.groups.maia` with **`lucas` as member** and `dataDir` group-owned setgid `2775`; `openFirewall` → `allowedTCPPorts`; **remove** the dead `MAIA_NOTES_DIR` and the legacy-daemon `ExecStart`. Out — dotfiles side (T08), creating `secrets.env` (documented there).
   - Done when: unit shows the sync-server ExecStart; both `maia` and `lucas` can write the DB and its `-wal`/`-shm` (the setgid + `UMask` combination is what makes this work under `ProtectSystem = "strict"`).
   - Verification notes (commands or checks): eval the module in a scratch config; `sudo -u maia test -w /var/lib/maia`; `sudo -u lucas sqlite3 /var/lib/maia/maia.db "PRAGMA user_version;"`
 
-- [ ] T08: Enable on luctop (repo `~/.dotfiles`) (status:todo)
+- [x] T08: Enable on luctop (repo `~/.dotfiles`) (status:done)
+  - Completed: 2026-10-05
+  - Commit: 73b72fb (dotfiles)
   - Task ID: T08
   - Goal: Consume the module and retire the hardcoded firewall rule.
   - Boundaries (in/out of scope): In — `~/.dotfiles/flake.nix`: `maia.url = "path:/home/lucas/Projects/maia"` + `maia.inputs.nixpkgs.follows = "nixpkgs"`; new `~/.dotfiles/services/maia.nix` mirroring `services/bandtrack.nix`; `hosts/luctop/configuration.nix`: import module + `services.maia` config and **remove** the uncommitted hand-written `networking.firewall.allowedTCPPorts = [ 3030 ]` in favour of `openFirewall`. Out — lucver/raspi4, creating `/var/lib/maia/secrets.env` (one-time manual: `MAIA_API_KEY`, `MAIA_MODEL_API_KEY`, `0600 root:maia`).
   - Done when: `nixos-rebuild switch --flake ~/.dotfiles#luctop` starts `maia`; phone reaches `/health` over LAN.
   - Verification notes (commands or checks): rebuild + `systemctl status maia` + `curl http://<lan-ip>:3030/health`
 
-- [ ] T09: Docs sync + validation (repo `server`, plus dotfiles verification) (status:todo)
+- [ ] T09: Docs sync + validation (repo `server`, plus dotfiles verification) (status:done)
   - Task ID: T09
   - Goal: Bring `context/` in line with reality and run the full validation pass including a rollback rehearsal.
-  - Boundaries (in/out of scope): In — `context/overview.md` (39 tables not 38; headless server is the deployment target; migrations exist), mark `context/plans/sqlite-schema.md` obsolete (it proposes AUTOINCREMENT + a `migrations` table, both contradicting the real UUID-v7/TEXT-PK + `user_version` design), correct the inaccurate "POST /backup 200" evidence line in `fitfat-server-health.md`; full `cargo test --workspace`, `cargo check --workspace`, `pnpm build`, `nix build .#sync-server`; live smoke of `/health`, `/media/<id>`, `POST /backup`; **Nix rollback rehearsal proving the downgrade guard fires**. Out — new features.
+  - Boundaries (in/out of scope): In — `context/overview.md`, `context/plans/sqlite-schema.md` (mark obsolete), `context/plans/fitfat-server-health.md` (correct an inaccurate evidence line), `context-map.md`, `glossary.md` if they name the daemon as the service; full `cargo test --workspace`, `cargo check --workspace`, `pnpm build`, `nix build .#sync-server`; live smoke of `/health`, `/media/<id>`, `POST /backup`; **Nix rollback rehearsal proving the downgrade guard fires**. Out — new features.
   - Done when: all checks green; a Nix rollback with a newer DB refuses to start with an actionable message; docs describe the real deployment.
   - Verification notes (commands or checks): full command list + `nixos-rebuild switch --rollback` → assert service exits with the guard message, then restore via `sqlite3 /var/lib/maia/maia.db ".restore snapshots/maia.v<N>.db"`
+  - Completed: 2026-10-05
+  - Files changed: context/overview.md, context/plans/sqlite-schema.md, context/plans/fitfat-server-health.md, context/plans/maia-headless-server.md, context/context-map.md
+  - Evidence: `cargo test --workspace` 67 passed / 0 failed / 3 ignored; `cargo test -p sync-server` 51 passed; `pnpm build` green (353 kB js); `nix build .#sync-server` green with no webkitgtk/gtk3/tauri in the closure. Smoke test of the Nix-built binary against a copy of `maia.db`: migrated v0 → v3 with 3799 exercise rows intact, snapshots `maia.v0/v1/v2.db` written one per transition, `/health` 200, `/protected` 401 without a Bearer and 200 with, `GET /media/1_to_2_jump_box.jpg` 200 from the repo checkout, `POST /backup` + `GET /backup/latest` byte-identical, `SIGTERM` exit 0 leaving no `-wal`/`-shm`. Rollback rehearsal: with the database stamped v99, `status` and `migrate` both exit 1 with the "data is newer than the server binary" message and `serve` also refuses; restoring `snapshots/maia.v2.db` returned it to a known state with 1 pending migration.
+  - Notes: Full system closure builds — `nixos-system-luctop-26.05.20260916.4c78701` was produced and its `maia.service` inspected. `nixos-rebuild switch` itself was not run: it needs sudo and no password was available. Two defects were found and fixed during this task: the environment file sat inside the StateDirectory (9b67b3b), and the `maia` input was not re-lockable (dotfiles 1274a69).
+
+## Remaining manual steps
+
+1. `nix flake update maia` in `~/.dotfiles` after every commit in this repo — the input is locked, so a rebuild otherwise reuses the previous commit.
+2. Create the API key: see the recipe in `~/.dotfiles/services/maia.nix`.
+3. `sudo nixos-rebuild switch --flake ~/.dotfiles#luctop` — the closure is already built, so this should be quick.
+4. Import the existing database so the phone's history is present: `sudo -u maia cp ~/Projects/maia/server/maia.db /var/lib/maia/maia.db`. `maia.db` is gitignored, so copy it rather than expecting it in the store.
+5. Put the same `MAIA_API_KEY` in the phone's settings.
 
 ## Open questions
 
