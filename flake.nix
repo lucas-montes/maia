@@ -76,6 +76,15 @@
     )
     // {
       # System-independent outputs (NixOS module).
-      nixosModules.default = import ./nix/module.nix { inherit self; };
+      # `self` cannot be resolved inside the module itself, so it is threaded in
+      # here. The wrapper matters: calling the module function directly would
+      # freeze its arguments at import time and leave config, lib and pkgs
+      # undefined when the module system applies it.
+      nixosModules.default = {
+        config,
+        lib,
+        pkgs,
+        ...
+      }: import ./nix/module.nix { inherit self config lib pkgs; };
     };
 }
