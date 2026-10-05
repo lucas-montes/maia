@@ -2,9 +2,15 @@
   description = "Maia - Personal management tool with AI-powered features";
 
   inputs = {
+    # Standalone default, used by `nix develop` in this repo. Consumers should
+    # override it with `maia.inputs.nixpkgs.follows = "nixpkgs"`, which is how the
+    # NixOS module avoids building these packages against a different channel
+    # than the system's.
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
-    rust-overlay.url = "github:oxalica/rust-overlay";
-    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     flake-utils.url = "github:numtide/flake-utils";
     sce.url = "github:crocoder-dev/shared-context-engineering";
   };
@@ -31,7 +37,10 @@
           };
         };
 
-        packages = import ./nix/packages.nix { inherit pkgs; };
+        packages = import ./nix/packages.nix {
+          inherit pkgs;
+          lib = nixpkgs.lib;
+        };
         devShells = import ./nix/devshells.nix {
           inherit pkgs;
           rust-bin = pkgs.rust-bin;
@@ -44,6 +53,7 @@
         };
 
         packages = {
+          inherit (packages) sync-server;
           ui = packages.maia-ui;
           chrome = packages.maia-chrome;
           full = packages.maia-full;
@@ -51,6 +61,11 @@
         };
 
         apps = {
+          # The headless server, which is what a deployment actually runs.
+          sync-server = flake-utils.lib.mkApp {
+            drv = packages.sync-server;
+            name = "sync-server";
+          };
           ui = flake-utils.lib.mkApp {
             drv = packages.maia-ui;
             name = "maia";
