@@ -1,22 +1,16 @@
 use std::fs;
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sync_server::Config as SyncConfig;
-use tauri::Manager;
 
 /// Shared application state managed by Tauri.
 struct AppState {
     db: Mutex<Connection>,
     notes_dir: PathBuf,
-}
-
-struct SyncServerState {
-    port: u16,
-    url: String,
 }
 
 // ---- Data types ----
@@ -187,9 +181,6 @@ fn get_notes_dir() -> PathBuf {
     dir
 }
 
-fn get_sync_db_path() -> PathBuf {
-    PathBuf::from(get_database_path())
-}
 
 fn get_sync_api_key_value() -> String {
     if let Ok(content) = fs::read_to_string("maia.json") {
@@ -207,50 +198,36 @@ fn get_sync_api_key_value() -> String {
     "fitfat-sync-key".to_string()
 }
 
-/// Vision-model key for receipt OCR, read from the flat `model_api` field that
-/// the settings form writes (`CONFIG_FIELD_DEFS` in `src/main.ts`).
+
+/// Fallback used when the configuration cannot be read, so a broken file
+/// degrades the sync half of the app instead of preventing it from starting.
+/// The service's own `ExecStartPre` reports the real problem with the same file.
+static FALLBACK_SYNC_CONFIG: OnceLock<SyncConfig> = OnceLock::new();
+
+/// The API's address, taken from configuration.
 ///
-/// A leading `$` is treated as an environment-variable name, matching the
-/// `"e.g. $GEMINI_API"` placeholder shown in that field. Falls back to
-/// `MAIA_MODEL_API_KEY`.
-fn get_model_api_key_value() -> String {
-    let raw = fs::read_to_string("maia.json")
-        .ok()
-        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-        .and_then(|config| {
-            config
-                .get("model_api")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-        })
-        .filter(|s| !s.is_empty())
-        .unwrap_or_default();
-
-    if let Some(var) = raw.strip_prefix('$') {
-        return std::env::var(var).unwrap_or_default();
+/// The server runs as its own process now, so this describes where it was told to
+/// listen rather than a socket this app owns. Reporting it unconditionally is the
+/// point: it used to be read back from a bind that silently failed whenever the
+/// service already held the port, which left the pairing QR showing port 0.
+fn sync_config() -> &'static SyncConfig {
+    match SyncConfig::shared(None) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("failed to load sync config: {e}");
+            FALLBACK_SYNC_CONFIG.get_or_init(SyncConfig::default)
+        }
     }
-    if !raw.is_empty() {
-        return raw;
-    }
-    std::env::var("MAIA_MODEL_API_KEY").unwrap_or_default()
-}
-
-/// Vision model id. The settings form exposes a single `model_api` field for
-/// the key, so the model name stays fixed at the `ai` crate default. (It is a
-/// separate constant rather than an inline literal so `with_model` has one
-/// place to change.)
-fn get_model_name_value() -> String {
-    "gemini-2.5-flash".to_string()
 }
 
 #[tauri::command]
-fn get_sync_port(state: tauri::State<Mutex<SyncServerState>>) -> u16 {
-    state.lock().map(|s| s.port).unwrap_or(0)
+fn get_sync_port() -> u16 {
+    sync_config().port()
 }
 
 #[tauri::command]
-fn get_sync_url(state: tauri::State<Mutex<SyncServerState>>) -> String {
-    state.lock().map(|s| s.url.clone()).unwrap_or_default()
+fn get_sync_url() -> String {
+    format!("http://0.0.0.0:{}", sync_config().port())
 }
 
 #[tauri::command]
@@ -278,41 +255,31 @@ fn get_lan_ip() -> String {
 }
 
 #[tauri::command]
-fn get_sync_lan_url(state: tauri::State<Mutex<SyncServerState>>) -> String {
-    let port = state.lock().map(|s| s.port).unwrap_or(3030);
-    format!("http://{}:{}", get_lan_ip_value(), port)
+fn get_sync_lan_url() -> String {
+    format!("http://{}:{}", get_lan_ip_value(), sync_config().port())
 }
 
 #[tauri::command]
-fn get_server_logs(limit: Option<usize>) -> Vec<String> {
-    sync_server::logs::tail_global(limit.unwrap_or(50))
-}
-
-#[tauri::command]
-fn get_server_diagnostics(state: tauri::State<Mutex<SyncServerState>>) -> serde_json::Value {
-    let port = state.lock().map(|s| s.port).unwrap_or(0);
+fn get_server_diagnostics() -> serde_json::Value {
+    let cfg = sync_config();
+    let port = cfg.port();
     let lan_ip = get_lan_ip_value();
     let lan_url = format!("http://{}:{}", lan_ip, port);
-    let bind_addr = "0.0.0.0:3030".to_string();
     let is_listening = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok();
-    let api_key = get_sync_api_key_value();
-    let masked = if api_key.len() > 8 {
-        format!("{}...{}", &api_key[..4], &api_key[api_key.len() - 4..])
-    } else {
-        "***".to_string()
-    };
+    let api_key = cfg.api_key.clone();
+    let masked = mask_secret(&api_key);
     serde_json::json!({
         "port": port,
         "lanUrl": lan_url,
-        "bindAddr": bind_addr,
+        "bindAddr": cfg.bind_addr,
         "isListening": is_listening,
         "lanIp": lan_ip,
         "apiKeyMasked": masked,
         "hasApiKey": !api_key.is_empty(),
         // Receipt OCR needs a vision-model key; without one the sync server
         // answers the parse endpoints with 503.
-        "modelApiKeyMasked": mask_secret(&get_model_api_key_value()),
-        "hasModelApiKey": !get_model_api_key_value().is_empty()
+        "modelApiKeyMasked": mask_secret(&cfg.model_api_key),
+        "hasModelApiKey": !cfg.model_api_key.is_empty()
     })
 }
 
@@ -1641,37 +1608,9 @@ pub fn run() {
         notes_dir,
     };
 
-    let sync_db_path = get_sync_db_path();
-    let sync_api_key = get_sync_api_key_value();
-    let model_api_key = get_model_api_key_value();
-    let model_name = get_model_name_value();
-    let sync_config = SyncConfig::new(sync_db_path, sync_api_key).with_model(model_api_key, model_name);
-    let sync_state = Mutex::new(SyncServerState { port: 0, url: String::new() });
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(app_state)
-        .manage(sync_state)
-        .setup(move |app| {
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                match sync_server::server::start_server(sync_config).await {
-                    Ok((port, _jh)) => {
-                        let url = format!("http://0.0.0.0:{port}");
-                        let state = handle.state::<Mutex<SyncServerState>>();
-                        if let Ok(mut s) = state.lock() {
-                            s.port = port;
-                            s.url = url.clone();
-                        }
-                        eprintln!("sync-server listening on 0.0.0.0:{port}");
-                    }
-                    Err(e) => {
-                        eprintln!("failed to start sync-server: {e}");
-                    }
-                }
-            });
-            Ok(())
-        })
         .invoke_handler(tauri::generate_handler![
             read_config,
             save_config,
@@ -1680,7 +1619,6 @@ pub fn run() {
             get_sync_api_key,
             get_lan_ip,
             get_sync_lan_url,
-            get_server_logs,
             get_server_diagnostics,
             list_notes,
             read_note,

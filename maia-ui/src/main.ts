@@ -146,7 +146,6 @@ interface FitFatState {
   serverHealth: "checking" | "online" | "offline";
   lastHealthCheck: string;
   diagnostics: any | null;
-  logs: string[];
 }
 
 interface ExercisesState { items: any[]; filtered: any[]; search: string; bodyPart: string; equipment: string; hasImage: string; selectedId: string | null; status: "idle"|"loading"|"error"; statusMessage: string; }
@@ -327,7 +326,6 @@ const defaultAppState = (): AppState => ({
     serverHealth: "checking",
     lastHealthCheck: "",
     diagnostics: null,
-    logs: [],
   },
   exercises: { items: [], filtered: [], search: "", bodyPart: "", equipment: "", hasImage: "", selectedId: null, status: "idle", statusMessage: "" },
   ingredients: { items: [], search: "", selectedId: null, status: "idle", statusMessage: "", showAddModal: false },
@@ -820,15 +818,9 @@ async function checkServerHealth(): Promise<void> {
 
 async function loadDiagnostics(): Promise<void> {
   try {
-    const [diag, logs] = await Promise.all([
-      invoke<any>("get_server_diagnostics"),
-      invoke<string[]>("get_server_logs", { limit: 50 }).catch(() => [] as string[]),
-    ]);
-    state.fitfat.diagnostics = diag;
-    state.fitfat.logs = logs;
+    state.fitfat.diagnostics = await invoke<any>("get_server_diagnostics");
   } catch {
     state.fitfat.diagnostics = null;
-    state.fitfat.logs = [];
   }
   if (state.view === "fitfat") render();
 }
@@ -854,10 +846,6 @@ async function testFitFatConnection(): Promise<void> {
       results.push(`${name} /exercises: ✗ unreachable (${e})`);
     }
   }
-  try {
-    const logs = await invoke<string[]>("get_server_logs", { limit: 5 });
-    results.push(`logs: ${logs.length} entries`);
-  } catch {}
   state.fitfat.statusMessage = results.join(" | ");
   render();
 }
@@ -1562,11 +1550,6 @@ function handleClick(event: MouseEvent): void {
     const inp = document.querySelector<HTMLInputElement>("[data-fitfat-filter='exerciseSearch']");
     if (inp) state.fitfat.exerciseSearch = inp.value;
     render();
-    return;
-  }
-  const showLogs = target.closest<HTMLElement>("[data-action='fitfat-show-logs']");
-  if (showLogs) {
-    loadDiagnostics();
     return;
   }
 }
@@ -2416,16 +2399,14 @@ function renderFitFat(): string {
         <h3 class="text-sm font-medium text-ink-200">Server Health</h3>
         <span class="text-sm ${healthColor}">${healthDot} ${ff.serverHealth === "online" ? "Online" : ff.serverHealth === "offline" ? "Offline" : "Checking"} ${ff.lastHealthCheck ? `— ${escapeHtml(ff.lastHealthCheck)}` : ""}</span>
       </div>
-      <div class="text-xs text-ink-400 mb-2">Bind: <code class="bg-surface-800 px-1 rounded">0.0.0.0:3030</code> • LAN: <code class="bg-surface-800 px-1 rounded">${escapeHtml(lanDisplay)}</code> • Local: <code class="bg-surface-800 px-1 rounded">${escapeHtml(resolveSyncUrl(ff.syncUrl))}</code></div>
+      <div class="text-xs text-ink-400 mb-2">Bind: <code class="bg-surface-800 px-1 rounded">${escapeHtml(diag?.bindAddr || "unknown")}</code> • LAN: <code class="bg-surface-800 px-1 rounded">${escapeHtml(lanDisplay)}</code> • Local: <code class="bg-surface-800 px-1 rounded">${escapeHtml(resolveSyncUrl(ff.syncUrl))}</code></div>
       ${diag ? `<div class="text-xs text-ink-400 mb-2">Port: ${diag.port} • Listening: ${diag.isListening ? "✓" : "✗"} • LAN IP: ${escapeHtml(diag.lanIp)} • Key: ${escapeHtml(diag.apiKeyMasked)}</div>` : ""}
       <div class="flex flex-wrap gap-2 mb-3">
         <button class="button secondary text-xs" data-action="fitfat-test-connection">Test Connection</button>
         <button class="button secondary text-xs" data-action="fitfat-copy-curl">Copy curl</button>
-        <button class="button secondary text-xs" data-action="fitfat-show-logs">Show Logs (${ff.logs.length})</button>
       </div>
       ${ff.statusMessage ? `<div class="rounded border border-surface-700 bg-surface-900/70 p-2 text-xs text-ink-300 break-all">${escapeHtml(ff.statusMessage)}</div>` : ""}
-      ${ff.logs.length ? `<details class="mt-3"><summary class="text-xs text-ink-400 cursor-pointer">Recent requests (${ff.logs.length})</summary><pre class="mt-2 max-h-40 overflow-auto bg-surface-950 p-2 rounded text-xs text-ink-300 border border-surface-800">${escapeHtml(ff.logs.slice(-10).join("\n"))}</pre></details>` : ""}
-      <div class="mt-3 text-xs text-ink-500">If mobile can't reach: 1) Phone on same Wi-Fi as ${escapeHtml(diag?.lanIp || ff.lanUrl || "10.229.34.33")} • 2) <code class="bg-surface-800 px-1 rounded">sudo ufw allow 3030/tcp</code> • 3) <code class="bg-surface-800 px-1 rounded">curl -v http://${escapeHtml((diag?.lanIp || "10.229.34.33"))}:3030/health</code></div>
+      <div class="mt-3 text-xs text-ink-500">If mobile can't reach: 1) Phone on same Wi-Fi as ${escapeHtml(diag?.lanIp || ff.lanUrl || "10.229.34.33")} • 2) <code class="bg-surface-800 px-1 rounded">sudo ufw allow ${diag?.port ?? 3030}/tcp</code> • 3) <code class="bg-surface-800 px-1 rounded">curl -v http://${escapeHtml((diag?.lanIp || "10.229.34.33"))}:${diag?.port ?? 3030}/health</code></div>
     </div>
   `;
   return `
