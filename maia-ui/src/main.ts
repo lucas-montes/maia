@@ -198,13 +198,16 @@ interface AppState {
 
 // ---- Config field definitions (must be before defaultAppState) ----
 
-const CONFIG_FIELD_DEFS: { key: string; label: string; placeholder: string }[] = [
-  { key: "database", label: "Database File", placeholder: "maia.db" },
+/** `managed` fields come from the deployment config, so the form shows them
+ *  without letting them be typed into: the service reads the same file, and a
+ *  value edited here would be silently discarded on save. */
+const CONFIG_FIELD_DEFS: { key: string; label: string; placeholder: string; managed?: boolean }[] = [
+  { key: "database", label: "Database File", placeholder: "maia.db", managed: true },
   { key: "receipts_path", label: "Receipts Path", placeholder: "receipts" },
   { key: "nutriments_path", label: "Nutriments Path", placeholder: "" },
   { key: "bank_statements_path", label: "Bank Statements Path", placeholder: "" },
   { key: "investments_statements_path", label: "Investments Statements Path", placeholder: "" },
-  { key: "model_api", label: "Model API Key", placeholder: "e.g. $GEMINI_API" },
+  { key: "model_api", label: "Model API Key", placeholder: "", managed: true },
   { key: "receipts.archived_dir", label: "Receipts Archive Directory", placeholder: "receipts_archive" },
 ];
 
@@ -242,6 +245,10 @@ function extractConfigFields(jsonStr: string): Record<string, string> {
 function buildConfigJson(fields: Record<string, string>): string {
   const obj: Record<string, unknown> = {};
   for (const def of CONFIG_FIELD_DEFS) {
+    // Deployment-owned fields are shown but never serialised. Including them
+    // would make save_config reject the whole save, since it refuses those keys
+    // by name rather than dropping them silently.
+    if (def.managed) continue;
     const val = fields[def.key]?.trim() || "";
     const parts = def.key.split(".");
     if (parts.length === 1) {
@@ -2500,9 +2507,17 @@ function renderSettings(): string {
     .map(
       (def) => `
         <div>
-          <label class="field-label" for="cfg-${def.key}">${escapeHtml(def.label)}</label>
-          <input type="text" id="cfg-${def.key}" data-config-key="${def.key}" value="${escapeHtml(fields[def.key] || "")}" placeholder="${escapeHtml(def.placeholder)}"
-            class="w-full px-3 py-2 bg-surface-800 border border-surface-700 rounded-md focus:outline-none focus:border-ink-500" />
+          <label class="field-label" for="cfg-${def.key}">${escapeHtml(def.label)}${
+            def.managed
+              ? ` <span class="text-ink-500 font-normal">(from the deployment config)</span>`
+              : ""
+          }</label>
+          <input type="text" id="cfg-${def.key}" data-config-key="${def.key}" value="${escapeHtml(fields[def.key] || "")}" placeholder="${escapeHtml(def.placeholder)}"${
+            def.managed ? " readonly disabled" : ""
+          }
+            class="w-full px-3 py-2 bg-surface-800 border border-surface-700 rounded-md focus:outline-none focus:border-ink-500${
+            def.managed ? " opacity-60 cursor-not-allowed" : ""
+          }" />
         </div>`,
     )
     .join("");
@@ -2517,7 +2532,9 @@ function renderSettings(): string {
         <div class="rounded border border-surface-800 bg-surface-900/30 p-4">
           <h3 class="mb-3 text-sm font-medium text-ink-200">Configuration</h3>
           <p class="mb-4 text-xs text-ink-400">
-            Edit your Maia configuration. A backup will be created as <code class="rounded bg-surface-800 px-1 py-0.5 font-mono text-ink-300">maia.json.bak</code> when saving.
+            Desktop paths are saved to <code class="rounded bg-surface-800 px-1 py-0.5 font-mono text-ink-300">~/.config/maia/config.json</code>.
+            Fields marked as coming from the deployment config are read from <code class="rounded bg-surface-800 px-1 py-0.5 font-mono text-ink-300">/etc/maia/config.json</code>,
+            which the service reads too.
           </p>
 
           ${statusHtml}
