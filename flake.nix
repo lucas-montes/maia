@@ -53,7 +53,7 @@
         };
 
         packages = {
-          inherit (packages) sync-server;
+          inherit (packages) sync-server maia-desktop;
           ui = packages.maia-ui;
           chrome = packages.maia-chrome;
           full = packages.maia-full;

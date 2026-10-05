@@ -16,6 +16,9 @@ let
     "result"
     ".direnv"
     ".env"
+    # Built here, not shipped: `pnpm build` regenerates it and tauri-build embeds
+    # whatever is present, so a stale copy in the tree would be embedded silently.
+    "dist"
   ];
 
   # Local configuration. `maia.json` can hold `model_api` with an API key, so it
@@ -91,6 +94,119 @@ let
   # a desktop session -- this is what the NixOS service runs.
   sync-server = packageData "sync-server" ../sync-server/Cargo.toml;
 
+  # ---------------------------------------------------------------------
+  # Desktop application
+  # ---------------------------------------------------------------------
+
+  # Only the manifests: enough for `pnpm fetch` to populate a store, without
+  # dragging the whole working tree into it.
+  frontendManifest = lib.cleanSourceWith {
+    src = ../maia-ui;
+    name = "maia-ui-manifest";
+    filter = path: type:
+      let
+        name = baseNameOf (toString path);
+        rel = lib.removePrefix (toString ../maia-ui) (toString path);
+      in
+      builtins.elem name [ "package.json" "pnpm-lock.yaml" "pnpm-workspace.yaml" ]
+      || rel == "/pnpm-workspace.yaml";
+  };
+
+  # The frontend's packages, fetched once into a store derivation so the build
+  # below can install without network access.
+  frontendDeps = pkgs.stdenv.mkDerivation {
+    pname = "maia-ui-frontend-deps";
+    version = (readCargoToml ../maia-ui/src-tauri/Cargo.toml).package.version;
+    src = frontendManifest;
+    nativeBuildInputs = [
+      pkgs.nodejs
+      pkgs.pnpm
+      # Node has no CA bundle of its own and does not read /etc/ssl, so without
+      # this every registry request fails with UNABLE_TO_GET_ISSUER_CERT_LOCALLY.
+      pkgs.cacert
+    ];
+    installPhase = ''
+      runHook preInstall
+      export HOME=$TMPDIR
+      export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+      export NODE_EXTRA_CA_CERTS="$SSL_CERT_FILE"
+      export npm_config_cafile="$SSL_CERT_FILE"
+      pnpm config set store-dir "$out"
+      pnpm fetch --frozen-lockfile
+      # pnpm caches a per-project entry keyed by the checkout's absolute path,
+      # which leaves a symlink into /build behind. Nothing reads it, and Nix
+      # rejects the output for it.
+      rm -rf "$out"/v10/projects
+      runHook postInstall
+    '';
+    outputHashMode = "recursive";
+    outputHash = "sha256-XBLtDV1KjPYF+gfsatg/TW4SiP4DKPs7oRgrrAM2IHQ=";
+  };
+
+  # The Tauri desktop app. Unlike `sync-server` this genuinely needs a desktop
+  # stack at both build and run time.
+  maia-desktop = pkgs.rustPlatform.buildRustPackage {
+    pname = "maia-ui";
+    version = (readCargoToml ../maia-ui/src-tauri/Cargo.toml).package.version;
+    src = source;
+
+    cargoLock = {
+      lockFile = ../Cargo.lock;
+    };
+
+    cargoBuildFlags = [
+      "-p"
+      "maia-ui"
+    ];
+
+    # The app depends on sync-server, which pulls in utoipa-swagger-ui.
+    postPatch = ''
+      export SWAGGER_UI_DOWNLOAD_URL="file://${swaggerUi}"
+    '';
+
+    # tauri-build embeds `frontendDist` at compile time, so the frontend has to be
+    # built before cargo runs. preBuildHook is the last hook before buildPhase.
+    preBuildHook = ''
+      export HOME="$TMPDIR"
+      pnpm --dir maia-ui config set store-dir "${frontendDeps}"
+      pnpm --dir maia-ui install --frozen-lockfile --offline
+      pnpm --dir maia-ui build
+    '';
+
+    nativeBuildInputs = [
+      pkgs.nodejs
+      pkgs.pnpm
+      pkgs.pkg-config
+      pkgs.wrapGAppsHook4
+    ] ++ (with pkgs; [ frontendDeps ]);
+
+    buildInputs = with pkgs; [
+      glib
+      gtk3
+      at-spi2-atk
+      cairo
+      pango
+      gdk-pixbuf
+      libsoup_3
+      webkitgtk_4_1
+      librsvg
+      openssl
+      sqlite
+      # Exercise videos carry WebVTT subtitles, which only gst-plugins-bad can
+      # render. wrapGAppsHook4 turns the gst_* buildInputs into
+      # GST_PLUGIN_SYSTEM_PATH_1_0, so an installed binary finds them without an
+      # extra wrapper -- which would only nest a second one around this.
+      gst_all_1.gstreamer
+      gst_all_1.gst-plugins-base
+      gst_all_1.gst-plugins-bad
+    ];
+
+    meta = {
+      description = "Maia desktop application";
+      mainProgram = "maia-ui";
+    };
+  };
+
   # The legacy daemon: a file watcher on a Unix socket, superseded by the Tauri
   # app. Kept so existing installs do not break.
   maia-ui = packageData "maia" ../Cargo.toml;
@@ -106,5 +222,12 @@ let
   };
 in
 {
-  inherit sync-server maia-ui maia-chrome maia-full source;
+  inherit
+    sync-server
+    maia-desktop
+    maia-ui
+    maia-chrome
+    maia-full
+    source
+    ;
 }
