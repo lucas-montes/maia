@@ -148,7 +148,7 @@ fn init_database(db_path: &str) -> Result<Connection, String> {
     let conn = Connection::open(db_path).map_err(|e| format!("Failed to open database: {e}"))?;
     conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
         .map_err(|e| format!("Failed to set pragmas: {e}"))?;
-    sync_server::db::create_schema(&conn).map_err(|e| format!("Failed to create sync schema: {e}"))?;
+    sync_server::db::migrate(&conn).map_err(|e| format!("Failed to migrate sync schema: {e}"))?;
     Ok(conn)
 }
 

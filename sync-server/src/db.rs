@@ -1,5 +1,10 @@
-use std::{path::Path, sync::{Arc, Mutex}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
+use anyhow::{Context, bail};
 use rusqlite::Connection;
 
 pub type DbPool = Arc<Mutex<Connection>>;
@@ -16,7 +21,7 @@ pub fn init_db(path: &Path) -> anyhow::Result<DbPool> {
         Connection::open(path)?
     };
     conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
-    create_schema(&conn)?;
+    migrate(&conn)?;
     Ok(Arc::new(Mutex::new(conn)))
 }
 
@@ -24,9 +29,61 @@ pub fn init_memory() -> anyhow::Result<DbPool> {
     init_db(Path::new(":memory:"))
 }
 
-pub fn create_schema(conn: &Connection) -> anyhow::Result<()> {
-    conn.execute_batch(
-        r#"
+// ---------------------------------------------------------------------------
+// Schema migrations
+//
+// The schema is embedded in this binary, so the binary *is* the schema
+// authority. `PRAGMA user_version` records which step has been applied and is
+// the only version signal; there is no separate migrations table.
+//
+// To add a migration: append an entry to `MIGRATIONS` with the next version and
+// bump `LATEST_VERSION` to match. Never edit or renumber an existing entry.
+// ---------------------------------------------------------------------------
+
+/// How many pre-migration snapshots to retain under `<db_dir>/snapshots`.
+const SNAPSHOT_KEEP: usize = 10;
+
+/// One step in the schema history.
+///
+/// `Guarded` exists because SQLite has no `ALTER TABLE ... ADD COLUMN IF NOT
+/// EXISTS`, so a column addition has to be conditional in Rust. Holding it as a
+/// normal step keeps it versioned, ordered and transactional instead of
+/// re-running on every boot.
+pub enum Step {
+    /// Executed as a single batch.
+    Sql(&'static str),
+    /// Runs inside the same transaction as any other step.
+    Guarded(fn(&Connection) -> anyhow::Result<()>),
+}
+
+/// Ordered, append-only schema history. Each version is the `user_version` the
+/// step leaves behind.
+pub const MIGRATIONS: &[(i64, Step)] = &[
+    // The original boot-time DDL, verbatim. Every statement is `IF NOT EXISTS`,
+    // so replaying it over a database created before versioning existed is a
+    // no-op for tables it already has *and* creates the ones it is missing.
+    (1, Step::Sql(V1_SCHEMA)),
+    // `receipts` columns that shipped after the v1 DDL was frozen. Existing
+    // databases need the `ALTER` because the `CREATE TABLE IF NOT EXISTS`
+    // receipts statement in v1 leaves an already-present table untouched.
+    (2, Step::Guarded(add_receipt_columns)),
+    // `meal_ingredients` was superseded by the `foods` / `food_ingredients` /
+    // `meal_foods` layer and nothing on the server reads it any more.
+    (3, Step::Sql("DROP TABLE IF EXISTS meal_ingredients;")),
+];
+
+/// Highest version in `MIGRATIONS`.
+///
+/// A database newer than this means the data is newer than the binary, which is
+/// what a Nix rollback looks like. `migrate` refuses rather than serving.
+pub const LATEST_VERSION: i64 = 3;
+
+/// The v1 schema, exactly as it shipped.
+///
+/// Kept verbatim so that databases already at v1 need no change and so the
+/// fresh-database path is byte-identical to the old `create_schema`.
+const V1_SCHEMA: &str = r#"
+
         CREATE TABLE IF NOT EXISTS ingredients (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -506,10 +563,7 @@ pub fn create_schema(conn: &Connection) -> anyhow::Result<()> {
             updated_at INTEGER NOT NULL DEFAULT 0,
             deleted_at INTEGER
         );
-        "#,
-    )?;
-    conn.execute_batch(
-        r#"
+
         CREATE TABLE IF NOT EXISTS urls (
             id TEXT PRIMARY KEY,
             title TEXT,
@@ -523,17 +577,85 @@ pub fn create_schema(conn: &Connection) -> anyhow::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_urls_url ON urls(url);
         CREATE INDEX IF NOT EXISTS idx_urls_is_new ON urls(is_new);
-        "#,
-    )?;
-    add_missing_columns(conn)
+
+"#;
+
+/// Brings `conn` up to [`LATEST_VERSION`].
+///
+/// Safe to call on every boot and from several processes at once: each step
+/// takes `BEGIN IMMEDIATE`, so SQLite serialises concurrent runners and the
+/// loser waits on `busy_timeout` instead of failing. Steps at or below the
+/// current version are skipped, so repeated calls are no-ops.
+pub fn migrate(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
+
+    let current = user_version(conn)?;
+    if current > LATEST_VERSION {
+        bail!(
+            "database is at v{current} but this binary only knows v{LATEST_VERSION}.\n\
+             The data is newer than the server binary, which is what a Nix rollback \
+             looks like: an older `sync-server` cannot know how to read schema \
+             v{current}.\n\
+             Rebuild forward (`nixos-rebuild switch`) or restore a snapshot:\n    \
+             sqlite3 <db> \".restore snapshots/maia.v{LATEST_VERSION}.db\""
+        );
+    }
+
+
+    let pending: Vec<(i64, &Step)> = MIGRATIONS
+        .iter()
+        .filter(|(v, _)| *v > current)
+        .map(|(v, step)| (*v, step))
+        .collect();
+    for (version, step) in pending {
+        tracing::info!(version, "applying schema migration");
+        // Rollback path first. `VACUUM INTO` cannot run inside a transaction.
+        if let Some(path) = snapshot(conn, current)? {
+            tracing::info!(path = %path.display(), "wrote pre-migration snapshot");
+        }
+
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let applied: anyhow::Result<()> = match step {
+            Step::Sql(sql) => conn.execute_batch(sql).map_err(Into::into),
+            Step::Guarded(f) => f(conn),
+        };
+        match applied {
+            Ok(()) => {
+                set_user_version(conn, version)?;
+                conn.execute_batch("COMMIT;")?;
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(e).with_context(|| format!("migration v{version} failed"));
+            }
+        }
+    }
+    Ok(())
 }
 
-/// Columns added to `receipts` after the initial v30 schema shipped.
-///
-/// [`create_schema`] is a batch of `CREATE TABLE IF NOT EXISTS` statements, so
-/// editing the `receipts` definition only reaches *new* databases. These are
-/// applied with a guarded `ALTER TABLE` so an existing `maia.db` picks them up.
-const RECEIPTS_ADDED_COLUMNS: &[(&str, &str)] = &[
+/// The last applied migration, i.e. `PRAGMA user_version`.
+pub fn user_version(conn: &Connection) -> anyhow::Result<i64> {
+    Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+}
+
+fn set_user_version(conn: &Connection, version: i64) -> anyhow::Result<()> {
+    conn.pragma_update(None, "user_version", version)?;
+    Ok(())
+}
+
+/// True when a table with this name exists in `main`. Callers pass literals.
+fn table_exists(conn: &Connection, table: &str) -> anyhow::Result<bool> {
+    // `table` is always a literal from the caller, never from a request.
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Columns added to `receipts` after the v1 DDL was frozen, applied by v2.
+const RECEIPT_COLUMNS: &[(&str, &str)] = &[
     // Set when a background OCR job fails, so the phone can report why.
     ("parse_error", "TEXT"),
     // Desktop-side archive location and time; see `archive_receipt`.
@@ -541,9 +663,9 @@ const RECEIPTS_ADDED_COLUMNS: &[(&str, &str)] = &[
     ("archived_at", "INTEGER"),
 ];
 
-/// Adds any [`RECEIPTS_ADDED_COLUMNS`] not already present. Idempotent.
-fn add_missing_columns(conn: &Connection) -> anyhow::Result<()> {
-    for (name, ty) in RECEIPTS_ADDED_COLUMNS {
+/// v2: the `receipts` columns added after the v1 DDL was frozen.
+fn add_receipt_columns(conn: &Connection) -> anyhow::Result<()> {
+    for (name, ty) in RECEIPT_COLUMNS {
         if column_exists(conn, "receipts", name)? {
             continue;
         }
@@ -564,6 +686,66 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> anyhow::Result
     Ok(false)
 }
 
+/// Consistent pre-migration copy of the database, named for the version it was
+/// taken at. Returns `None` for in-memory databases.
+///
+/// `VACUUM INTO` rather than `cp` because the database is live in WAL mode: a
+/// copy of the main file can miss committed rows still sitting in the `-wal`
+/// sidecar. It also compacts, and cannot run inside a transaction, so it runs
+/// before the step's `BEGIN IMMEDIATE`.
+fn snapshot(conn: &Connection, from_version: i64) -> anyhow::Result<Option<PathBuf>> {
+    let Some(path) = db_path(conn)? else {
+        return Ok(None);
+    };
+    let dir = path.parent().unwrap_or(Path::new(".")).join("snapshots");
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let target = dir.join(format!("maia.v{from_version}.db"));
+    // An interrupted earlier attempt may have left a partial file behind.
+    let _ = fs::remove_file(&target);
+    // `VACUUM INTO` takes a literal, not a bound parameter. This path is derived
+    // from our own database file, never from a request.
+    let escaped = target.to_string_lossy().replace('\'', "''");
+    conn.execute_batch(&format!("VACUUM INTO '{escaped}'"))
+        .with_context(|| format!("snapshotting database to {}", target.display()))?;
+    rotate_snapshots(&dir, SNAPSHOT_KEEP)?;
+    Ok(Some(target))
+}
+
+/// Filesystem path of the database, or `None` for in-memory databases.
+fn db_path(conn: &Connection) -> anyhow::Result<Option<PathBuf>> {
+    let file: String = conn.query_row("PRAGMA database_list", [], |r| r.get(2))?;
+    if file.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PathBuf::from(file)))
+}
+
+/// Keeps the `keep` most recent `maia.v<N>.db` snapshots and prunes the rest.
+fn rotate_snapshots(dir: &Path, keep: usize) -> anyhow::Result<()> {
+    let mut snapshots: Vec<(i64, PathBuf)> = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(version) = name
+            .strip_prefix("maia.v")
+            .and_then(|rest| rest.strip_suffix(".db"))
+            .and_then(|digits| digits.parse::<i64>().ok())
+        else {
+            continue;
+        };
+        snapshots.push((version, entry.path()));
+    }
+    // Highest version first, so the tail we skip holds the oldest.
+    snapshots.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    for (_, stale) in snapshots.into_iter().skip(keep) {
+        tracing::info!(path = %stale.display(), "pruning old snapshot");
+        let _ = fs::remove_file(stale);
+    }
+    Ok(())
+}
+
 pub fn server_time_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -573,24 +755,97 @@ mod tests {
     use super::*;
     use rusqlite::params;
 
+    /// Unique scratch directory, removed by the caller.
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("maia-test-{tag}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A connection with no schema and no version stamp — the state of a
+    /// database from before versioning existed.
+    fn legacy_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
+            .unwrap();
+        conn
+    }
+
+    /// Fresh databases go straight to the current version.
     #[test]
-    fn migrations_idempotent() {
+    fn fresh_db_reaches_latest_version() {
         let pool = init_memory().unwrap();
         let conn = pool.lock().unwrap();
-        super::create_schema(&conn).unwrap();
-        super::create_schema(&conn).unwrap();
+        assert_eq!(super::user_version(&conn).unwrap(), super::LATEST_VERSION);
         let count: i64 = conn
             .query_row("SELECT count(*) FROM sqlite_master WHERE type='table'", [], |r| r.get(0))
             .unwrap();
-        assert!(count >= 30);
+        assert!(count >= 30, "expected the v1 schema to be created, saw {count} tables");
     }
 
+    /// Running the runner again on an up-to-date database does nothing.
     #[test]
-    fn receipts_columns_added_to_pre_existing_table() {
-        // Reproduce a pre-existing v30 `receipts` table that predates the new
-        // columns: `CREATE TABLE IF NOT EXISTS` would leave it untouched.
+    fn migrate_is_idempotent() {
         let pool = init_memory().unwrap();
         let conn = pool.lock().unwrap();
+        super::migrate(&conn).unwrap();
+        super::migrate(&conn).unwrap();
+        assert_eq!(super::user_version(&conn).unwrap(), super::LATEST_VERSION);
+    }
+
+    /// A pre-versioning database (`user_version` 0, older table set) is brought
+    /// all the way forward.
+    ///
+    /// Replaying v1 is safe precisely because every statement in it is
+    /// `IF NOT EXISTS`, and it is necessary: a database created before a table was
+    /// added only gets that table by running v1.
+    #[test]
+    fn legacy_database_is_stamped_and_brought_forward() {
+        let conn = legacy_db();
+        // A v1-era database: the original DDL minus the tables added since, plus the
+        // `meal_ingredients` table the foods layer superseded.
+        conn.execute_batch(super::V1_SCHEMA).unwrap();
+        conn.execute_batch(
+            "DROP TABLE foods;
+             DROP TABLE food_ingredients;
+             DROP TABLE meal_foods;
+             CREATE TABLE meal_ingredients (
+                 meal_id TEXT NOT NULL,
+                 ingredient_id TEXT NOT NULL,
+                 amount REAL NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO urls (id, url, created_at) VALUES ('u1', 'https://example.com', 1000)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(super::user_version(&conn).unwrap(), 0);
+
+        super::migrate(&conn).unwrap();
+
+        assert_eq!(super::user_version(&conn).unwrap(), super::LATEST_VERSION);
+        let n: i64 = conn.query_row("SELECT count(*) FROM urls WHERE id='u1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "migration must not lose rows");
+        // v1 has to actually run, otherwise tables added after this database was
+        // created are never created at all.
+        for table in ["foods", "food_ingredients", "meal_foods"] {
+            assert!(
+                super::table_exists(&conn, table).unwrap(),
+                "v1 did not create {table}"
+            );
+        }
+        assert!(!super::table_exists(&conn, "meal_ingredients").unwrap());
+    }
+
+    /// `CREATE TABLE IF NOT EXISTS` cannot widen a table that already exists, so
+    /// v2 repairs a `receipts` table from before those columns shipped.
+    #[test]
+    fn receipt_columns_added_to_pre_existing_table() {
+        let conn = legacy_db();
+        conn.execute_batch(super::V1_SCHEMA).unwrap();
         conn.execute_batch(
             "DROP TABLE receipts;
              CREATE TABLE receipts (
@@ -609,19 +864,15 @@ mod tests {
         .unwrap();
         assert!(!super::column_exists(&conn, "receipts", "parse_error").unwrap());
 
-        super::create_schema(&conn).unwrap();
+        super::migrate(&conn).unwrap();
 
-        for (name, _) in super::RECEIPTS_ADDED_COLUMNS {
+        for (name, _) in super::RECEIPT_COLUMNS {
             assert!(
                 super::column_exists(&conn, "receipts", name).unwrap(),
                 "missing column {name}"
             );
         }
-
-        // Re-running must not fail on the now-present columns.
-        super::create_schema(&conn).unwrap();
-
-        // And the new columns are usable.
+        // The new columns are usable.
         conn.execute(
             "INSERT INTO receipts (id, local_path, created_at, parse_error, archived_path, archived_at)
              VALUES ('r1', '/tmp/x.jpg', 1000, 'boom', 'receipts_archive/r1', 2000)",
@@ -639,6 +890,95 @@ mod tests {
         assert_eq!(arch.as_deref(), Some("receipts_archive/r1"));
     }
 
+    /// The v3 step removes the superseded table.
+    #[test]
+    fn orphan_meal_ingredients_table_dropped() {
+        let conn = legacy_db();
+        conn.execute_batch(super::V1_SCHEMA).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meal_ingredients (
+                 meal_id TEXT NOT NULL,
+                 ingredient_id TEXT NOT NULL,
+                 amount REAL NOT NULL
+             );",
+        )
+        .unwrap();
+        assert!(super::table_exists(&conn, "meal_ingredients").unwrap());
+
+        super::migrate(&conn).unwrap();
+
+        assert!(!super::table_exists(&conn, "meal_ingredients").unwrap());
+        assert!(super::table_exists(&conn, "foods").unwrap());
+        assert!(super::table_exists(&conn, "food_ingredients").unwrap());
+    }
+
+    /// A database newer than the binary is a Nix rollback. Serving it would fail
+    /// later, at query time, with confusing "no such column" errors.
+    #[test]
+    fn database_newer_than_binary_is_refused() {
+        let pool = init_memory().unwrap();
+        let conn = pool.lock().unwrap();
+        super::migrate(&conn).unwrap();
+        super::set_user_version(&conn, super::LATEST_VERSION + 5).unwrap();
+
+        let err = super::migrate(&conn).unwrap_err().to_string();
+        assert!(err.contains("newer"), "unhelpful error: {err}");
+        assert!(err.contains("rollback"), "should name the rollback case: {err}");
+    }
+
+    /// Each version change is preceded by a consistent snapshot named for the
+    /// version it was taken at.
+    #[test]
+    fn snapshot_written_before_each_migration() {
+        let dir = temp_dir("snapshot");
+        let db_path = dir.join("maia.db");
+        let conn = Connection::open(&db_path).unwrap();
+        super::migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO receipts (id, local_path, created_at) VALUES ('r1', '/tmp/x.jpg', 1000)",
+            [],
+        )
+        .unwrap();
+        // Pretend an older binary left the database at v1.
+        super::set_user_version(&conn, 1).unwrap();
+
+        super::migrate(&conn).unwrap();
+
+        let snapshots = dir.join("snapshots");
+        let taken = snapshots.join("maia.v1.db");
+        assert!(taken.exists(), "expected {} to exist", taken.display());
+        // The snapshot is a real database holding the row committed before the
+        // migration, which is the whole point of taking it first.
+        let snap = Connection::open(&taken).unwrap();
+        let n: i64 = snap
+            .query_row("SELECT count(*) FROM receipts WHERE id='r1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "snapshot must capture committed rows");
+        assert_eq!(super::user_version(&conn).unwrap(), super::LATEST_VERSION);
+    }
+
+    /// Rotation prunes the oldest snapshots once the retention count is exceeded.
+    #[test]
+    fn snapshot_rotation_keeps_the_newest() {
+        let dir = temp_dir("rotate");
+        for v in 1..=(super::SNAPSHOT_KEEP as i64 + 3) {
+            fs::write(dir.join(format!("maia.v{v}.db")), b"x").unwrap();
+        }
+        fs::write(dir.join("unrelated.txt"), b"x").unwrap();
+
+        super::rotate_snapshots(&dir, super::SNAPSHOT_KEEP).unwrap();
+
+        let kept: Vec<i64> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| {
+                let n = e.unwrap().file_name().into_string().ok()?;
+                n.strip_prefix("maia.v")?.strip_suffix(".db")?.parse().ok()
+            })
+            .collect();
+        assert_eq!(kept.len(), super::SNAPSHOT_KEEP);
+        assert!(!dir.join("maia.v1.db").exists(), "oldest should be pruned");
+        assert!(dir.join("unrelated.txt").exists(), "unrelated files untouched");
+    }
     #[test]
     fn unique_constraints_hold() {
         let pool = init_memory().unwrap();
