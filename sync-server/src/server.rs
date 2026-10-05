@@ -142,21 +142,47 @@ async fn log_requests(
     res
 }
 
+/// Imports the exercise catalogue when the `exercises` table is still empty.
+///
+/// Looks at [`Config::seed_dir`] first, then at the locations a `cargo tauri
+/// dev` working directory implies. A deployment that sets `seed_dir` to a
+/// checkout gets its catalogue without relying on the process working directory,
+/// and one that has already synced keeps skipping this entirely.
+fn seed_exercises_if_empty(conn: &rusqlite::Connection, config: &Config) {
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM exercises", [], |r| r.get(0))
+        .unwrap_or(0);
+    if count != 0 {
+        return;
+    }
+    let mut candidates: Vec<std::path::PathBuf> = config.seed_dir.iter().cloned().collect();
+    candidates.extend(
+        ["data", "../data", "../../data"]
+            .into_iter()
+            .map(std::path::PathBuf::from),
+    );
+    for dir in candidates {
+        if !dir.join("parsed").exists() {
+            continue;
+        }
+        let media = config.media_dir();
+        let _ = crate::seed::seed_exercises_to(
+            conn,
+            &dir.join("parsed"),
+            &dir.join("images"),
+            &dir.join("videos"),
+            &media,
+        );
+        break;
+    }
+}
+
 pub async fn start_server(config: Config) -> anyhow::Result<(u16, JoinHandle<()>)> {
     let _ = tracing_subscriber::fmt::try_init();
     let db = db::init_db(&config.db_path)?;
     {
         let conn = db.lock().unwrap();
-        let cnt: i64 = conn.query_row("SELECT count(*) FROM exercises", [], |r| r.get(0)).unwrap_or(0);
-        if cnt == 0 {
-            for cand in [std::path::Path::new("data"), std::path::Path::new("../data"), std::path::Path::new("../../data")] {
-                if cand.join("parsed").exists() {
-                    let media = config.db_path.parent().unwrap_or_else(|| std::path::Path::new(".")).join("exercise_media");
-                    let _ = crate::seed::seed_exercises_to(&conn, &cand.join("parsed"), &cand.join("images"), &cand.join("videos"), &media);
-                    break;
-                }
-            }
-        }
+        seed_exercises_if_empty(&conn, &config);
     }
     let listener = TcpListener::bind(&config.bind_addr).await?;
     let port = listener.local_addr()?.port();
