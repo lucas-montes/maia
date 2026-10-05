@@ -146,35 +146,20 @@ fn init_database(db_path: &str) -> Result<Connection, String> {
     Ok(conn)
 }
 
+/// Where the database lives, from the shared configuration.
+///
+/// Used to probe `maia.json` and then walk up the tree looking for `maia.db`,
+/// which meant a launch from anywhere but the checkout opened a different
+/// database than the service was using.
 fn get_database_path() -> String {
-    for candidate in ["maia.json", "../../maia.json", "../maia.json"] {
-        if let Ok(content) = fs::read_to_string(candidate) {
-            if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(db) = config.get("database").and_then(|v| v.as_str()) {
-                    let p = PathBuf::from(db);
-                    if p.is_absolute() { return p.to_string_lossy().to_string(); }
-                    if let Some(parent) = PathBuf::from(candidate).parent() {
-                        return parent.join(p).to_string_lossy().to_string();
-                    }
-                    return db.to_string();
-                }
-            }
-        }
-    }
-    for candidate in ["../../maia.db", "maia.db"] {
-        let p = PathBuf::from(candidate);
-        if p.exists() {
-            if let Ok(canon) = p.canonicalize() { return canon.to_string_lossy().to_string(); }
-            return p.to_string_lossy().to_string();
-        }
-    }
-    let proj = PathBuf::from("../../maia.db");
-    if let Ok(canon) = proj.canonicalize() { return canon.to_string_lossy().to_string(); }
-    "maia.db".to_string()
+    sync_config().db_path.display().to_string()
 }
 
 fn get_notes_dir() -> PathBuf {
-    let dir = PathBuf::from("notes");
+    let dir = sync_config()
+        .notes_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("notes"));
     if !dir.exists() {
         let _ = fs::create_dir_all(&dir);
     }
@@ -182,20 +167,10 @@ fn get_notes_dir() -> PathBuf {
 }
 
 
+/// The API key, from the shared configuration rather than the checkout's
+/// `maia.json`, so the app and the service cannot disagree about it.
 fn get_sync_api_key_value() -> String {
-    if let Ok(content) = fs::read_to_string("maia.json") {
-        if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(key) = config.get("sync_api_key").and_then(|v| v.as_str()) {
-                return key.to_string();
-            }
-            if let Some(sync) = config.get("sync") {
-                if let Some(key) = sync.get("api_key").and_then(|v| v.as_str()) {
-                    return key.to_string();
-                }
-            }
-        }
-    }
-    "fitfat-sync-key".to_string()
+    sync_config().api_key.clone()
 }
 
 
@@ -1527,71 +1502,133 @@ struct ConfigResponse {
     error: Option<String>,
 }
 
+/// Keys the deployment config owns, which the Settings form may not write.
+///
+/// These decide where the database is, which port the API answers on, and which
+/// key it requires. A GUI editing them would desynchronise the app from the
+/// service, which reads the same file.
+const DEPLOYMENT_OWNED: &[&str] = &[
+    "database",
+    "bind_addr",
+    "media_dir",
+    "seed_dir",
+    "notes_dir",
+    "api_key",
+    "model_api",
+    "model_name",
+];
+
+/// The per-user overlay, or an empty object when absent.
+fn read_overlay() -> serde_json::Map<String, serde_json::Value> {
+    let path = sync_server::config::overlay_config_path();
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default()
+}
+
+/// The settings view: deployment values, with the overlay filling in the desktop
+/// paths the form is allowed to change.
+///
+/// Deployment keys are inserted first so they win, and the overlay's copy of
+/// them is dropped rather than shown as if editing it would do anything.
 #[tauri::command]
 fn read_config() -> ConfigResponse {
-    let path = "maia.json";
-    match fs::read_to_string(path) {
-        Ok(content) => ConfigResponse {
-            success: true,
-            data: Some(content),
-            error: None,
-        },
-        Err(_) => {
-            // Return a default config when the file doesn't exist
-            let defaults = r#"{
-  "receipts_path": "",
-  "nutriments_path": "",
-  "bank_statements_path": "",
-  "investments_statements_path": "",
-  "database": "maia.db",
-  "models_api": []
-}"#;
-            ConfigResponse {
-                success: true,
-                data: Some(defaults.to_string()),
-                error: None,
-            }
+    let cfg = sync_config();
+    let mut merged = serde_json::Map::new();
+    merged.insert("database".into(), serde_json::json!(cfg.db_path.display().to_string()));
+    merged.insert("model_api".into(), serde_json::json!(cfg.model_api_key));
+    merged.insert("model_name".into(), serde_json::json!(cfg.model_name));
+    for (key, value) in read_overlay() {
+        if DEPLOYMENT_OWNED.contains(&key.as_str()) {
+            continue;
         }
+        merged.entry(key).or_insert(value);
+    }
+    ConfigResponse {
+        success: true,
+        data: Some(serde_json::Value::Object(merged).to_string()),
+        error: None,
     }
 }
 
+/// Checks an incoming settings object against [`DEPLOYMENT_OWNED`].
+///
+/// Returns the names it refused rather than filtering them out, so the form can
+/// be told why a save did nothing instead of appearing to have worked.
+fn reject_deployment_keys(
+    incoming: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), Vec<&str>> {
+    let rejected: Vec<&str> = incoming
+        .keys()
+        .filter(|key| DEPLOYMENT_OWNED.contains(&key.as_str()))
+        .map(String::as_str)
+        .collect();
+    if rejected.is_empty() {
+        Ok(())
+    } else {
+        Err(rejected)
+    }
+}
+
+/// Writes the desktop paths to the per-user overlay.
+///
+/// Refuses deployment keys outright rather than silently dropping them: a form
+/// that quietly discards what the user typed is worse than one that explains
+/// why it cannot.
 #[tauri::command]
 fn save_config(json: String) -> ConfigResponse {
-    // Validate that the input is valid JSON
-    if let Err(e) = serde_json::from_str::<serde_json::Value>(&json) {
-        return ConfigResponse {
-            success: false,
-            data: None,
-            error: Some(format!("Invalid JSON: {e}")),
-        };
-    }
-
-    let path = "maia.json";
-    let backup_path = "maia.json.bak";
-
-    // Create a backup of the current config if it exists
-    if fs::metadata(path).is_ok() {
-        if let Err(e) = fs::copy(path, backup_path) {
+    let incoming: serde_json::Value = match serde_json::from_str(&json) {
+        Ok(value) => value,
+        Err(e) => {
             return ConfigResponse {
                 success: false,
                 data: None,
-                error: Some(format!("Failed to create backup {backup_path}: {e}")),
+                error: Some(format!("Invalid JSON: {e}")),
+            };
+        }
+    };
+    let serde_json::Value::Object(incoming) = incoming else {
+        return ConfigResponse {
+            success: false,
+            data: None,
+            error: Some("Configuration must be a JSON object".to_string()),
+        };
+    };
+
+    if let Err(rejected) = reject_deployment_keys(&incoming) {
+        return ConfigResponse {
+            success: false,
+            data: None,
+            error: Some(format!(
+                "Managed by the deployment config, not editable here: {}",
+                rejected.join(", ")
+            )),
+        };
+    }
+
+    let path = sync_server::config::overlay_config_path();
+    if let Some(parent) = path.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            return ConfigResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to create {}: {e}", parent.display())),
             };
         }
     }
-
-    // Write the new config
-    match fs::write(path, &json) {
-        Ok(()) => ConfigResponse {
-            success: true,
-            data: None,
-            error: None,
-        },
-        Err(e) => ConfigResponse {
+    if let Err(e) = fs::write(&path, serde_json::Value::Object(incoming).to_string()) {
+        return ConfigResponse {
             success: false,
             data: None,
-            error: Some(format!("Failed to write {path}: {e}")),
-        },
+            error: Some(format!("Failed to write {}: {e}", path.display())),
+        };
+    }
+    ConfigResponse {
+        success: true,
+        data: Some(path.display().to_string()),
+        error: None,
     }
 }
 
@@ -1667,4 +1704,63 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn keys_of(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        value.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn desktop_paths_are_accepted() {
+        let incoming = keys_of(json!({
+            "receipts_path": "/home/lucas/receipts",
+            "nutriments_path": "/home/lucas/nutriments",
+            "bank_statements_path": "/home/lucas/bank",
+            "investments_statements_path": "/home/lucas/investments",
+            "receipts": { "archived_dir": "/home/lucas/archive" },
+        }));
+        assert_eq!(reject_deployment_keys(&incoming), Ok(()));
+    }
+
+    #[test]
+    fn every_deployment_key_is_refused() {
+        for key in DEPLOYMENT_OWNED {
+            let incoming = keys_of(json!({ *key: "value" }));
+            let err = reject_deployment_keys(&incoming)
+                .unwrap_err_or_else(|| panic!("{key} should be refused"));
+            assert_eq!(err, vec![*key], "wrong key reported for {key}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_names_every_offending_key() {
+        let incoming = keys_of(json!({
+            "receipts_path": "/ok",
+            "database": "/hijack.db",
+            "api_key": "stolen",
+        }));
+        let err = reject_deployment_keys(&incoming).unwrap_err();
+        assert!(err.contains(&"database"), "missing database: {err:?}");
+        assert!(err.contains(&"api_key"), "missing api_key: {err:?}");
+        assert!(!err.contains(&"receipts_path"), "flagged a permitted key: {err:?}");
+    }
+
+    /// Helper so the loop above reads as an assertion rather than a panic.
+    trait UnwrapErrOrElse<T, E> {
+        fn unwrap_err_or_else(self, f: impl FnOnce() -> E) -> E;
+    }
+
+    impl<T, E> UnwrapErrOrElse<T, E> for Result<T, E> {
+        fn unwrap_err_or_else(self, f: impl FnOnce() -> E) -> E {
+            match self {
+                Ok(_) => f(),
+                Err(e) => e,
+            }
+        }
+    }
 }
