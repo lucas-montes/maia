@@ -65,13 +65,18 @@ in
 
     apiKeyFile = mkOption {
       type = types.path;
-      default = "${cfg.dataDir}/secrets.env";
-      defaultText = "/var/lib/maia/secrets.env";
+      # Deliberately not inside dataDir: systemd creates a StateDirectory in the
+      # exec child, which is after it reads EnvironmentFile, so an environment
+      # file under it makes the very first start fail.
+      default = "/etc/maia/secrets.env";
+      defaultText = "/etc/maia/secrets.env";
       description = ''
         File read as the unit's EnvironmentFile, holding MAIA_API_KEY and
-        optionally MAIA_MODEL_API_KEY. Create it before enabling this module,
+        optionally MAIA_MODEL_API_KEY. Create it before starting the service,
         owned by root:${maiaGroup} with mode 0600. It is not managed by Nix
-        because a store path cannot hold a secret.
+        because a store path cannot hold a secret. Its absence is fatal by
+        design: without a key the server would silently fall back to the
+        hardcoded default.
       '';
     };
 
@@ -113,6 +118,12 @@ in
     # Declared with its members rather than as an empty group above, so the two
     # definitions do not collide.
     users.groups.${maiaGroup}.members = [ maiaUser ] ++ cfg.extraUsers;
+
+    # So the one-time secrets file has a directory to live in that already has
+    # the right ownership and is not world readable.
+    systemd.tmpfiles.rules = [
+      "d /etc/maia 0750 root ${maiaGroup} - - "
+    ];
 
     systemd.services.maia = {
       description = "Maia sync server";
