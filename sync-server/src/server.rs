@@ -165,6 +165,10 @@ fn seed_exercises_if_empty(conn: &rusqlite::Connection, config: &Config) {
         if !dir.join("parsed").exists() {
             continue;
         }
+        // This runs before the listener binds and copies the media files, so it
+        // can take a while on a first boot. Say so, or a service that is merely
+        // slow to start is indistinguishable from one that failed to.
+        tracing::info!(seed = %dir.display(), "seeding exercise catalogue");
         let media = config.media_dir();
         let _ = crate::seed::seed_exercises_to(
             conn,
@@ -177,7 +181,53 @@ fn seed_exercises_if_empty(conn: &rusqlite::Connection, config: &Config) {
     }
 }
 
+/// Resolves when the process is asked to stop.
+///
+/// `SIGTERM` is what systemd sends on `stop` and on a Nix rebuild that changes
+/// the unit. Without draining, the process dies mid-write and SQLite is left to
+/// recover the WAL on next open; draining lets in-flight requests finish and
+/// `Connection`'s `Drop` checkpoint cleanly.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::warn!(error = %e, "failed to listen for ctrl-c");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to listen for SIGTERM"),
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("received ctrl-c, shutting down"),
+        _ = terminate => tracing::info!("received SIGTERM, shutting down"),
+    }
+}
+
 pub async fn start_server(config: Config) -> anyhow::Result<(u16, JoinHandle<()>)> {
+    start_server_with_shutdown(config, shutdown_signal()).await
+}
+
+/// Serves until [shutdown] resolves.
+///
+/// The desktop app passes a signal it never fires, so the embedded server keeps
+/// running for the life of the window.
+pub async fn start_server_with_shutdown<S>(
+    config: Config,
+    shutdown: S,
+) -> anyhow::Result<(u16, JoinHandle<()>)>
+where
+    S: std::future::Future<Output = ()> + Send + 'static,
+{
     let _ = tracing_subscriber::fmt::try_init();
     let db = db::init_db(&config.db_path)?;
     {
@@ -189,12 +239,18 @@ pub async fn start_server(config: Config) -> anyhow::Result<(u16, JoinHandle<()>
     let state = AppState::new(config, db);
     let router = create_router(state);
     let handle = tokio::spawn(async move {
-        axum::serve(
+        // Logged rather than unwrapped: a bind failure surfaces here after the
+        // caller already got a port back, and panicking in a task is how a
+        // service ends up silently gone.
+        if let Err(e) = axum::serve(
             listener,
             router.into_make_service_with_connect_info::<SocketAddr>(),
         )
+        .with_graceful_shutdown(shutdown)
         .await
-        .unwrap();
+        {
+            tracing::error!(error = %e, "server stopped");
+        }
     });
     Ok((port, handle))
 }

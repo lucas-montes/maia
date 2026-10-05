@@ -601,18 +601,22 @@ pub fn migrate(conn: &Connection) -> anyhow::Result<()> {
         );
     }
 
-
     let pending: Vec<(i64, &Step)> = MIGRATIONS
         .iter()
         .filter(|(v, _)| *v > current)
         .map(|(v, step)| (*v, step))
         .collect();
+
+    // Tracks the version the database is at right now, so each snapshot is named
+    // for the state it preserves rather than repeating the starting version.
+    let mut from = current;
     for (version, step) in pending {
         tracing::info!(version, "applying schema migration");
         // Rollback path first. `VACUUM INTO` cannot run inside a transaction.
-        if let Some(path) = snapshot(conn, current)? {
+        if let Some(path) = snapshot(conn, from)? {
             tracing::info!(path = %path.display(), "wrote pre-migration snapshot");
         }
+        from = version;
 
         conn.execute_batch("BEGIN IMMEDIATE;")?;
         let applied: anyhow::Result<()> = match step {
