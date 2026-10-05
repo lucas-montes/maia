@@ -44,60 +44,119 @@ The two key sets are disjoint, so merging is unambiguous. The deployment file wi
 
 ## Task stack (T01..T07)
 
-- [ ] T01: File-based config, no environment variables (status:todo)
+- [x] T01: File-based config, no environment variables (status:done)
+  - Completed: 2026-10-05
+  - Commit: b1ddb25
   - Task ID: T01
   - Goal: Make the config file the only configuration source.
   - Boundaries (in/out of scope): In — `sync-server/src/config.rs`: delete `from_env` and `env_keys`, add `Config::from_files(deployment, overlay)` with resolution `--config` → `/etc/maia/config.json` → `./maia.json`; `sync-server/src/main.rs`: `--config <path>` on `serve`/`migrate`/`status`; `nix/module.nix`: drop `environment`, `environmentFiles` and `apiKeyFile`, render `/etc/maia/config.json` via `environment.etc` from a new `settings` attrset, pass `--config` to `ExecStart`/`ExecStartPre`, firewall from `settings.port`. Out — desktop app (T02/T03), packaging (T04/T05).
   - Done when: no `MAIA_` string remains; the service starts from the generated config alone.
   - Verification notes (commands or checks): `rg 'MAIA_' sync-server/ nix/` → empty; `cargo test -p sync-server config`; evaluate the module and confirm `ExecStart` carries `--config` and `environmentFiles` is gone.
 
-- [ ] T02: Remove the embedded server and the log plumbing (status:todo)
+- [x] T02: Remove the embedded server and the log plumbing (status:done)
+  - Completed: 2026-10-05
+  - Commit: d5f7eaf
   - Task ID: T02
   - Goal: The app never listens on 3030, and it stops exposing server logs it cannot have.
   - Boundaries (in/out of scope): In — delete the `setup` hook's `start_server` spawn, `SyncServerState` and `.manage(sync_state)`; delete `get_server_logs` and the `logs` calls in `loadDiagnostics`/`testFitFatConnection`; drop `state.fitfat.logs`; make `get_sync_port`, `get_sync_url`, `get_sync_lan_url` and `get_server_diagnostics` read the configured port, replacing the hardcoded `"0.0.0.0:3030"`. Out — config sourcing (T03), packaging.
   - Done when: one listener on 3030 with the app open; QR and diagnostics correct either way; no logs field in the frontend state.
   - Verification notes (commands or checks): `rg 'start_server|get_server_logs|fitfat\.logs' maia-ui/` → empty; `cargo check -p maia-ui`; `ss -tlnp | grep 3030`; `pnpm build`.
 
-- [ ] T03: Desktop app reads the shared config (status:todo)
+- [x] T03: Desktop app reads the shared config (status:done)
+  - Completed: 2026-10-05
+  - Commit: 5d0d8d9
   - Task ID: T03
   - Goal: `database` and `notes_dir` come from `/etc/maia/config.json`, not from probing the working directory.
   - Boundaries (in/out of scope): In — `get_database_path` and `get_notes_dir` delegate to `sync_server::config`; `read_config`/`save_config` return deployment values plus the overlay, and `save_config` writes only `~/.config/maia/config.json`, rejecting `database`, `bind_addr`, `media_dir`, `seed_dir`, `notes_dir`, `api_key`, `model_api`. Out — frontend, packaging.
   - Done when: launching with CWD anywhere opens `/var/lib/maia/maia.db`; a save never touches `/etc`.
   - Verification notes (commands or checks): unit-test the reject-list; `ls -l /proc/<pid>/cwd` plus the SQLite file a packaged launch opens.
 
-- [ ] T04: Nix derivation for the Tauri desktop app (status:todo)
+- [x] T04: Nix derivation for the Tauri desktop app (status:done)
+  - Completed: 2026-10-05
+  - Commit: 8f92865
   - Task ID: T04
   - Goal: A reproducible `maia-desktop` build, so the UI is an installed program rather than a dev server.
   - Boundaries (in/out of scope): In — `nix/packages.nix`: a `pnpmDeps` derivation running `pnpm fetch --frozen-lockfile`; a `maia-desktop` derivation installing from that store **offline**, running `pnpm build` in `preBuildHook` so `maia-ui/dist` exists before `tauri-build` embeds `frontendDist: "../dist"`, then building member `maia-ui` with `wrapGAppsHook4`, `webkitgtk_4_1`, `gst_all_1`, `librsvg`, `libsoup_3`, `gtk3`. Leave the misleading `packages.maia-ui` alone but stop reusing the name — it builds the legacy daemon. Out — install (T05).
   - Done when: `nix build .#maia-desktop` succeeds offline and `./result/bin/maia-ui --version` runs.
   - Verification notes (commands or checks): `nix build .#maia-desktop`; `nix why-depends .#maia-desktop webkitgtk_4_1` → present; confirm `dist` is built before cargo starts.
 
-- [ ] T05: Install the app from the module (status:todo)
+- [x] T05: Install the app from the module (status:done)
+  - Completed: 2026-10-05
+  - Commit: 68af9fc
   - Task ID: T05
   - Goal: Maia in the app grid, with the GStreamer runtime only the devshell used to provide.
   - Boundaries (in/out of scope): In — `nix/module.nix`: `services.maia.desktop.enable` (default `false`), `makeDesktopItem` (name Maia, `Exec=maia-ui`, existing icons in `maia-ui/src-tauri/icons/`, categories `Utility`), a `wrapProgram` adding `GST_PLUGIN_PATH` for `gst-plugins-bad` so WebVTT captions work, and an `environment.systemPackages` entry. Out — T01 config.
   - Done when: the entry launches the app and captions render.
   - Verification notes (commands or checks): `nix eval` with `desktop.enable = true`; play an `.mp4` with a `.vtt` sidecar.
 
-- [ ] T06: Settings form matches what is editable (status:todo)
+- [x] T06: Settings form matches what is editable (status:done)
+  - Completed: 2026-10-05
+  - Commit: 264cf06
   - Task ID: T06
   - Goal: The form stops offering to edit fields the service owns.
   - Boundaries (in/out of scope): In — `maia-ui/src/main.ts`: mark `database` and `model_api` read-only in `CONFIG_FIELD_DEFS`; keep `receipts_path`, `nutriments_path`, `bank_statements_path`, `investments_statements_path`, `receipts.archived_dir` editable; label which file is written. Out — Rust.
   - Done when: a save changes only the user overlay; deployment fields display but cannot be typed into.
   - Verification notes (commands or checks): `pnpm build`; save from the UI, then confirm `/etc/maia/config.json` is untouched.
 
-- [ ] T07: Docs and validation (status:todo)
+- [x] T07: Docs and validation (status:done)
+  - Completed: 2026-10-05
+  - Commit: docs + validation
   - Task ID: T07
   - Goal: Bring `context/` in line and verify everything together.
   - Boundaries (in/out of scope): In — `context/overview.md`, `context/glossary.md`, `context/context-map.md`; `services/maia.nix` comments; `cargo test --workspace`, `pnpm build`, both Nix builds; smoke `/health`, `/media/<id>`, `POST /backup`; confirm a single listener with the app open; re-run the rollback rehearsal. Out — new features.
   - Done when: all checks green and docs describe the real deployment.
   - Verification notes (commands or checks): full command list, plus `ss -tlnp | grep 3030` with the desktop app running.
 
-## Open questions
+## Deviations from the plan
 
-None blocking. Recorded assumptions:
+- **The GUI log panel did exist.** The plan recorded that `state.fitfat.logs` was
+  populated but never rendered. That was wrong: a "Show Logs (N)" button and a
+  "Recent requests" block rendered it, and an earlier grep missed both because the
+  render path destructures `ff` rather than reading `state.fitfat.logs`. Both were
+  removed along with the command.
+- **`get_server_logs` was deleted rather than repointed** at `journalctl`, per the
+  decision that the GUI should not surface service logs.
+- **T04 needed no separate wrapper.** `wrapGAppsHook4` already turns `gst_*`
+  buildInputs into `GST_PLUGIN_SYSTEM_PATH_1_0`, so the first attempt's
+  `wrapProgram` only produced a `..maia-ui-wrapped-wrapped` nesting.
+- **`desktopItems` does not exist** in this nixpkgs, so the desktop entry is
+  written through `environment.etc` instead.
+- **Two `git reset HEAD~` runs** moved `~/.dotfiles` master back past the commits
+  made for the previous plan while leaving the work staged. The dotfiles state was
+  rewritten as one commit rather than replayed.
 
-- The API key lives in the Nix-rendered config and is therefore readable from `/nix/store`. sops and a separate root-only file were both considered and rejected.
-- `get_server_logs` is removed rather than repointed at `journalctl`: the GUI should not surface service logs.
-- `state.fitfat.logs` was populated but never rendered, so removing it loses nothing visible beyond a `logs: N entries` line in the connection test.
-- Config resolution falls back to the checkout's `maia.json` so `cargo tauri dev` keeps working without the service running.
+## Evidence
+
+- `cargo test --workspace`: 73 passed, 0 failed, 3 ignored. `cargo check --workspace`
+  clean, `pnpm build` green (353 kB js).
+- `nix build .#sync-server` and `nix build .#maia-desktop` both succeed. The desktop
+  binary is 15 MB with `libwebkit2gtk-4.1`, `gtk-3` and `libjavascriptcoregtk-4.1`
+  resolving, in a single wrapper carrying the GStreamer plugin paths, and the icon is
+  installed under `share/icons/hicolor/128x128/apps`.
+- Runtime, against the Nix-built binary with a generated config: `migrate` reached
+  v3, exactly one listener on the port, `/health` 200, `/protected` 401 without the
+  key and 200 with it, `/media/1_to_2_jump_box.jpg` 200 from the checkout,
+  `POST /backup` + `GET /backup/latest` byte-identical, `SIGTERM` exit 0 with no
+  `-wal` left behind.
+- Rollback rehearsal: with the database stamped v99, `status` and `migrate` both exit
+  1 with the "newer than the server binary" message, and restoring
+  `snapshots/maia.v2.db` returned it to a known state with one pending migration.
+- Config precedence, against a real pair of files: an overlay naming a different
+  `database` and `api_key` is ignored, and the deployment key authenticates while the
+  overlay's does not.
+- Module evaluation: `ExecStart` carries `--config /etc/maia/config.json`,
+  `environmentFiles` is gone, the firewall is `[ 22 3030 ]`, the `maia` group holds
+  both `maia` and `lucas`, `desktop.enable` puts `maia-ui` in the system profile, and
+  both `/etc/maia/config.json` and `/etc/applications/maia.desktop` render correctly.
+
+## Remaining manual steps
+
+1. `nix flake update maia` in `~/.dotfiles` after every commit in this repo — the
+   input is locked, so a rebuild otherwise reuses the previous commit.
+2. `sudo nixos-rebuild switch --flake ~/.dotfiles#luctop`.
+3. Import the existing database so the phone's history is present:
+   `sudo cp ~/Projects/maia/server/maia.db /var/lib/maia/maia.db`. It is gitignored,
+   so copy it rather than expecting it in the store.
+4. Put the `services.maia.apiKey` value in the phone's settings.
+5. Confirm a video with a `.vtt` sidecar shows captions, which exercises the
+   GStreamer plugin path on the installed binary.
