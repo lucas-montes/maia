@@ -534,18 +534,91 @@ mod tests {
 
     #[tokio::test]
     async fn backup_roundtrip() {
-        use crate::db;
         let dir = std::env::temp_dir().join(format!("maia-test-backup-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("fitfat_sync.db");
         let config = crate::config::Config::new(db_path.clone(), "test-key".to_string()).with_bind_addr("0.0.0.0:0");
         let (port, handle) = crate::server::start_server(config).await.unwrap();
         let client = reqwest::Client::new();
-        let data = b"fake sqlite bytes".to_vec();
-        let resp = client.post(format!("http://127.0.0.1:{port}/backup")).header("Authorization","Bearer test-key").header("Content-Type","application/octet-stream").body(data.clone()).send().await.unwrap();
+        let base = format!("http://127.0.0.1:{port}");
+
+        // Nothing stored yet.
+        let resp = client
+            .get(format!("{base}/backup/latest"))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 404);
-        let resp = client.get(format!("http://127.0.0.1:{port}/backup/latest")).header("Authorization","Bearer test-key").send().await.unwrap();
-        assert_eq!(resp.status(), 404);
+
+        // A payload that actually looks like a database, and is well past the 2 MB
+        // body cap axum applies by default.
+        let mut data = b"SQLite format 3\0".to_vec();
+        data.extend(std::iter::repeat_n(b'x', 3 * 1024 * 1024));
+
+        let resp = client
+            .post(format!("{base}/backup"))
+            .header("Authorization", "Bearer test-key")
+            .header("Content-Type", "application/octet-stream")
+            .body(data.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "a multi-megabyte backup must be accepted");
+
+        let resp = client
+            .get(format!("{base}/backup/latest"))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()
+                .get(reqwest::header::CONTENT_DISPOSITION)
+                .and_then(|v| v.to_str().ok()),
+            Some("attachment; filename=\"fitfat.sqlite\"")
+        );
+        let returned = resp.bytes().await.unwrap();
+        assert_eq!(returned.len(), data.len(), "stored backup was truncated");
+        assert_eq!(returned.as_ref(), data.as_slice(), "backup came back altered");
+
+        // The temporary file must not survive a successful upload.
+        let backup_dir = dir.join("backup");
+        let leftovers: Vec<String> = std::fs::read_dir(&backup_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(leftovers, vec!["fitfat.sqlite".to_string()]);
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn backup_requires_auth() {
+        let dir = std::env::temp_dir().join(format!("maia-test-backup-auth-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("fitfat_sync.db");
+        let config = crate::config::Config::new(db_path.clone(), "test-key".to_string()).with_bind_addr("0.0.0.0:0");
+        let (port, handle) = crate::server::start_server(config).await.unwrap();
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+
+        // A backup is the whole database, so it must not be readable or writable
+        // without the bearer token.
+        for resp in [
+            client.get(format!("{base}/backup/latest")).send().await.unwrap(),
+            client
+                .post(format!("{base}/backup"))
+                .body(b"data".to_vec())
+                .send()
+                .await
+                .unwrap(),
+        ] {
+            assert_eq!(resp.status(), 401);
+        }
+
         handle.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }

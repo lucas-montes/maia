@@ -9,34 +9,72 @@ use axum::{
 
 use crate::server::AppState;
 
+/// Name the uploaded database is stored under.
+const BACKUP_FILE: &str = "fitfat.sqlite";
+
 fn backup_path(state: &AppState) -> PathBuf {
-    let base = state
+    state
         .config
         .db_path
         .parent()
-        .unwrap_or_else(|| std::path::Path::new("/tmp"));
-    base.join("backup").join("fitfat.sqlite")
+        .unwrap_or_else(|| std::path::Path::new("/tmp"))
+        .join("backup")
+        .join(BACKUP_FILE)
 }
 
-pub async fn post_backup(State(state): State<AppState>, body: axum::body::Bytes) -> impl IntoResponse {
+/// Stores a database uploaded by the phone.
+///
+/// Writes to a sibling temporary file and renames it into place, because a
+/// partial write would otherwise leave a truncated file that `GET /backup/latest`
+/// happily serves as if it were a valid database.
+pub async fn post_backup(State(state): State<AppState>, body: axum::body::Bytes) -> Response {
     let path = backup_path(&state);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let Some(parent) = path.parent() else {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "backup path has no parent");
+    };
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("creating {}: {e}", parent.display()));
     }
-    match tokio::fs::write(&path, &body).await {
-        Ok(_) => (StatusCode::OK, axum::Json(serde_json::json!({"server_time": crate::db::server_time_ms()}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({"message": e.to_string()}))).into_response(),
+
+    // Same directory as the target so the rename stays within one filesystem and
+    // is therefore atomic.
+    let tmp = path.with_extension("sqlite.tmp");
+    if let Err(e) = tokio::fs::write(&tmp, &body).await {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("writing backup: {e}"));
     }
+    if let Err(e) = tokio::fs::rename(&tmp, &path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("finalising backup: {e}"));
+    }
+
+    tracing::info!(bytes = body.len(), path = %path.display(), "stored backup");
+    (StatusCode::OK, axum::Json(serde_json::json!({
+        "server_time": crate::db::server_time_ms(),
+        "bytes": body.len(),
+    })))
+    .into_response()
 }
 
+/// Returns the most recently stored backup, if any.
 pub async fn get_backup(State(state): State<AppState>) -> Response {
     let path = backup_path(&state);
     match tokio::fs::read(&path).await {
         Ok(bytes) => Response::builder()
             .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_TYPE, "application/vnd.sqlite3")
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{BACKUP_FILE}\""),
+            )
             .body(Body::from(bytes))
-            .unwrap(),
-        Err(_) => (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({"message": "no backup"}))).into_response(),
+            .expect("static response is well formed"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            error(StatusCode::NOT_FOUND, "no backup")
+        }
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &format!("reading backup: {e}")),
     }
+}
+
+fn error(status: StatusCode, message: &str) -> Response {
+    (status, axum::Json(serde_json::json!({ "message": message }))).into_response()
 }

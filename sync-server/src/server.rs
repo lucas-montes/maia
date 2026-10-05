@@ -14,6 +14,11 @@ use crate::{auth, config::Config, db, handlers::health, logs, openapi::ApiDoc};
 /// while still bounded, so a bad actor cannot stream indefinitely.
 const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 
+/// Ceiling for an uploaded database backup. The phone's database grows with its
+/// sync state, so this is generous; it exists to bound memory, not to fit the
+/// current file exactly.
+const MAX_BACKUP_BYTES: usize = 256 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
@@ -84,6 +89,12 @@ pub fn create_router(state: AppState) -> Router {
         .route("/receipt-pictures/:id/picture", get(crate::handlers::receipt_ocr::get_receipt_picture))
         .route("/experiments", get(crate::handlers::pull::pull_experiments))
         .route("/tags", get(crate::handlers::pull::pull_tags))
+        .route("/backup", post(crate::handlers::backup::post_backup)
+            // A backup is a whole database, well past axum's 2 MB default. This is
+            // the upload ceiling rather than an exact fit: rejecting a large but
+            // legitimate backup is worse than accepting a slightly larger one, and
+            // the request is bounded by the auth token in front of it.
+            .layer(DefaultBodyLimit::max(MAX_BACKUP_BYTES)))
         .route("/backup/latest", get(crate::handlers::backup::get_backup))
         .route("/media/:id", get(crate::handlers::media::get_media))
         .route("/exercises/:id", get(crate::handlers::media::get_media))
