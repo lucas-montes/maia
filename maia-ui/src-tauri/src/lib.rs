@@ -1144,10 +1144,12 @@ fn update_ingredient(state: tauri::State<AppState>, id: String, name: String, ca
 }
 #[tauri::command]
 fn create_ingredient(state: tauri::State<AppState>, name: String, caloriesPer100g: f64, proteinPer100g: f64, carbsPer100g: f64, fatPer100g: f64, sodiumPer100g: Option<f64>, fiberPer100g: Option<f64>, sugarPer100g: Option<f64>, brand: Option<String>, barcode: Option<String>) -> CommandResult<serde_json::Value> {
+    // Option only so an older front-end that omits these still calls in cleanly;
+    // an omitted field means zero.
     let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
     let id = uuid::Uuid::now_v7().to_string();
     let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e)=conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, sodium_per100g, fiber_per100g, sugar_per100g, brand, barcode, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)", rusqlite::params![id, name, caloriesPer100g, proteinPer100g, carbsPer100g, fatPer100g, sodiumPer100g, fiberPer100g, sugarPer100g, brand, barcode, now, now]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
+    if let Err(e)=conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, sodium_per100g, fiber_per100g, sugar_per100g, brand, barcode, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)", rusqlite::params![id, name, caloriesPer100g, proteinPer100g, carbsPer100g, fatPer100g, sodiumPer100g.unwrap_or(0.0), fiberPer100g.unwrap_or(0.0), sugarPer100g.unwrap_or(0.0), brand, barcode, now, now]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
     CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
 }
 
@@ -1200,16 +1202,18 @@ fn resolve_food_nutrition(
     let mut total_amount = 0.0;
     let (mut cal, mut prot, mut carb, mut fat) = (0.0, 0.0, 0.0, 0.0);
     let (mut sod, mut fib, mut sug) = (0.0, 0.0, 0.0);
-    let (mut saw_sod, mut saw_fib, mut saw_sug) = (false, false, false);
+    // No "did any component provide this" flags any more: the columns are
+    // NOT NULL and zero-defaulted, so a component that omits one contributes a
+    // real zero rather than leaving the total undefined.
     for (amount, c, p, cb, f, s, fb, sg) in rows {
         total_amount += amount;
         cal += c * amount;
         prot += p * amount;
         carb += cb * amount;
         fat += f * amount;
-        if let Some(v) = s { saw_sod = true; sod += v * amount; }
-        if let Some(v) = fb { saw_fib = true; fib += v * amount; }
-        if let Some(v) = sg { saw_sug = true; sug += v * amount; }
+        sod += s.unwrap_or(0.0) * amount;
+        fib += fb.unwrap_or(0.0) * amount;
+        sug += sg.unwrap_or(0.0) * amount;
     }
     if total_amount <= 0.0 {
         return Ok(None);
@@ -1223,9 +1227,9 @@ fn resolve_food_nutrition(
         "proteinPer100g": prot * f,
         "carbsPer100g": carb * f,
         "fatPer100g": fat * f,
-        "sodiumPer100g": if saw_sod { Some(sod * f) } else { None },
-        "fiberPer100g": if saw_fib { Some(fib * f) } else { None },
-        "sugarPer100g": if saw_sug { Some(sug * f) } else { None },
+        "sodiumPer100g": sod * f,
+        "fiberPer100g": fib * f,
+        "sugarPer100g": sug * f,
         "totalAmount": total_amount,
     })))
 }

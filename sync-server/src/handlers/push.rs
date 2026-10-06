@@ -220,9 +220,12 @@ pub async fn push_ingredient(
             payload.protein_per100g,
             payload.carbs_per100g,
             payload.fat_per100g,
-            payload.sodium_per100g,
-            payload.fiber_per100g,
-            payload.sugar_per100g,
+            // Coerced rather than stored as NULL: sodium/fiber/sugar are
+            // mandatory and zero-defaulted since v35, and an older client that
+            // omits them means zero, not "unknown".
+            payload.sodium_per100g.unwrap_or(0.0),
+            payload.fiber_per100g.unwrap_or(0.0),
+            payload.sugar_per100g.unwrap_or(0.0),
             if payload.is_archived { 1 } else { 0 },
             payload.brand,
             payload.barcode,
@@ -945,9 +948,9 @@ pub async fn push_meals(
                 mf.protein,
                 mf.carbs,
                 mf.fat,
-                mf.sodium,
-                mf.fiber,
-                mf.sugar,
+                mf.sodium.unwrap_or(0.0),
+                mf.fiber.unwrap_or(0.0),
+                mf.sugar.unwrap_or(0.0),
                 server_time
             ],
         )
