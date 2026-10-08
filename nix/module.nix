@@ -239,22 +239,9 @@ in
 
     # The desktop half is optional and independent of the service: it is a client
     # of the API and a reader of the database, so it needs neither the port nor
-    # the service to be up in order to install.
+    # the service to be up in order to install. The desktop entry rides along
+    # inside the package, so it lands in the system profile's share/applications,
+    # which is on XDG_DATA_DIRS -- unlike /etc/applications.
     environment.systemPackages = mkIf cfg.desktop.enable [ cfg.desktop.package ];
-
-    environment.etc."applications/maia.desktop" = mkIf cfg.desktop.enable {
-      source = pkgs.writeText "maia.desktop" ''
-        [Desktop Entry]
-        Name=Maia
-        Comment=Personal management suite
-        Exec=maia-ui
-        Icon=${cfg.desktop.package}/share/icons/hicolor/128x128/apps/maia-ui.png
-        Type=Application
-        Categories=Utility;
-        Terminal=false
-        StartupNotify=true
-      '';
-      mode = "0644";
-    };
   };
 }
