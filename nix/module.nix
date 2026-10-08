@@ -22,7 +22,10 @@
     set -euo pipefail
     target="''$1"
     owner="''$2"
-    chown -R "$owner":"$owner" "$target"
+    # The trailing colon sets the group to the account's login group rather than
+    # a group named after the user: on NixOS that is `users`, and `user:user`
+    # fails with "invalid group" for any normal account.
+    chown -R "$owner:" "$target"
     chmod -R u+rwX,go+rX "$target"
   '';
 
