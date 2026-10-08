@@ -8,22 +8,22 @@
   cfg = config.services.maia;
   inherit (lib) mkIf mkOption mkEnableOption types optionalAttrs;
 
-  maiaUser = "maia";
-  maiaGroup = "maia";
-
-  # The desktop app and the service open the same SQLite file. In WAL mode
-  # SQLite needs write access to the database, to the -wal and -shm sidecars, and
-  # to the directory they live in.
+  # The service and the desktop app open the same SQLite file, so they run as the
+  # same user. That makes owner permissions apply to both, and stops SQLite's
+  # -wal and -shm sidecars from being a problem: they are created with the
+  # creating process's umask, so with two different uids and two different umasks
+  # whichever wrote first would lock the other out.
   #
-  # New files get the directory's group thanks to the setgid bit, and UMask =
-  # "0007" makes them group writable. That covers what either process creates
-  # from here on; this fixes up whatever already exists, which needs privilege
-  # because some of it is owned by the desktop user rather than the service user.
-  fixPermissions = pkgs.writeShellScript "maia-fix-permissions" ''
+  # This repairs whatever already exists, which needs privilege because an imported
+  # database typically arrives owned by root -- `cp` as root preserves root
+  # ownership and the source's mode, and SQLite opens read-write, so a 0644 copy
+  # leaves nobody able to write it.
+  fixOwnership = pkgs.writeShellScript "maia-fix-ownership" ''
     set -euo pipefail
     target="''$1"
-    chgrp -R ${maiaGroup} "$target"
-    chmod -R g+rwX "$target"
+    owner="''$2"
+    chown -R "$owner":"$owner" "$target"
+    chmod -R u+rwX,go+rX "$target"
   '';
 
   # Everything the server needs, in one file. Rendered rather than assembled
@@ -62,8 +62,18 @@ in
       default = "/var/lib/maia";
       description = ''
         Writable state: the database, pre-migration snapshots and uploaded
-        backups. Created by systemd's StateDirectory, so it needs no imperative
-        setup.
+        backups. Created by systemd's StateDirectory and owned by `user`.
+      '';
+    };
+
+    user = mkOption {
+      type = types.str;
+      default = "lucas";
+      description = ''
+        The user to run as. It must be the same user that runs the desktop
+        application, because both open the same SQLite file: under one uid,
+        owner permissions apply to both and SQLite's `-wal`/`-shm` sidecars
+        cannot lock either of them out.
       '';
     };
 
@@ -128,16 +138,6 @@ in
       description = "Open `port` so the phone can reach the server on the LAN.";
     };
 
-    extraUsers = mkOption {
-      type = with types; listOf str;
-      default = [ ];
-      description = ''
-        Users that need write access to the shared database, added to the
-        ${maiaGroup} group. The desktop app is why this exists: it runs as a
-        normal user and opens the same SQLite file.
-      '';
-    };
-
     desktop = {
       enable = mkOption {
         type = types.bool;
@@ -159,27 +159,17 @@ in
   };
 
   config = mkIf cfg.enable {
-    users.users.${maiaUser} = {
-      isSystemUser = true;
-      group = maiaGroup;
-      description = "Maia sync server";
-    };
-
-    # Declared with its members rather than as an empty group above, so the two
-    # definitions do not collide.
-    users.groups.${maiaGroup}.members = [ maiaUser ] ++ cfg.extraUsers;
-
     environment.etc."maia/config.json" = {
       source = pkgs.writeText "maia-config.json" (builtins.toJSON settings);
     };
 
     # Created here as well as by StateDirectory, so it exists before the unit runs.
-    # StateDirectory only creates it in the exec child, which leaves the desktop app
-    # unable to open the database whenever the service is not currently running --
-    # and the two are decoupled now. The mode and group match StateDirectoryMode so
+    # StateDirectory only creates it in the exec child, which would leave the desktop
+    # app unable to open the database whenever the service is not currently running --
+    # and the two are separate processes. Owner and mode match StateDirectory so
     # systemd and tmpfiles do not disagree.
     systemd.tmpfiles.rules = [
-      "d ${cfg.dataDir} 2775 ${maiaUser} ${maiaGroup} - - "
+      "d ${cfg.dataDir} 0755 ${cfg.user} users - - "
     ];
 
     systemd.services.maia = {
@@ -188,17 +178,18 @@ in
       after = [ "network.target" ];
 
       serviceConfig = {
-        # `migrate` first: it is sandboxed, so systemd creates the StateDirectory
-        # for it, which means the directory exists by the time the privileged
-        # permission fix below runs.
+        # Ownership first: `migrate` opens the database read-write, so on a
+        # database imported with `sudo cp` -- root-owned, 0644, since cp keeps the
+        # source's mode -- it would fail and abort the unit before the repair
+        # below could run.
         ExecStartPre = [
+          # `+` runs this with full privileges: an imported database is typically
+          # owned by root, and the unit cannot chown its own files.
+          "+${fixOwnership} ${cfg.dataDir} ${cfg.user}"
           # Applies pending migrations, and exits non-zero when the database is
           # newer than this binary. That is what turns a Nix rollback into a
           # visible failure here instead of a server that cannot read the schema.
           "${cfg.package}/bin/sync-server --config ${configFile} migrate"
-          # `+` runs this with full privileges: the files it fixes predate the unit
-          # and are not all owned by the service user.
-          "+${fixPermissions} ${cfg.dataDir}"
         ];
         ExecStart = "${cfg.package}/bin/sync-server --config ${configFile} serve";
         # `systemctl reload maia` migrates without dropping the listener.
@@ -208,15 +199,14 @@ in
         # Room for the WAL checkpoint during a clean SIGTERM drain.
         TimeoutStopSec = 30;
 
-        User = maiaUser;
-        Group = maiaGroup;
-        # setgid so files either process creates stay in the shared group.
-        StateDirectoryMode = "2775";
-        UMask = "0007";
+        # Same uid as the desktop app, so both can write the shared database and
+        # neither is locked out by the other's SQLite sidecars.
+        User = cfg.user;
+        StateDirectoryMode = "0755";
 
         # The exercise images live in a home directory, so /home has to be
-        # readable. Nothing under it is writable, thanks to ProtectSystem plus
-        # ReadWritePaths.
+        # readable. Nothing under it is writable: ProtectSystem makes the whole
+        # hierarchy read-only apart from StateDirectory.
         ProtectHome = "read-only";
         ProtectSystem = "strict";
         ProtectKernelTunables = true;
