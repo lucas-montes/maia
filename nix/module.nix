@@ -8,27 +8,6 @@
   cfg = config.services.maia;
   inherit (lib) mkIf mkOption mkEnableOption types optionalAttrs;
 
-  # The service and the desktop app open the same SQLite file, so they run as the
-  # same user. That makes owner permissions apply to both, and stops SQLite's
-  # -wal and -shm sidecars from being a problem: they are created with the
-  # creating process's umask, so with two different uids and two different umasks
-  # whichever wrote first would lock the other out.
-  #
-  # This repairs whatever already exists, which needs privilege because an imported
-  # database typically arrives owned by root -- `cp` as root preserves root
-  # ownership and the source's mode, and SQLite opens read-write, so a 0644 copy
-  # leaves nobody able to write it.
-  fixOwnership = pkgs.writeShellScript "maia-fix-ownership" ''
-    set -euo pipefail
-    target="''$1"
-    owner="''$2"
-    # The trailing colon sets the group to the account's login group rather than
-    # a group named after the user: on NixOS that is `users`, and `user:user`
-    # fails with "invalid group" for any normal account.
-    chown -R "$owner:" "$target"
-    chmod -R u+rwX,go+rX "$target"
-  '';
-
   # Everything the server needs, in one file. Rendered rather than assembled
   # from environment variables so that what the service reads is inspectable in
   # one place, and so the port the firewall opens and the port the server binds
@@ -66,6 +45,11 @@ in
       description = ''
         Writable state: the database, pre-migration snapshots and uploaded
         backups. Created by systemd's StateDirectory and owned by `user`.
+
+        Nothing here changes ownership of what is already present, so an
+        imported database has to arrive writable: copy it as `user`, or follow
+        it with `chown -R $(id -un): dataDir`. A `sudo cp` leaves the copy owned
+        by root, and SQLite opens read-write.
       '';
     };
 
@@ -181,19 +165,10 @@ in
       after = [ "network.target" ];
 
       serviceConfig = {
-        # Ownership first: `migrate` opens the database read-write, so on a
-        # database imported with `sudo cp` -- root-owned, 0644, since cp keeps the
-        # source's mode -- it would fail and abort the unit before the repair
-        # below could run.
-        ExecStartPre = [
-          # `+` runs this with full privileges: an imported database is typically
-          # owned by root, and the unit cannot chown its own files.
-          "+${fixOwnership} ${cfg.dataDir} ${cfg.user}"
-          # Applies pending migrations, and exits non-zero when the database is
-          # newer than this binary. That is what turns a Nix rollback into a
-          # visible failure here instead of a server that cannot read the schema.
-          "${cfg.package}/bin/sync-server --config ${configFile} migrate"
-        ];
+        # No ExecStartPre: `serve` applies pending migrations on the way up, via
+        # init_db, and refuses to bind if the database is newer than the binary --
+        # which is what turns a Nix rollback into a visible failure instead of a
+        # server that cannot read the schema.
         ExecStart = "${cfg.package}/bin/sync-server --config ${configFile} serve";
         # `systemctl reload maia` migrates without dropping the listener.
         ExecReload = "${cfg.package}/bin/sync-server --config ${configFile} migrate";
