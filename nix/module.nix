@@ -173,20 +173,32 @@ in
       source = pkgs.writeText "maia-config.json" (builtins.toJSON settings);
     };
 
+    # Created here as well as by StateDirectory, so it exists before the unit runs.
+    # StateDirectory only creates it in the exec child, which leaves the desktop app
+    # unable to open the database whenever the service is not currently running --
+    # and the two are decoupled now. The mode and group match StateDirectoryMode so
+    # systemd and tmpfiles do not disagree.
+    systemd.tmpfiles.rules = [
+      "d ${cfg.dataDir} 2775 ${maiaUser} ${maiaGroup} - - "
+    ];
+
     systemd.services.maia = {
       description = "Maia sync server";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
 
       serviceConfig = {
-        # `+` runs this with full privileges: the files it fixes predate the unit
-        # and are not all owned by the service user.
+        # `migrate` first: it is sandboxed, so systemd creates the StateDirectory
+        # for it, which means the directory exists by the time the privileged
+        # permission fix below runs.
         ExecStartPre = [
-          "+${fixPermissions} ${cfg.dataDir}"
           # Applies pending migrations, and exits non-zero when the database is
           # newer than this binary. That is what turns a Nix rollback into a
           # visible failure here instead of a server that cannot read the schema.
           "${cfg.package}/bin/sync-server --config ${configFile} migrate"
+          # `+` runs this with full privileges: the files it fixes predate the unit
+          # and are not all owned by the service user.
+          "+${fixPermissions} ${cfg.dataDir}"
         ];
         ExecStart = "${cfg.package}/bin/sync-server --config ${configFile} serve";
         # `systemctl reload maia` migrates without dropping the listener.
@@ -214,7 +226,10 @@ in
         PrivateDevices = true;
         NoNewPrivileges = true;
         RestrictSUIDSGID = true;
-        ReadWritePaths = [ cfg.dataDir ];
+        # No ReadWritePaths for dataDir: systemd makes StateDirectory writable
+        # under ProtectSystem, and naming it here instead is fatal on a first boot.
+        # The mount namespace is built before the directory is created, and a
+        # missing path in ReadWritePaths is an error rather than a warning.
       };
     };
 
