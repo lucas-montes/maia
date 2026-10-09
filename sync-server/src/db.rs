@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -586,7 +587,48 @@ const V1_SCHEMA: &str = r#"
 /// takes `BEGIN IMMEDIATE`, so SQLite serialises concurrent runners and the
 /// loser waits on `busy_timeout` instead of failing. Steps at or below the
 /// current version are skipped, so repeated calls are no-ops.
+/// Serialises migrations across processes.
+///
+/// The service and the desktop app both migrate this database, and the snapshot
+/// step has to sit *outside* the transaction that holds SQLite's write lock,
+/// because `VACUUM INTO` is rejected inside one. That leaves a window where two
+/// runners step the schema at once: one can snapshot a database the other is
+/// midway through altering -- which fails with a misleading error like "table
+/// ingredients already exists" -- or collide writing the same snapshot file and
+/// abort startup with "output file already exists".
+///
+/// Both are symptoms of the same gap, so this closes it at the source: one runner
+/// migrates at a time, and the others wait and then find nothing to do.
+///
+/// A separate database file carries the lock so taking it cannot interfere with
+/// the write lock the migration itself needs. SQLite drops it when the connection
+/// closes, including on panic or `SIGKILL`, so a runner that dies mid-migration
+/// cannot wedge the next start.
+struct MigrationLock {
+    /// Held only for its `Drop`: closing the connection rolls back the open
+    /// transaction, which is what releases the lock.
+    _conn: Connection,
+}
+
+impl MigrationLock {
+    fn acquire(db_path: &Path) -> anyhow::Result<Self> {
+        let lock_path = db_path.with_extension("migrate.lock");
+        let conn = Connection::open(&lock_path)
+            .with_context(|| format!("opening migration lock {}", lock_path.display()))?;
+        // Long enough to outlast a big VACUUM on the main database.
+        conn.execute_batch("PRAGMA busy_timeout = 120000;")?;
+        // EXCLUSIVE is taken at BEGIN rather than at first write so the lock is
+        // held from here to the end of the migration with no gaps.
+        conn.execute_batch("BEGIN EXCLUSIVE;")
+            .with_context(|| format!("waiting for the migration lock {}", lock_path.display()))?;
+        tracing::debug!(path = %lock_path.display(), "held migration lock");
+        Ok(Self { _conn: conn })
+    }
+}
+
 pub fn migrate(conn: &Connection) -> anyhow::Result<()> {
+    let db_path = PathBuf::from(conn.path().context("connection has no database path")?);
+    let _lock = MigrationLock::acquire(&db_path)?;
     conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
 
     let current = user_version(conn)?;
@@ -704,8 +746,28 @@ fn snapshot(conn: &Connection, from_version: i64) -> anyhow::Result<Option<PathB
     let dir = path.parent().unwrap_or(Path::new(".")).join("snapshots");
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let target = dir.join(format!("maia.v{from_version}.db"));
-    // An interrupted earlier attempt may have left a partial file behind.
-    let _ = fs::remove_file(&target);
+
+    // Only one runner reaches here at a time (see [MigrationLock]), so checking the
+    // target first is no longer a race.
+    //
+    // A snapshot for version N exists to hold the state from *before* N. Re-taking
+    // one that is already good would capture a later state under an earlier name,
+    // so it is kept. One that is unreadable is what an interrupted VACUUM leaves
+    // behind, and it must be replaced rather than trusted.
+    match fs::metadata(&target) {
+        Ok(_) if is_readable_database(&target) => {
+            tracing::debug!(path = %target.display(), "snapshot already captured");
+            rotate_snapshots(&dir, SNAPSHOT_KEEP)?;
+            return Ok(Some(target));
+        }
+        Ok(_) => {
+            tracing::warn!(path = %target.display(), "replacing unreadable snapshot");
+            fs::remove_file(&target)
+                .with_context(|| format!("removing stale snapshot {}", target.display()))?;
+        }
+        Err(_) => {}
+    }
+
     // `VACUUM INTO` takes a literal, not a bound parameter. This path is derived
     // from our own database file, never from a request.
     let escaped = target.to_string_lossy().replace('\'', "''");
@@ -713,6 +775,21 @@ fn snapshot(conn: &Connection, from_version: i64) -> anyhow::Result<Option<PathB
         .with_context(|| format!("snapshotting database to {}", target.display()))?;
     rotate_snapshots(&dir, SNAPSHOT_KEEP)?;
     Ok(Some(target))
+}
+
+/// True when [path] looks like a SQLite database.
+///
+/// Checks the 16-byte file header rather than just opening the file, because a
+/// zero-length file and a `VACUUM INTO` interrupted part way through both open
+/// without error -- and trusting either as a rollback target would leave something
+/// that cannot be restored.
+fn is_readable_database(path: &Path) -> bool {
+    const HEADER: &[u8; 16] = b"SQLite format 3\0";
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; 16];
+    file.read_exact(&mut header).is_ok() && &header == HEADER
 }
 
 /// Filesystem path of the database, or `None` for in-memory databases.
@@ -761,8 +838,7 @@ mod tests {
 
     /// Unique scratch directory, removed by the caller.
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("maia-test-{tag}-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("maia-test-{tag}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -783,9 +859,16 @@ mod tests {
         let conn = pool.lock().unwrap();
         assert_eq!(super::user_version(&conn).unwrap(), super::LATEST_VERSION);
         let count: i64 = conn
-            .query_row("SELECT count(*) FROM sqlite_master WHERE type='table'", [], |r| r.get(0))
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert!(count >= 30, "expected the v1 schema to be created, saw {count} tables");
+        assert!(
+            count >= 30,
+            "expected the v1 schema to be created, saw {count} tables"
+        );
     }
 
     /// Running the runner again on an up-to-date database does nothing.
@@ -831,7 +914,9 @@ mod tests {
         super::migrate(&conn).unwrap();
 
         assert_eq!(super::user_version(&conn).unwrap(), super::LATEST_VERSION);
-        let n: i64 = conn.query_row("SELECT count(*) FROM urls WHERE id='u1'", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM urls WHERE id='u1'", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1, "migration must not lose rows");
         // v1 has to actually run, otherwise tables added after this database was
         // created are never created at all.
@@ -927,14 +1012,68 @@ mod tests {
 
         let err = super::migrate(&conn).unwrap_err().to_string();
         assert!(err.contains("newer"), "unhelpful error: {err}");
-        assert!(err.contains("rollback"), "should name the rollback case: {err}");
+        assert!(
+            err.contains("rollback"),
+            "should name the rollback case: {err}"
+        );
     }
 
-    /// Each version change is preceded by a consistent snapshot named for the
-    /// version it was taken at.
+    /// A snapshot is a faithful copy of the database at the moment it is taken.
+    ///
+    /// Rows are committed and the version stamped back to 0 so the migration has
+    /// real work to do, and the earlier snapshots are cleared so these are genuine
+    /// first captures rather than the reuse path.
     #[test]
-    fn snapshot_written_before_each_migration() {
+    fn snapshot_captures_committed_rows() {
         let dir = temp_dir("snapshot");
+        let conn = Connection::open(dir.join("maia.db")).unwrap();
+        super::migrate(&conn).unwrap();
+        for (id, path, at) in [("r1", "/tmp/x.jpg", 1000i64), ("r2", "/tmp/y.jpg", 2000)] {
+            conn.execute(
+                "INSERT INTO receipts (id, local_path, created_at) VALUES (?1, ?2, ?3)",
+                params![id, path, at],
+            )
+            .unwrap();
+        }
+        fs::remove_dir_all(dir.join("snapshots")).unwrap();
+        super::set_user_version(&conn, 0).unwrap();
+
+        super::migrate(&conn).unwrap();
+
+        let taken = dir.join("snapshots").join("maia.v0.db");
+        assert!(taken.exists(), "expected {} to exist", taken.display());
+        let snap = Connection::open(&taken).unwrap();
+        let n: i64 = snap
+            .query_row("SELECT count(*) FROM receipts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2, "snapshot must capture rows committed before it");
+        assert_eq!(super::user_version(&conn).unwrap(), super::LATEST_VERSION);
+    }
+
+    /// Each version change leaves a snapshot named for the version it came from.
+    #[test]
+    fn snapshot_named_for_the_version_it_precedes() {
+        let dir = temp_dir("snapshot-names");
+        let conn = Connection::open(dir.join("maia.db")).unwrap();
+        super::migrate(&conn).unwrap();
+        let snapshots = dir.join("snapshots");
+        for expected in ["maia.v0.db", "maia.v1.db", "maia.v2.db"] {
+            let path = snapshots.join(expected);
+            assert!(path.exists(), "expected {}", path.display());
+            assert!(
+                super::is_readable_database(&path),
+                "{} is not a database",
+                expected
+            );
+        }
+    }
+
+    /// A second migration over the same version must not fail on the snapshot it
+    /// already took. This is what two processes racing produced: each deleted the
+    /// target and the loser hit "output file already exists".
+    #[test]
+    fn existing_snapshot_is_reused_not_deleted() {
+        let dir = temp_dir("snapshot-reuse");
         let db_path = dir.join("maia.db");
         let conn = Connection::open(&db_path).unwrap();
         super::migrate(&conn).unwrap();
@@ -943,21 +1082,126 @@ mod tests {
             [],
         )
         .unwrap();
-        // Pretend an older binary left the database at v1.
         super::set_user_version(&conn, 1).unwrap();
 
         super::migrate(&conn).unwrap();
 
+        let taken = dir.join("snapshots").join("maia.v1.db");
+        let first = fs::read(&taken).unwrap();
+        let modified_at = fs::metadata(&taken).unwrap().modified().unwrap();
+
+        // Run the same migration again against a stale version stamp. Used to fail
+        // with SQLITE_ERROR "output file already exists".
+        super::set_user_version(&conn, 1).unwrap();
+        super::migrate(&conn).expect("re-migrating must not fail");
+
+        assert_eq!(
+            fs::read(&taken).unwrap(),
+            first,
+            "the captured snapshot must be left alone"
+        );
+        assert_eq!(
+            fs::metadata(&taken).unwrap().modified().unwrap(),
+            modified_at,
+            "the snapshot file must not be rewritten"
+        );
+        assert_eq!(super::user_version(&conn).unwrap(), super::LATEST_VERSION);
+    }
+
+    /// An interrupted `VACUUM INTO` leaves a file that is not a database. It must
+    /// be replaced, not trusted, or the rollback target cannot be restored.
+    #[test]
+    fn unreadable_snapshot_is_replaced() {
+        let dir = temp_dir("snapshot-corrupt");
+        let db_path = dir.join("maia.db");
+        let conn = Connection::open(&db_path).unwrap();
+        super::migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO receipts (id, local_path, created_at) VALUES ('r1', '/tmp/x.jpg', 1000)",
+            [],
+        )
+        .unwrap();
+        super::set_user_version(&conn, 1).unwrap();
+
         let snapshots = dir.join("snapshots");
+        fs::create_dir_all(&snapshots).unwrap();
         let taken = snapshots.join("maia.v1.db");
-        assert!(taken.exists(), "expected {} to exist", taken.display());
-        // The snapshot is a real database holding the row committed before the
-        // migration, which is the whole point of taking it first.
+        // Not a database: garbage rather than a truncated SQLite header.
+        fs::write(&taken, b"SQLite format 3 truncated mid-write").unwrap();
+        assert!(!super::is_readable_database(&taken));
+
+        super::migrate(&conn).unwrap();
+
+        assert!(
+            super::is_readable_database(&taken),
+            "corrupt snapshot must be replaced"
+        );
         let snap = Connection::open(&taken).unwrap();
         let n: i64 = snap
-            .query_row("SELECT count(*) FROM receipts WHERE id='r1'", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM receipts WHERE id='r1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(n, 1, "snapshot must capture committed rows");
+        assert_eq!(n, 1, "the replacement must hold the pre-migration row");
+    }
+
+    /// A zero-length file opens fine but is not a database, so it must not pass
+    /// the readability check either.
+    #[test]
+    fn empty_file_is_not_a_usable_snapshot() {
+        let dir = temp_dir("snapshot-empty");
+        let path = dir.join("maia.v0.db");
+        fs::write(&path, b"").unwrap();
+        assert!(!super::is_readable_database(&path));
+    }
+
+    /// Several runners migrating one database at once must all succeed.
+    ///
+    /// This is the service and the desktop app starting together: both migrate,
+    /// and `VACUUM INTO` sits outside the transaction that serialises migration
+    /// steps. Used to fail with "output file already exists" and take down the
+    /// service's startup. The barrier makes them collide on purpose rather than
+    /// hoping the timing lines up.
+    #[test]
+    fn concurrent_runners_do_not_collide_on_a_snapshot() {
+        use std::sync::Barrier;
+
+        let dir = temp_dir("snapshot-concurrent");
+        let db_path = dir.join("maia.db");
+        let conn = Connection::open(&db_path).unwrap();
+        super::migrate(&conn).unwrap();
+        // Leave v1 pending and its snapshot absent, so every runner tries to take
+        // the same one.
+        super::set_user_version(&conn, 1).unwrap();
+        fs::remove_file(dir.join("snapshots").join("maia.v1.db")).unwrap();
+
+        const RUNNERS: usize = 6;
+        let barrier = Arc::new(Barrier::new(RUNNERS));
+        let handles: Vec<_> = (0..RUNNERS)
+            .map(|_| {
+                let path = db_path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let conn = Connection::open(&path).unwrap();
+                    conn.execute_batch("PRAGMA busy_timeout = 10000;").unwrap();
+                    barrier.wait();
+                    super::migrate(&conn)
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("runner thread panicked")
+                .unwrap_or_else(|e| panic!("a concurrent runner failed: {e:#}"));
+        }
+
+        let taken = dir.join("snapshots").join("maia.v1.db");
+        assert!(
+            super::is_readable_database(&taken),
+            "no usable snapshot was installed"
+        );
         assert_eq!(super::user_version(&conn).unwrap(), super::LATEST_VERSION);
     }
 
@@ -981,7 +1225,10 @@ mod tests {
             .collect();
         assert_eq!(kept.len(), super::SNAPSHOT_KEEP);
         assert!(!dir.join("maia.v1.db").exists(), "oldest should be pruned");
-        assert!(dir.join("unrelated.txt").exists(), "unrelated files untouched");
+        assert!(
+            dir.join("unrelated.txt").exists(),
+            "unrelated files untouched"
+        );
     }
     #[test]
     fn unique_constraints_hold() {
@@ -1060,8 +1307,14 @@ mod tests {
         let conn = pool.lock().unwrap();
         conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','A','weightlifting',1000,1000)", []).unwrap();
         conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e2','B','weightlifting',2000,2000)", []).unwrap();
-        let mut stmt = conn.prepare("SELECT id FROM exercises WHERE updated_at > ?1 ORDER BY updated_at").unwrap();
-        let ids: Vec<String> = stmt.query_map(params![1500], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+        let mut stmt = conn
+            .prepare("SELECT id FROM exercises WHERE updated_at > ?1 ORDER BY updated_at")
+            .unwrap();
+        let ids: Vec<String> = stmt
+            .query_map(params![1500], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
         assert_eq!(ids, vec!["e2"]);
     }
 }
