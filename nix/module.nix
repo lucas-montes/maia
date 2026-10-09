@@ -180,6 +180,13 @@ in
         # Same uid as the desktop app, so both can write the shared database and
         # neither is locked out by the other's SQLite sidecars.
         User = cfg.user;
+
+        # Required, and not implied by StateDirectoryMode: ProtectSystem mounts
+        # the whole hierarchy read-only, and StateDirectory is what carves
+        # `dataDir` back out as a writable bind mount owned by `user`. Without
+        # it SQLite cannot create its -wal and -shm sidecars and startup dies
+        # with SQLITE_CANTOPEN, which is where this went missing for a while.
+        StateDirectory = "maia";
         StateDirectoryMode = "0755";
 
         # The exercise images live in a home directory, so /home has to be
