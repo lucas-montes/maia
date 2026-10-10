@@ -109,7 +109,7 @@ pub async fn lookup_ingredient(
     }
     let openfood_url = openfoodfacts::openfood_url(&barcode);
     {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db.get().unwrap();
         if let Some(item) = find_local(&conn, &barcode) {
             return (
                 StatusCode::OK,
@@ -154,7 +154,7 @@ pub async fn import_from_barcode(
         return bad_request("invalid barcode").into_response();
     }
     {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db.get().unwrap();
         if let Some(item) = find_local(&conn, &barcode) {
             return (StatusCode::OK, Json(item)).into_response();
         }
@@ -173,7 +173,7 @@ pub async fn import_from_barcode(
     let id = uuid::Uuid::now_v7().to_string();
     let now = db::server_time_ms();
     {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db.get().unwrap();
         let res = conn.execute(
             "INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, sodium_per100g, fiber_per100g, sugar_per100g, brand, barcode, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             rusqlite::params![
@@ -197,7 +197,7 @@ pub async fn import_from_barcode(
                 .into_response();
         }
     }
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     match find_local(&conn, &barcode) {
         Some(item) => (StatusCode::OK, Json(item)).into_response(),
         None => (

@@ -141,7 +141,7 @@ pub async fn pull_workouts(
 ) -> impl IntoResponse {
     let since = q.since.unwrap_or(0);
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
 
     let mut stmt = conn
         .prepare("SELECT id, name, date, started_at, completed_at, notes, routine_id, template_id, created_at, updated_at FROM workouts WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at")
@@ -234,7 +234,7 @@ pub async fn pull_meals(
 ) -> impl IntoResponse {
     let since = q.since.unwrap_or(0);
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
 
     let mut stmt = conn
         .prepare("SELECT id, name, eaten_at, created_at, updated_at FROM meals WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at")
@@ -305,7 +305,7 @@ pub async fn pull_body_metrics(
 ) -> impl IntoResponse {
     let since = q.since.unwrap_or(0);
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
 
     let mut stmt = conn
         .prepare("SELECT id, date, weight_kg, height_cm, created_at, updated_at FROM body_metrics WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at")

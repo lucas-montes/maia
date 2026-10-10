@@ -2,13 +2,28 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
 };
 
 use anyhow::{Context, bail};
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 
-pub type DbPool = Arc<Mutex<Connection>>;
+/// A pool of SQLite connections rather than one connection behind a mutex.
+///
+/// A single shared connection serialises every handler on one lock, so one slow
+/// query -- `GET /exercises` scans thousands of rows -- stalls every other
+/// request including writes. A pool lets reads proceed alongside each other and
+/// keeps a write from queueing behind an unrelated long read.
+///
+/// The pool is not a licence for concurrent writers: SQLite still serialises
+/// them, and `busy_timeout` below is what turns that serialisation into a short
+/// wait rather than an immediate "database is locked".
+pub type DbPool = Pool<SqliteConnectionManager>;
+
+/// Connections held open. Enough to let every core handle a request at once
+/// without keeping idle connections around indefinitely after a burst.
+const POOL_SIZE: u32 = 8;
 
 pub fn init_db(path: &Path) -> anyhow::Result<DbPool> {
     if let Some(parent) = path.parent() {
@@ -16,14 +31,48 @@ pub fn init_db(path: &Path) -> anyhow::Result<DbPool> {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let conn = if path.as_os_str() == ":memory:" {
-        Connection::open_in_memory()?
-    } else {
-        Connection::open(path)?
-    };
-    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
-    migrate(&conn)?;
-    Ok(Arc::new(Mutex::new(conn)))
+
+    // An in-memory database exists only for the life of its own connection, so
+    // the pool is pinned to exactly one and never idles it out. Handing out two
+    // would give each caller a different empty schema.
+    if path.as_os_str() == ":memory:" {
+        let pool = Pool::builder()
+            .max_size(1)
+            .min_idle(Some(1))
+            .idle_timeout(None)
+            .build(SqliteConnectionManager::memory())
+            .map_err(|e| anyhow::anyhow!("building in-memory pool: {e}"))?;
+        let conn = pool.get()?;
+        migrate(&conn)?;
+        return Ok(pool);
+    }
+
+    // The pragmas have to be attached to the manager, not applied once at startup:
+    // r2d2 opens further connections as the pool grows, and a connection created
+    // without them would fail with "database is locked" the first time it
+    // collided with a writer instead of waiting its turn.
+    let manager = SqliteConnectionManager::file(path).with_init(|conn| {
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA journal_mode = WAL;
+             PRAGMA busy_timeout = 10000;
+             PRAGMA synchronous = NORMAL;",
+        )
+    });
+    let pool = Pool::builder()
+        .max_size(POOL_SIZE)
+        .connection_timeout(std::time::Duration::from_secs(10))
+        .build(manager)
+        .map_err(|e| anyhow::anyhow!("opening database at {}: {e}", path.display()))?;
+
+    // Migrate once on a borrowed connection before the pool is handed out. Every
+    // pooled connection sees the same file, so running it once is enough.
+    {
+        let conn = pool.get()?;
+        migrate(&conn)?;
+    }
+
+    Ok(pool)
 }
 
 pub fn init_memory() -> anyhow::Result<DbPool> {
@@ -629,7 +678,6 @@ impl MigrationLock {
 pub fn migrate(conn: &Connection) -> anyhow::Result<()> {
     let db_path = PathBuf::from(conn.path().context("connection has no database path")?);
     let _lock = MigrationLock::acquire(&db_path)?;
-    conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
 
     let current = user_version(conn)?;
     if current > LATEST_VERSION {
@@ -834,6 +882,7 @@ pub fn server_time_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use rusqlite::params;
 
     /// Unique scratch directory, removed by the caller.
@@ -856,7 +905,7 @@ mod tests {
     #[test]
     fn fresh_db_reaches_latest_version() {
         let pool = init_memory().unwrap();
-        let conn = pool.lock().unwrap();
+        let conn = pool.get().unwrap();
         assert_eq!(super::user_version(&conn).unwrap(), super::LATEST_VERSION);
         let count: i64 = conn
             .query_row(
@@ -875,7 +924,7 @@ mod tests {
     #[test]
     fn migrate_is_idempotent() {
         let pool = init_memory().unwrap();
-        let conn = pool.lock().unwrap();
+        let conn = pool.get().unwrap();
         super::migrate(&conn).unwrap();
         super::migrate(&conn).unwrap();
         assert_eq!(super::user_version(&conn).unwrap(), super::LATEST_VERSION);
@@ -1006,7 +1055,7 @@ mod tests {
     #[test]
     fn database_newer_than_binary_is_refused() {
         let pool = init_memory().unwrap();
-        let conn = pool.lock().unwrap();
+        let conn = pool.get().unwrap();
         super::migrate(&conn).unwrap();
         super::set_user_version(&conn, super::LATEST_VERSION + 5).unwrap();
 
@@ -1205,6 +1254,129 @@ mod tests {
         assert_eq!(super::user_version(&conn).unwrap(), super::LATEST_VERSION);
     }
 
+    /// The pool must hand out more than one connection at a time.
+    ///
+    /// The point of the pool is that a slow read no longer holds every other
+    /// request behind it. Holding two connections simultaneously is only
+    /// possible if they really are distinct, so this fails if someone reverts
+    /// to a single connection behind a mutex.
+    #[test]
+    fn pool_hands_out_independent_connections() {
+        let dir = temp_dir("pool");
+        let pool = init_db(&dir.join("maia.db")).unwrap();
+
+        let first = pool.get().unwrap();
+        let second = pool.get().unwrap();
+
+        // Both are live at once, so the first has not been blocked or recycled.
+        first.execute_batch("SELECT 1;").unwrap();
+        second.execute_batch("SELECT 1;").unwrap();
+
+        // And a write through one is visible through the other, proving they
+        // address the same file rather than separate databases.
+        first.execute("INSERT INTO stores (id, name, created_at, updated_at) VALUES ('s1','S1',1,1)", []).unwrap();
+        let found: i64 = second
+            .query_row("SELECT count(*) FROM stores WHERE id = 's1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(found, 1, "pooled connections must share one database file");
+    }
+
+    /// The pragmas must reach *every* connection the pool opens, not just the
+    /// one that ran the migration at startup.
+    #[test]
+    fn every_pooled_connection_is_configured() {
+        let dir = temp_dir("pool-config");
+        let pool = init_db(&dir.join("maia.db")).unwrap();
+        // Ask for more connections than the migration used, so any connection
+        // opened afterwards is checked too.
+        let conns: Vec<_> = (0..3).map(|_| pool.get().unwrap()).collect();
+        for (i, conn) in conns.iter().enumerate() {
+            let busy: i64 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0)).unwrap();
+            let journal: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+            let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+            assert_eq!(busy, 10_000, "connection {i} is missing busy_timeout");
+            assert_eq!(journal.to_lowercase(), "wal", "connection {i} is not in WAL mode");
+            assert_eq!(fk, 1, "connection {i} is not enforcing foreign keys");
+        }
+    }
+
+    /// Two writers racing for the same database both land.
+    ///
+    /// The channels make the collision certain rather than hoping two threads
+    /// overlap: the holder reports that it has the write lock before the waiter
+    /// is started, and only commits once the waiter has had time to try.
+    ///
+    /// This uses the same DEFERRED transaction the push handlers use, so it
+    /// checks the pattern the code actually runs. It guards against the pool
+    /// handing out connections that cannot see each other's committed work.
+    #[test]
+    fn concurrent_writers_both_land() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+
+        let dir = temp_dir("pool-write");
+        let db_path = dir.join("maia.db");
+        let pool = init_db(&db_path).unwrap();
+
+        let (held_tx, held_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+
+        let holder_db = db_path.clone();
+        let holder = std::thread::spawn(move || {
+            let conn = r2d2::Pool::builder()
+                .max_size(1)
+                .build(SqliteConnectionManager::file(holder_db))
+                .unwrap()
+                .get()
+                .unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            tx.execute(
+                "INSERT INTO stores (id, name, created_at, updated_at) VALUES ('held','Held',1,1)",
+                [],
+            )
+            .unwrap();
+            // Announce the lock is taken, then hold it until told to let go.
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            tx.commit().unwrap();
+        });
+
+        // Only proceed once the write lock is genuinely held.
+        held_rx.recv().unwrap();
+
+        let waiter_db = db_path.clone();
+        let waiter = std::thread::spawn(move || {
+            let conn = r2d2::Pool::builder()
+                .max_size(1)
+                .build(SqliteConnectionManager::file(waiter_db))
+                .unwrap()
+                .get()
+                .unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            tx.execute(
+                "INSERT INTO stores (id, name, created_at, updated_at) VALUES ('waited','Waited',1,1)",
+                [],
+            )?;
+            tx.commit()
+        });
+
+        // Give the waiter time to attempt -- and therefore block on -- the lock.
+        std::thread::sleep(Duration::from_millis(300));
+        release_tx.send(()).unwrap();
+
+        holder.join().expect("holder thread panicked");
+        waiter
+            .join()
+            .expect("waiter thread panicked")
+            .expect("waiter write should succeed once the holder commits");
+
+        let conn = pool.get().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM stores WHERE id IN ('held','waited')", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2, "both writes should have landed");
+    }
+
     /// Rotation prunes the oldest snapshots once the retention count is exceeded.
     #[test]
     fn snapshot_rotation_keeps_the_newest() {
@@ -1233,7 +1405,7 @@ mod tests {
     #[test]
     fn unique_constraints_hold() {
         let pool = init_memory().unwrap();
-        let conn = pool.lock().unwrap();
+        let conn = pool.get().unwrap();
         conn.execute(
             "INSERT INTO stores (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
             params!["s1", "Carrefour", 1000, 1000],
@@ -1274,7 +1446,7 @@ mod tests {
     #[test]
     fn can_insert_aggregates() {
         let pool = init_memory().unwrap();
-        let conn = pool.lock().unwrap();
+        let conn = pool.get().unwrap();
         conn.execute(
             "INSERT INTO workouts (id, name, date, created_at, updated_at) VALUES ('w1', 'Push', 1000, 1000, 1000)",
             [],
@@ -1304,7 +1476,7 @@ mod tests {
     #[test]
     fn since_filtering() {
         let pool = init_memory().unwrap();
-        let conn = pool.lock().unwrap();
+        let conn = pool.get().unwrap();
         conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','A','weightlifting',1000,1000)", []).unwrap();
         conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e2','B','weightlifting',2000,2000)", []).unwrap();
         let mut stmt = conn

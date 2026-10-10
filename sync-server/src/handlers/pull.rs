@@ -158,7 +158,7 @@ pub async fn pull_exercises(
 ) -> impl IntoResponse {
     let since = q.since.unwrap_or(0);
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
 
     let mut stmt = conn
         .prepare(
@@ -220,7 +220,7 @@ pub async fn pull_ingredients(
 ) -> impl IntoResponse {
     let since = q.since.unwrap_or(0);
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
 
     let mut stmt = conn
         .prepare(
@@ -347,7 +347,7 @@ pub async fn pull_fx_rates(
 ) -> impl IntoResponse {
     let since = q.since.unwrap_or(0);
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let mut stmt = conn
         .prepare("SELECT code, rate_to_base, rate_date, updated_at FROM fx_rates WHERE base_code = ?1 AND rate_date = ?2 AND updated_at > ?3 AND deleted_at IS NULL ORDER BY updated_at")
         .unwrap();
@@ -400,7 +400,7 @@ pub struct PullTagsResponse { pub server_time: i64, pub items: Vec<serde_json::V
 pub async fn pull_foods(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
     let since = q.since.unwrap_or(0);
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
 
     // One query for every food that changed, then one for the composition of
     // exactly those. Ordering by ingredient name matches how clients present
@@ -435,63 +435,63 @@ pub async fn pull_foods(State(state): State<AppState>, Query(q): Query<SinceQuer
     Json(PullFoodsResponse{server_time, items, deleted})
 }
 pub async fn pull_templates(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
-    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.lock().unwrap();
+    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
     let mut stmt = conn.prepare("SELECT id, name, notes, start_date, recurrence, excluded_dates, source_routine_id, created_at, updated_at FROM workout_templates WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
     let items: Vec<serde_json::Value> = stmt.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"notes":r.get::<_,Option<String>>(2)?,"startDate":r.get::<_,i64>(3)?,"recurrence":r.get::<_,Option<String>>(4)?,"excludedDates":r.get::<_,Option<String>>(5)?,"sourceRoutineId":r.get::<_,Option<String>>(6)?,"createdAt":r.get::<_,i64>(7)?,"updatedAt":r.get::<_,i64>(8)?}))).unwrap().filter_map(|r|r.ok()).collect();
     let deleted: Vec<String> = conn.prepare("SELECT id FROM workout_templates WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
     Json(PullTemplatesResponse{server_time, items, deleted})
 }
 pub async fn pull_notes(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
-    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.lock().unwrap();
+    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
     let mut stmt = conn.prepare("SELECT id, title, body, updated_at, created_at FROM notes WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
     let items: Vec<serde_json::Value> = stmt.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?,"body":r.get::<_,String>(2)?,"updatedAt":r.get::<_,i64>(3)?,"createdAt":r.get::<_,i64>(4)?}))).unwrap().filter_map(|r|r.ok()).collect();
     let deleted: Vec<String> = conn.prepare("SELECT id FROM notes WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
     Json(PullNotesResponse{server_time, items, deleted})
 }
 pub async fn pull_tasks(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
-    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.lock().unwrap();
+    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
     let mut stmt = conn.prepare("SELECT id, date, title, done, task_status, carry_over, sort_order, due_date, due_time_minutes, start_time_minutes, end_time_minutes, notes, workout_id, workout_template_id, recurrence, series_id, created_at, updated_at FROM tasks WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
     let items: Vec<serde_json::Value> = stmt.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"date":r.get::<_,i64>(1)?,"title":r.get::<_,String>(2)?,"done":r.get::<_,i64>(3)?,"taskStatus":r.get::<_,Option<i64>>(4)?,"carryOver":r.get::<_,i64>(5)?!=0,"sortOrder":r.get::<_,i64>(6)?,"dueDate":r.get::<_,Option<i64>>(7)?,"dueTimeMinutes":r.get::<_,Option<i64>>(8)?,"startTimeMinutes":r.get::<_,Option<i64>>(9)?,"endTimeMinutes":r.get::<_,Option<i64>>(10)?,"notes":r.get::<_,Option<String>>(11)?,"workoutId":r.get::<_,Option<String>>(12)?,"workoutTemplateId":r.get::<_,Option<String>>(13)?,"recurrence":r.get::<_,Option<String>>(14)?,"seriesId":r.get::<_,Option<String>>(15)?,"createdAt":r.get::<_,i64>(16)?,"updatedAt":r.get::<_,i64>(17)?}))).unwrap().filter_map(|r|r.ok()).collect();
     let deleted: Vec<String> = conn.prepare("SELECT id FROM tasks WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
     Json(PullTasksResponse{server_time, items, deleted})
 }
 pub async fn pull_goals(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
-    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.lock().unwrap();
+    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
     let mut stmt = conn.prepare("SELECT id, title, description, start_date, end_date, status, target_type, target_value, baseline_value, unit, reminder_enabled, reminder_time_minutes, created_at, updated_at FROM goals WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
     let items: Vec<serde_json::Value> = stmt.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?,"description":r.get::<_,Option<String>>(2)?,"startDate":r.get::<_,i64>(3)?,"endDate":r.get::<_,Option<i64>>(4)?,"status":r.get::<_,String>(5)?,"targetType":r.get::<_,String>(6)?,"targetValue":r.get::<_,Option<f64>>(7)?,"baselineValue":r.get::<_,Option<f64>>(8)?,"unit":r.get::<_,Option<String>>(9)?,"reminderEnabled":r.get::<_,i64>(10)?!=0,"reminderTimeMinutes":r.get::<_,i64>(11)?,"createdAt":r.get::<_,i64>(12)?,"updatedAt":r.get::<_,i64>(13)?}))).unwrap().filter_map(|r|r.ok()).collect();
     let deleted: Vec<String> = conn.prepare("SELECT id FROM goals WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
     Json(PullGoalsResponse{server_time, items, deleted})
 }
 pub async fn pull_transactions(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
-    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.lock().unwrap();
+    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
     let mut stmt = conn.prepare("SELECT id, type, amount, currency_code, amount_base, rate_used, account_id, to_account_id, category, date, note, receipt_id, is_draft, created_at, updated_at FROM transactions WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
     let items: Vec<serde_json::Value> = stmt.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"type":r.get::<_,String>(1)?,"amount":r.get::<_,f64>(2)?,"currencyCode":r.get::<_,String>(3)?,"amountBase":r.get::<_,f64>(4)?,"rateUsed":r.get::<_,f64>(5)?,"accountId":r.get::<_,Option<String>>(6)?,"toAccountId":r.get::<_,Option<String>>(7)?,"category":r.get::<_,Option<String>>(8)?,"date":r.get::<_,i64>(9)?,"note":r.get::<_,Option<String>>(10)?,"receiptId":r.get::<_,Option<String>>(11)?,"isDraft":r.get::<_,i64>(12)?!=0,"createdAt":r.get::<_,i64>(13)?,"updatedAt":r.get::<_,i64>(14)?}))).unwrap().filter_map(|r|r.ok()).collect();
     let deleted: Vec<String> = conn.prepare("SELECT id FROM transactions WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
     Json(PullTransactionsResponse{server_time, items, deleted})
 }
 pub async fn pull_accounts(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
-    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.lock().unwrap();
+    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
     let mut stmt = conn.prepare("SELECT id, name, type, opening_balance, note, created_at, updated_at FROM accounts WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
     let items: Vec<serde_json::Value> = stmt.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"type":r.get::<_,String>(2)?,"openingBalance":r.get::<_,f64>(3)?,"note":r.get::<_,Option<String>>(4)?,"createdAt":r.get::<_,i64>(5)?,"updatedAt":r.get::<_,i64>(6)?}))).unwrap().filter_map(|r|r.ok()).collect();
     let deleted: Vec<String> = conn.prepare("SELECT id FROM accounts WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
     Json(PullAccountsResponse{server_time, items, deleted})
 }
 pub async fn pull_receipts(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
-    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.lock().unwrap();
+    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
     let mut stmt = conn.prepare("SELECT id, local_path, remote_path, upload_status, parsed, parsed_json, transaction_id, created_at, updated_at FROM receipts WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
     let items: Vec<serde_json::Value> = stmt.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"localPath":r.get::<_,String>(1)?,"remotePath":r.get::<_,Option<String>>(2)?,"uploadStatus":r.get::<_,i64>(3)?,"parsed":r.get::<_,i64>(4)?!=0,"parsedJson":r.get::<_,Option<String>>(5)?,"transactionId":r.get::<_,Option<String>>(6)?,"createdAt":r.get::<_,i64>(7)?,"updatedAt":r.get::<_,i64>(8)?}))).unwrap().filter_map(|r|r.ok()).collect();
     let deleted: Vec<String> = conn.prepare("SELECT id FROM receipts WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
     Json(PullReceiptsResponse{server_time, items, deleted})
 }
 pub async fn pull_experiments(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
-    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.lock().unwrap();
+    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
     let mut stmt = conn.prepare("SELECT id, name, purpose, start_date, end_date, status, categories, reminder_enabled, reminder_time_minutes, created_at, updated_at FROM experiments WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
     let items: Vec<serde_json::Value> = stmt.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"purpose":r.get::<_,Option<String>>(2)?,"startDate":r.get::<_,i64>(3)?,"endDate":r.get::<_,Option<i64>>(4)?,"status":r.get::<_,String>(5)?,"categories":r.get::<_,Option<String>>(6)?,"reminderEnabled":r.get::<_,i64>(7)?!=0,"reminderTimeMinutes":r.get::<_,i64>(8)?,"createdAt":r.get::<_,i64>(9)?,"updatedAt":r.get::<_,i64>(10)?}))).unwrap().filter_map(|r|r.ok()).collect();
     let deleted: Vec<String> = conn.prepare("SELECT id FROM experiments WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
     Json(PullExperimentsResponse{server_time, items, deleted})
 }
 pub async fn pull_tags(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
-    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.lock().unwrap();
+    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
     let mut stmt = conn.prepare("SELECT id, name, color, sort_order, created_at, updated_at FROM tags WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
     let items: Vec<serde_json::Value> = stmt.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"color":r.get::<_,Option<i64>>(2)?,"sortOrder":r.get::<_,i64>(3)?,"createdAt":r.get::<_,i64>(4)?,"updatedAt":r.get::<_,i64>(5)?}))).unwrap().filter_map(|r|r.ok()).collect();
     let deleted: Vec<String> = conn.prepare("SELECT id FROM tags WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
@@ -536,7 +536,7 @@ pub struct PullIngredientCatalogResponse {
 
 pub async fn pull_exercise_catalog(State(state): State<AppState>) -> impl IntoResponse {
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let mut stmt = conn
         .prepare("SELECT id, name, image_path FROM exercises WHERE deleted_at IS NULL ORDER BY name")
         .unwrap();
@@ -557,7 +557,7 @@ pub async fn pull_exercise_catalog(State(state): State<AppState>) -> impl IntoRe
 
 pub async fn pull_ingredient_catalog(State(state): State<AppState>) -> impl IntoResponse {
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let mut stmt = conn
         .prepare("SELECT id, name, barcode FROM ingredients WHERE deleted_at IS NULL ORDER BY name")
         .unwrap();
@@ -612,7 +612,7 @@ pub async fn get_exercise_item(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let mut stmt = conn
         .prepare(
             "SELECT id, name, exercise_type, body_part, equipment, primary_muscle, secondary_muscle, instructions, tips, faqs, keywords, similar_to, tags, is_canonical, created_at, updated_at, image_path, video_path FROM exercises WHERE id = ?1 AND deleted_at IS NULL",
@@ -629,7 +629,7 @@ pub async fn get_ingredient_item(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let mut stmt = conn
         .prepare(
             "SELECT id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, sodium_per100g, fiber_per100g, sugar_per100g, is_archived, brand, barcode, created_at, updated_at FROM ingredients WHERE id = ?1 AND deleted_at IS NULL",

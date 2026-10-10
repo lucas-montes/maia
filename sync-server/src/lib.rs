@@ -85,7 +85,7 @@ mod tests {
         use crate::db;
         let pool = db::init_memory().unwrap();
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Squat','weightlifting',1000,1000)", []).unwrap();
             conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e2','Bench','weightlifting',2000,2000)", []).unwrap();
             conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at, deleted_at) VALUES ('e3','Dead','weightlifting',3000,3000,3500)", []).unwrap();
@@ -128,7 +128,7 @@ mod tests {
         use crate::db;
         let pool = db::init_memory().unwrap();
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             conn.execute("INSERT INTO stores (id, name, created_at, updated_at) VALUES ('s1','Carrefour',1000,1000)", []).unwrap();
             conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i1','Oats',100,10,20,5,1000,1000)", []).unwrap();
             conn.execute("INSERT INTO ingredient_pictures (id, ingredient_id, image_path, sort_order, created_at, updated_at) VALUES ('p1','i1','/tmp/a.jpg',0,1000,1000)", []).unwrap();
@@ -162,7 +162,7 @@ mod tests {
         use crate::db;
         let pool = db::init_memory().unwrap();
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Squat','weightlifting',1000,1000)", []).unwrap();
             conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at, deleted_at) VALUES ('e9','Gone','weightlifting',1000,1000,2000)", []).unwrap();
             conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, barcode, created_at, updated_at) VALUES ('i1','Oats',100,10,20,5,'123',1000,1000)", []).unwrap();
@@ -231,7 +231,7 @@ mod tests {
         use crate::db;
         let pool = db::init_memory().unwrap();
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             conn.execute("INSERT INTO fx_rates (code, base_code, rate_date, rate_to_base, updated_at) VALUES ('EUR','USD','2026-09-08',0.92,1000)", []).unwrap();
             conn.execute("INSERT INTO fx_rates (code, base_code, rate_date, rate_to_base, updated_at) VALUES ('GBP','USD','2026-09-08',0.78,2000)", []).unwrap();
             conn.execute("INSERT INTO fx_rates (code, base_code, rate_date, rate_to_base, updated_at) VALUES ('EUR','USD','2026-09-09',0.93,3000)", []).unwrap();
@@ -265,7 +265,7 @@ mod tests {
         use crate::db;
         let pool = db::init_memory().unwrap();
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, barcode, created_at, updated_at) VALUES ('i1','Oats',100,10,20,5,'3017620422003',1000,1000)", []).unwrap();
         }
         let (port, handle) = crate::server::start_test_server_with_db(pool).await;
@@ -310,7 +310,7 @@ mod tests {
         use crate::db;
         let pool = db::init_memory().unwrap();
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             conn.execute("INSERT INTO stores (id, name, created_at, updated_at) VALUES ('s1','Carrefour',1000,1000)", []).unwrap();
         }
         let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
@@ -333,7 +333,7 @@ mod tests {
         let resp2 = client.post(&url).header("Authorization","Bearer test-key").json(&payload).send().await.unwrap();
         assert_eq!(resp2.status(), 200);
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             let count: i64 = conn.query_row("SELECT count(*) FROM ingredients WHERE id='i1'", [], |r| r.get(0)).unwrap();
             assert_eq!(count, 1);
             let count_p: i64 = conn.query_row("SELECT count(*) FROM ingredient_pictures WHERE id='p1'", [], |r| r.get(0)).unwrap();
@@ -347,7 +347,7 @@ mod tests {
         use crate::db;
         let pool = db::init_memory().unwrap();
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             // Composition parts must already exist: food_ingredients has a real
             // FK and push unwraps, so an unknown part is skipped rather than
             // aborting the whole request.
@@ -375,7 +375,7 @@ mod tests {
         let resp2 = client.post(&url).header("Authorization","Bearer test-key").json(&payload).send().await.unwrap();
         assert_eq!(resp2.status(), 200);
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             let count: i64 = conn.query_row("SELECT count(*) FROM foods WHERE id='f1'", [], |r| r.get(0)).unwrap();
             assert_eq!(count, 1);
             let count_c: i64 = conn.query_row("SELECT count(*) FROM food_ingredients WHERE food_id='f1'", [], |r| r.get(0)).unwrap();
@@ -397,7 +397,7 @@ mod tests {
         let resp = client.post(&url).header("Authorization","Bearer test-key").json(&trimmed).send().await.unwrap();
         assert_eq!(resp.status(), 200);
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             let rows: Vec<(String, f64)> = conn
                 .prepare("SELECT ingredient_id, amount FROM food_ingredients WHERE food_id='f1' AND deleted_at IS NULL")
                 .unwrap()
@@ -420,7 +420,7 @@ mod tests {
         let resp = client.post(&url).header("Authorization","Bearer test-key").json(&unknown).send().await.unwrap();
         assert_eq!(resp.status(), 200);
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             let count_c: i64 = conn.query_row("SELECT count(*) FROM food_ingredients WHERE food_id='f1' AND deleted_at IS NULL", [], |r| r.get(0)).unwrap();
             assert_eq!(count_c, 0);
         }
@@ -432,7 +432,7 @@ mod tests {
         use crate::db;
         let pool = db::init_memory().unwrap();
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i2','Oats raw',400,13,60,7,1000,1000)", []).unwrap();
             conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i3','Honey',300,0,80,0,1000,1000)", []).unwrap();
             conn.execute("INSERT INTO foods (id, name, created_at, updated_at) VALUES ('f1','Granola',1000,1000)", []).unwrap();
@@ -470,7 +470,7 @@ mod tests {
         use crate::db;
         let pool = db::init_memory().unwrap();
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Bench','weightlifting',1000,1000)", []).unwrap();
         }
         let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
@@ -483,7 +483,7 @@ mod tests {
         let resp = client.post(format!("http://127.0.0.1:{port}/workouts")).header("Authorization","Bearer test-key").json(&payload).send().await.unwrap();
         assert_eq!(resp.status(), 405);
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             let c: i64 = conn.query_row("SELECT count(*) FROM workouts WHERE id='w1'", [], |r| r.get(0)).unwrap();
             assert_eq!(c, 0);
         }
@@ -495,7 +495,7 @@ mod tests {
         use crate::db;
         let pool = db::init_memory().unwrap();
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Bench','weightlifting',1000,1000)", []).unwrap();
         }
         let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
@@ -508,7 +508,7 @@ mod tests {
         let resp = client.post(format!("http://127.0.0.1:{port}/templates")).header("Authorization","Bearer test-key").json(&payload).send().await.unwrap();
         assert_eq!(resp.status(), 200);
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             let c: i64 = conn.query_row("SELECT count(*) FROM workout_templates WHERE id='t1'", [], |r| r.get(0)).unwrap();
             assert_eq!(c, 1);
         }
@@ -525,7 +525,7 @@ mod tests {
         let resp = client.post(format!("http://127.0.0.1:{port}/receipt-pictures")).header("Authorization","Bearer test-key").json(&payload).send().await.unwrap();
         assert_eq!(resp.status(), 200);
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             let c: i64 = conn.query_row("SELECT count(*) FROM receipts WHERE id='r1'", [], |r| r.get(0)).unwrap();
             assert_eq!(c, 1);
         }
@@ -718,7 +718,7 @@ mod tests {
         assert_eq!(std::fs::read(&stored).unwrap(), png);
 
         let pool = crate::db::init_db(&dir.join("maia.db")).unwrap();
-        let conn = pool.lock().unwrap();
+        let conn = pool.get().unwrap();
         let row: (String, i64, i64) = conn
             .query_row(
                 "SELECT remote_path, upload_status, parsed FROM receipts WHERE id = 'r-persist'",
@@ -858,7 +858,7 @@ mod tests {
         use crate::db;
         let pool = db::init_memory().unwrap();
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             conn.execute(
                 "INSERT INTO receipts (id, local_path, upload_status, parsed, created_at, archived_path, archived_at)
                  VALUES ('r-arch', '/tmp/a.jpg', 2, 1, 1000, 'receipts_archive/r-arch', 5000)",
@@ -877,7 +877,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
-        let conn = pool.lock().unwrap();
+        let conn = pool.get().unwrap();
         let (arch_path, arch_at): (Option<String>, Option<i64>) = conn
             .query_row(
                 "SELECT archived_path, archived_at FROM receipts WHERE id='r-arch'",
@@ -931,7 +931,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
 
-        let conn = pool.lock().unwrap();
+        let conn = pool.get().unwrap();
         let remote: Option<String> = conn
             .query_row(
                 "SELECT remote_path FROM receipts WHERE id='r-rel'",
@@ -1200,7 +1200,7 @@ mod tests {
         use crate::db;
         let pool = db::init_memory().unwrap();
         {
-            let conn = pool.lock().unwrap();
+            let conn = pool.get().unwrap();
             conn.execute("INSERT INTO workouts (id, name, date, created_at, updated_at) VALUES ('w1','Push',1000,1000,1000)", []).unwrap();
             conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Bench','weightlifting',1000,1000)", []).unwrap();
             conn.execute("INSERT INTO workout_exercises (id, workout_id, exercise_id, sort_order, updated_at) VALUES ('we1','w1','e1',0,1000)", []).unwrap();

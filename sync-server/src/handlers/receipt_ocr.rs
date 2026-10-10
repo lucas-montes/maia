@@ -161,7 +161,7 @@ pub async fn upload_receipt_picture(
     let relative = format!("{PICTURE_SUBDIR}/{file_name}");
     let now = db::server_time_ms();
     let result = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db.get().unwrap();
         conn.execute(
             "INSERT INTO receipts (id, local_path, remote_path, upload_status, parsed, parsed_json, parse_error, transaction_id, created_at, updated_at, deleted_at)
              VALUES (?1, '', ?2, ?3, 0, NULL, NULL, NULL, ?4, ?5, NULL)
@@ -221,7 +221,7 @@ async fn run_ocr(
     let outcome = match model.extract_image_bytes::<ParsedReceipt>(bytes, &mime).await {
         Ok(Some(parsed)) => {
             let json_text = serde_json::to_string(&parsed).unwrap_or_default();
-            let conn = db_pool.lock().unwrap();
+            let conn = db_pool.get().unwrap();
             let _ = conn.execute(
                 "UPDATE receipts SET parsed = 1, parsed_json = ?1, parse_error = NULL, updated_at = ?2 WHERE id = ?3",
                 rusqlite::params![json_text, now, id],
@@ -237,7 +237,7 @@ async fn run_ocr(
 
     if let Err(message) = outcome {
         tracing::error!(id = %id, error = %message, "receipt parse failed");
-        let conn = db_pool.lock().unwrap();
+        let conn = db_pool.get().unwrap();
         let _ = conn.execute(
             "UPDATE receipts SET parsed = 0, parse_error = ?1, updated_at = ?2 WHERE id = ?3",
             rusqlite::params![message, now, id],
@@ -256,7 +256,7 @@ pub async fn get_receipt_parse(
     if !is_safe_id(&id) {
         return error_response(StatusCode::BAD_REQUEST, "invalid id").into_response();
     }
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let row = conn
         .query_row(
             "SELECT upload_status, parsed, parsed_json, parse_error FROM receipts WHERE id = ?1 AND deleted_at IS NULL",
@@ -319,7 +319,7 @@ pub async fn get_receipt_picture(
     // Scoped so the `MutexGuard` cannot live across the `await` below — it is
     // not `Send`, and axum requires handler futures to be.
     let stored = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db.get().unwrap();
         conn.query_row(
             "SELECT remote_path, archived_path FROM receipts WHERE id = ?1 AND deleted_at IS NULL",
             rusqlite::params![id],

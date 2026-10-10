@@ -242,7 +242,7 @@ where
     let _ = tracing_subscriber::fmt::try_init();
     let db = db::init_db(&config.db_path)?;
     {
-        let conn = db.lock().unwrap();
+        let conn = db.get().unwrap();
         seed_exercises_if_empty(&conn, &config);
     }
     let listener = TcpListener::bind(&config.bind_addr).await?;

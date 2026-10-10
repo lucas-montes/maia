@@ -68,7 +68,7 @@ pub async fn push_receipt_pictures(
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message":"missing receipt field"}))).into_response();
         };
 
-        let conn = state.db.lock().unwrap();
+        let conn = state.db.get().unwrap();
         if let Some(bytes) = picture_bytes {
             let base = state.config.db_path.parent().unwrap_or(std::path::Path::new("/tmp"));
             let dir = base.join("receipt_pictures");
@@ -99,7 +99,7 @@ pub async fn push_receipt_pictures(
                 return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": e.to_string()}))).into_response();
             }
         };
-        let conn = state.db.lock().unwrap();
+        let conn = state.db.get().unwrap();
         let tx = conn.unchecked_transaction().unwrap();
         for r in payload.receipts {
             tx.execute(

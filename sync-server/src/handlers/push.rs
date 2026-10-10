@@ -208,7 +208,7 @@ pub async fn push_ingredient(
     Json(payload): Json<IngredientContribution>,
 ) -> impl IntoResponse {
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
 
     tx.execute(
@@ -314,7 +314,7 @@ pub async fn push_foods(
     Json(payload): Json<FoodsPush>,
 ) -> impl IntoResponse {
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
 
     for food in payload.items {
@@ -382,7 +382,7 @@ pub async fn push_workouts(
     Json(payload): Json<WorkoutsPush>,
 ) -> impl IntoResponse {
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
 
     for w in payload.workouts {
@@ -420,7 +420,7 @@ pub async fn push_templates(
     Json(payload): Json<TemplatesPush>,
 ) -> impl IntoResponse {
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
 
     for t in payload.workout_templates {
@@ -630,7 +630,7 @@ pub async fn push_notes(
         } else {
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message":"missing noteAudio field"}))).into_response();
         };
-        let conn = state.db.lock().unwrap();
+        let conn = state.db.get().unwrap();
         if let Some(bytes) = audio_bytes {
             let base = state.config.db_path.parent().unwrap_or(std::path::Path::new("/tmp"));
             let dir = base.join("note_audio");
@@ -654,7 +654,7 @@ pub async fn push_notes(
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": e.to_string()}))).into_response(),
     };
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
     for n in payload.notes {
         tx.execute(
@@ -734,7 +734,7 @@ pub async fn push_tasks(
     Json(payload): Json<TasksPush>,
 ) -> impl IntoResponse {
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
     for t in payload.tasks {
         tx.execute(
@@ -767,7 +767,7 @@ pub async fn push_goals(
     Json(payload): Json<GoalsPush>,
 ) -> impl IntoResponse {
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
     for g in payload.goals {
         tx.execute(
@@ -910,7 +910,7 @@ pub async fn push_meals(
     Json(payload): Json<MealsPush>,
 ) -> impl IntoResponse {
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
     for m in payload.meals {
         tx.execute(
@@ -969,7 +969,7 @@ pub async fn push_transactions(
     Json(payload): Json<TransactionsPush>,
 ) -> impl IntoResponse {
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
     for t in payload.transactions {
         tx.execute(
@@ -989,7 +989,7 @@ pub async fn push_budget_accounts(
     Json(payload): Json<BudgetAccountsPush>,
 ) -> impl IntoResponse {
     let server_time = db::server_time_ms();
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
     for a in payload.accounts {
         tx.execute(
