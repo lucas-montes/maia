@@ -59,6 +59,13 @@ pub struct Config {
     pub seed_dir: Option<PathBuf>,
     /// Where the desktop app writes markdown notes.
     pub notes_dir: Option<PathBuf>,
+    /// Where receipt images are moved when a receipt is archived.
+    ///
+    /// This is a deployment setting rather than something the desktop app
+    /// decides for itself: archiving moves files on disk, and the server is
+    /// what performs that move, so it has to be a path both sides agree on
+    /// without either guessing from its own working directory.
+    pub archive_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -72,6 +79,7 @@ impl Config {
             media_dir: None,
             seed_dir: None,
             notes_dir: None,
+            archive_dir: None,
         }
     }
 
@@ -95,6 +103,25 @@ impl Config {
     pub fn with_seed_dir(mut self, dir: Option<PathBuf>) -> Self {
         self.seed_dir = dir;
         self
+    }
+
+    pub fn with_archive_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.archive_dir = dir;
+        self
+    }
+
+    /// Directory receipt images are moved into when archived.
+    ///
+    /// Defaults to `<db_dir>/receipts_archive`, which keeps the archive beside
+    /// the database it describes rather than in whatever directory a process
+    /// happened to be started from.
+    pub fn archive_dir(&self) -> PathBuf {
+        self.archive_dir.clone().unwrap_or_else(|| {
+            self.db_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("receipts_archive")
+        })
     }
 
     /// True when a model key was supplied, i.e. receipt OCR can run.
@@ -201,6 +228,9 @@ impl Config {
         cfg.notes_dir = get(&deployment, "notes_dir")
             .or_else(|| get(&overlay, "notes_dir"))
             .map(PathBuf::from);
+        // Deployment-owned, like the database path: the archive holds files the
+        // server moves, so a per-user overlay must not be able to redirect it.
+        cfg.archive_dir = get(&deployment, "archive_dir").map(PathBuf::from);
         cfg
     }
 }
@@ -253,6 +283,7 @@ impl Default for Config {
             media_dir: None,
             seed_dir: None,
             notes_dir: None,
+            archive_dir: None,
         }
     }
 }
@@ -380,5 +411,28 @@ mod tests {
         assert_eq!(base.clone().with_bind_addr("[::]:9999").port(), 9999);
         // Unparseable input falls back rather than panicking at startup.
         assert_eq!(base.with_bind_addr("nonsense").port(), DEFAULT_PORT);
+    }
+
+    /// The archive lives beside the database unless the deployment says
+    /// otherwise, so it does not depend on the working directory of whichever
+    /// process moved a file.
+    #[test]
+    fn archive_dir_defaults_beside_the_database() {
+        let cfg = Config::new(PathBuf::from("/var/lib/maia/maia.db"), "k".into());
+        assert_eq!(cfg.archive_dir(), PathBuf::from("/var/lib/maia/receipts_archive"));
+
+        let configured = cfg.with_archive_dir(Some(PathBuf::from("/srv/archive")));
+        assert_eq!(configured.archive_dir(), PathBuf::from("/srv/archive"));
+    }
+
+    /// The overlay must not be able to redirect the archive: it holds files the
+    /// server moves, so it is owned by the deployment like the database path.
+    #[test]
+    fn archive_dir_ignores_the_user_overlay() {
+        let cfg = Config::from_values(
+            obj(json!({ "archive_dir": "/var/lib/maia/receipts_archive" })),
+            obj(json!({ "archive_dir": "/tmp/hijacked" })),
+        );
+        assert_eq!(cfg.archive_dir(), PathBuf::from("/var/lib/maia/receipts_archive"));
     }
 }

@@ -20,6 +20,10 @@
     # working tree.
     media_dir = "${cfg.sourceDir}/exercise_media";
     notes_dir = "${cfg.dataDir}/notes";
+    # Where the server moves receipt images when a receipt is archived. Kept
+    # beside the database so it survives a rebuild and is not tied to whichever
+    # directory a process happened to start from.
+    archive_dir = "${cfg.dataDir}/receipts_archive";
     api_key = cfg.apiKey;
     model_api = cfg.modelApiKey;
     model_name = cfg.modelName;
@@ -43,8 +47,9 @@ in
       type = types.path;
       default = "/var/lib/maia";
       description = ''
-        Writable state: the database, pre-migration snapshots and uploaded
-        backups. Created by systemd's StateDirectory and owned by `user`.
+        Writable state: the database, pre-migration snapshots, archived
+        receipts and uploaded backups. Created by systemd's StateDirectory and
+        owned by `user`.
 
         Nothing here changes ownership of what is already present, so an
         imported database has to arrive writable: copy it as `user`, or follow
