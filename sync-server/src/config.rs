@@ -110,6 +110,11 @@ impl Config {
         self
     }
 
+    pub fn with_db_path(mut self, path: PathBuf) -> Self {
+        self.db_path = path;
+        self
+    }
+
     /// Directory receipt images are moved into when archived.
     ///
     /// Defaults to `<db_dir>/receipts_archive`, which keeps the archive beside

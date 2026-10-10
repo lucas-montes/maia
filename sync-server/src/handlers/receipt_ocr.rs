@@ -349,7 +349,7 @@ pub async fn get_receipt_picture(
 
 /// Joins a stored (relative) path onto the DB directory, refusing anything that
 /// would escape it.
-fn resolve_stored_path(base: &std::path::Path, stored: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_stored_path(base: &std::path::Path, stored: &str) -> Option<PathBuf> {
     if stored.is_empty() {
         return None;
     }

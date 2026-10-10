@@ -83,7 +83,7 @@ mod tests {
     #[tokio::test]
     async fn pull_exercises_since_filtering() {
         use crate::db;
-        let pool = db::init_memory().unwrap();
+        let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
             conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Squat','weightlifting',1000,1000)", []).unwrap();
@@ -126,7 +126,7 @@ mod tests {
     #[tokio::test]
     async fn pull_ingredients_nested() {
         use crate::db;
-        let pool = db::init_memory().unwrap();
+        let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
             conn.execute("INSERT INTO stores (id, name, created_at, updated_at) VALUES ('s1','Carrefour',1000,1000)", []).unwrap();
@@ -160,7 +160,7 @@ mod tests {
     #[tokio::test]
     async fn catalog_and_item_routes() {
         use crate::db;
-        let pool = db::init_memory().unwrap();
+        let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
             conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Squat','weightlifting',1000,1000)", []).unwrap();
@@ -229,7 +229,7 @@ mod tests {
     #[tokio::test]
     async fn pull_fx_rates_filtered() {
         use crate::db;
-        let pool = db::init_memory().unwrap();
+        let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
             conn.execute("INSERT INTO fx_rates (code, base_code, rate_date, rate_to_base, updated_at) VALUES ('EUR','USD','2026-09-08',0.92,1000)", []).unwrap();
@@ -263,7 +263,7 @@ mod tests {
     #[tokio::test]
     async fn lookup_local_hit_and_invalid() {
         use crate::db;
-        let pool = db::init_memory().unwrap();
+        let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
             conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, barcode, created_at, updated_at) VALUES ('i1','Oats',100,10,20,5,'3017620422003',1000,1000)", []).unwrap();
@@ -308,7 +308,7 @@ mod tests {
     #[tokio::test]
     async fn push_ingredient_idempotent() {
         use crate::db;
-        let pool = db::init_memory().unwrap();
+        let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
             conn.execute("INSERT INTO stores (id, name, created_at, updated_at) VALUES ('s1','Carrefour',1000,1000)", []).unwrap();
@@ -345,7 +345,7 @@ mod tests {
     #[tokio::test]
     async fn push_foods_idempotent_and_replaces_composition() {
         use crate::db;
-        let pool = db::init_memory().unwrap();
+        let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
             // Composition parts must already exist: food_ingredients has a real
@@ -430,7 +430,7 @@ mod tests {
     #[tokio::test]
     async fn pull_foods_nests_composition_without_nutrition() {
         use crate::db;
-        let pool = db::init_memory().unwrap();
+        let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
             conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i2','Oats raw',400,13,60,7,1000,1000)", []).unwrap();
@@ -465,10 +465,311 @@ mod tests {
         handle.abort();
     }
 
+
+    #[tokio::test]
+    async fn push_urls_upserts_and_tombstones() {
+        let pool = crate::db::init_memory().unwrap();
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/urls");
+
+        let payload = serde_json::json!({
+            "urls": [{
+                "id": "u1", "title": "Example", "url": "https://example.com",
+                "source": "rss", "tags": "[\"a\"]", "isNew": true, "createdAt": 1000
+            }]
+        });
+        let resp = client.post(&url).header("Authorization", "Bearer test-key").json(&payload).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // Re-posting the same id must update, not duplicate.
+        let update = serde_json::json!({
+            "urls": [{
+                "id": "u1", "title": "Renamed", "url": "https://example.com",
+                "source": "rss", "tags": "[]", "isNew": false, "createdAt": 1000
+            }]
+        });
+        assert_eq!(
+            client.post(&url).header("Authorization", "Bearer test-key").json(&update).send().await.unwrap().status(),
+            200
+        );
+
+        {
+            let conn = pool.get().unwrap();
+            let (count, title, is_new): (i64, String, i64) = conn
+                .query_row("SELECT count(*), title, is_new FROM urls WHERE id='u1'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap();
+            assert_eq!(count, 1, "re-pushing must not duplicate the row");
+            assert_eq!(title, "Renamed", "the second push should win");
+            assert_eq!(is_new, 0, "isNew must be updatable, since the app marks read");
+        }
+
+        // A delete is a tombstone, not a hard delete: other clients filter on
+        // deleted_at, so removing the row outright would strand them.
+        let del = serde_json::json!({ "urls": [], "deleted": ["u1"] });
+        assert_eq!(
+            client.post(&url).header("Authorization", "Bearer test-key").json(&del).send().await.unwrap().status(),
+            200
+        );
+        {
+            let conn = pool.get().unwrap();
+            let (rows, tombstoned): (i64, i64) = conn.query_row(
+                "SELECT count(*), count(deleted_at) FROM urls WHERE id='u1'", [], |r| Ok((r.get(0)?, r.get(1)?)),
+            ).unwrap();
+            assert_eq!(rows, 1, "the row must survive as a tombstone");
+            assert_eq!(tombstoned, 1);
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn push_urls_requires_auth() {
+        let pool = crate::db::init_memory().unwrap();
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/urls"))
+            .json(&serde_json::json!({ "urls": [] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn push_stores_keeps_the_human_name() {
+        let pool = crate::db::init_memory().unwrap();
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/stores");
+
+        let payload = serde_json::json!({
+            "stores": [{ "id": "s1", "name": "Carrefour", "createdAt": 1000 }]
+        });
+        assert_eq!(
+            client.post(&url).header("Authorization", "Bearer test-key").json(&payload).send().await.unwrap().status(),
+            200
+        );
+
+        let conn = pool.get().unwrap();
+        // An ingredient price referencing this store must not be able to
+        // rename it to its own id, which is what the auto-create path does.
+        conn.execute("UPDATE stores SET name = id WHERE id='s1'", []).unwrap();
+        drop(conn);
+
+        let again = serde_json::json!({ "stores": [{ "id": "s1", "name": "Carrefour", "createdAt": 1000 }] });
+        assert_eq!(
+            client.post(&url).header("Authorization", "Bearer test-key").json(&again).send().await.unwrap().status(),
+            200
+        );
+
+        let conn = pool.get().unwrap();
+        let name: String = conn.query_row("SELECT name FROM stores WHERE id='s1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(name, "Carrefour", "pushing must restore the real name");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn push_fx_rates_preserves_the_manual_flag() {
+        let pool = crate::db::init_memory().unwrap();
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/fx-rates");
+
+        let payload = serde_json::json!({
+            "rates": [{ "code": "EUR", "baseCode": "USD", "rateDate": "2024-01-02", "rateToBase": 1.09, "manual": true }]
+        });
+        assert_eq!(
+            client.post(&url).header("Authorization", "Bearer test-key").json(&payload).send().await.unwrap().status(),
+            200
+        );
+
+        // Pulling it back has to carry the flag, or a client that reads a rate,
+        // edits it and pushes it again would silently lose the distinction.
+        let pulled: serde_json::Value = client
+            .get(format!("http://127.0.0.1:{port}/fx-rates?base=USD&date=2024-01-02&since=0"))
+            .header("Authorization", "Bearer test-key")
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(pulled["items"][0]["manual"], true);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn push_fx_rates_tombstone_needs_the_whole_key() {
+        let pool = crate::db::init_memory().unwrap();
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/fx-rates");
+
+        let payload = serde_json::json!({
+            "rates": [{ "code": "EUR", "baseCode": "USD", "rateDate": "2024-01-02", "rateToBase": 1.09 }]
+        });
+        assert_eq!(
+            client.post(&url).header("Authorization", "Bearer test-key").json(&payload).send().await.unwrap().status(),
+            200
+        );
+
+        // The primary key is the triple, so a delete naming only the code must
+        // not take out the GBP row sharing the same base and date.
+        let seed = serde_json::json!({
+            "rates": [{ "code": "GBP", "baseCode": "USD", "rateDate": "2024-01-02", "rateToBase": 0.79 }]
+        });
+        client.post(&url).header("Authorization", "Bearer test-key").json(&seed).send().await.unwrap();
+
+        let del = serde_json::json!({
+            "deleted": [{ "code": "EUR", "baseCode": "USD", "rateDate": "2024-01-02" }]
+        });
+        assert_eq!(
+            client.post(&url).header("Authorization", "Bearer test-key").json(&del).send().await.unwrap().status(),
+            200
+        );
+
+        let conn = pool.get().unwrap();
+        let eur_live: i64 = conn
+            .query_row("SELECT count(*) FROM fx_rates WHERE code='EUR' AND deleted_at IS NOT NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(eur_live, 1, "the named triple should be tombstoned");
+        let gbp_live: i64 = conn
+            .query_row("SELECT count(*) FROM fx_rates WHERE code='GBP' AND deleted_at IS NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(gbp_live, 1, "a delete naming only EUR must not touch GBP");
+        handle.abort();
+    }
+
+    /// Sets up a real directory with a parsed receipt, since archiving moves
+    /// files on disk. Plain `fn` rather than `async fn` so it adds no frame to
+    /// the caller's future.
+    fn archive_fixture(tag: &str) -> (std::path::PathBuf, crate::db::DbPool, crate::Config) {
+        let dir = std::env::temp_dir().join(format!("maia-test-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("maia.db");
+        let pool = crate::db::init_db(&db_path).unwrap();
+
+        // A parsed receipt with its image beside the database, which is where the
+        // upload handlers put them.
+        let picture_dir = dir.join("receipt_pictures");
+        std::fs::create_dir_all(&picture_dir).unwrap();
+        std::fs::write(picture_dir.join("r1.jpg"), b"pretend-pixels").unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO receipts (id, local_path, remote_path, upload_status, parsed, parsed_json, created_at, updated_at)
+                 VALUES ('r1', '/tmp/r1.jpg', 'receipt_pictures/r1.jpg', 4, 1, '{\"total\":12.5}', 1000, 1000)",
+                [],
+            ).unwrap();
+        }
+
+        let config = crate::Config::default()
+            .with_db_path(db_path)
+            .with_archive_dir(Some(dir.join("receipts_archive")));
+        (dir, pool, config)
+    }
+
+    #[tokio::test]
+    async fn archive_then_restore_round_trips_the_image() {
+        let (dir, pool, config) = archive_fixture("archive");
+        let (port, handle) = crate::server::start_test_server_with_config(config, pool).await;
+        let client = reqwest::Client::new();
+        let folder = dir.join("receipts_archive/r1");
+
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/receipt-pictures/r1/archive"))
+            .header("Authorization", "Bearer test-key")
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        assert!(folder.join("receipt.jpg").exists(), "the image should have moved into the archive");
+        assert!(!dir.join("receipt_pictures/r1.jpg").exists(), "the image should no longer be live");
+        assert!(folder.join("receipt.json").exists(), "a manifest should sit beside it");
+
+        // The manifest has to be readable without the database, since the folder
+        // is meant to outlive it.
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(folder.join("receipt.json")).unwrap()).unwrap();
+        assert_eq!(manifest["id"], "r1");
+        assert_eq!(manifest["parsedJson"]["total"], 12.5);
+
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/receipt-pictures/r1/restore"))
+            .header("Authorization", "Bearer test-key")
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        assert!(dir.join("receipt_pictures/r1.jpg").exists(), "the image should be back");
+        assert!(!folder.join("receipt.jpg").exists());
+        assert!(!folder.exists(), "the archive folder should be cleaned up");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn archiving_twice_is_a_conflict_not_a_second_move() {
+        let (_dir, pool, config) = archive_fixture("archive-twice");
+        let (port, handle) = crate::server::start_test_server_with_config(config, pool).await;
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/receipt-pictures/r1/archive");
+
+        assert_eq!(
+            client.post(&url).header("Authorization", "Bearer test-key").send().await.unwrap().status(),
+            200
+        );
+        let resp = client.post(&url).header("Authorization", "Bearer test-key").send().await.unwrap();
+        assert_eq!(resp.status(), 409, "a second archive should be refused");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn restore_refuses_a_receipt_that_was_never_archived() {
+        let (_dir, pool, config) = archive_fixture("restore-unarchived");
+        let (port, handle) = crate::server::start_test_server_with_config(config, pool).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/receipt-pictures/r1/restore"))
+            .header("Authorization", "Bearer test-key")
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 409);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn archive_refuses_a_receipt_that_was_never_parsed() {
+        let (dir, pool, config) = archive_fixture("archive-unparsed");
+        // An unparsed receipt has nothing worth keeping, so archiving it would
+        // produce a folder holding a picture and no data.
+        {
+            let conn = pool.get().unwrap();
+            conn.execute("UPDATE receipts SET parsed = 0 WHERE id = 'r1'", []).unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_config(config, pool).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/receipt-pictures/r1/archive"))
+            .header("Authorization", "Bearer test-key")
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 409);
+        assert!(
+            !dir.join("receipts_archive/r1").exists(),
+            "a refused archive must not leave a folder behind"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn archiving_an_unknown_receipt_is_a_404() {
+        let (_dir, pool, config) = archive_fixture("archive-missing");
+        let (port, handle) = crate::server::start_test_server_with_config(config, pool).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/receipt-pictures/nope/archive"))
+            .header("Authorization", "Bearer test-key")
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 404);
+        handle.abort();
+    }
     #[tokio::test]
     async fn push_workouts_atomic() {
         use crate::db;
-        let pool = db::init_memory().unwrap();
+        let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
             conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Bench','weightlifting',1000,1000)", []).unwrap();
@@ -493,7 +794,7 @@ mod tests {
     #[tokio::test]
     async fn push_templates_atomic() {
         use crate::db;
-        let pool = db::init_memory().unwrap();
+        let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
             conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Bench','weightlifting',1000,1000)", []).unwrap();
@@ -518,7 +819,7 @@ mod tests {
     #[tokio::test]
     async fn receipt_pictures_json_fallback() {
         use crate::db;
-        let pool = db::init_memory().unwrap();
+        let pool = crate::db::init_memory().unwrap();
         let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
         let client = reqwest::Client::new();
         let payload = serde_json::json!({"receipts":[{"id":"r1","localPath":"/tmp/a.jpg","uploadStatus":0,"parsed":false,"createdAt":1000}]});
@@ -856,7 +1157,7 @@ mod tests {
         // desktop: the legacy handler's ON CONFLICT clause lists columns
         // explicitly, so archived_* are left alone.
         use crate::db;
-        let pool = db::init_memory().unwrap();
+        let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
             conn.execute(
@@ -1198,7 +1499,7 @@ mod tests {
     #[tokio::test]
     async fn read_workouts_meals_body_metrics() {
         use crate::db;
-        let pool = db::init_memory().unwrap();
+        let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
             conn.execute("INSERT INTO workouts (id, name, date, created_at, updated_at) VALUES ('w1','Push',1000,1000,1000)", []).unwrap();

@@ -377,6 +377,206 @@ pub async fn push_foods(
     Json(SyncAck { server_time })
 }
 
+// ---------------------------------------------------------------------------
+// Bookmarks, stores and exchange rates.
+//
+// These have no counterpart in the phone's sync set, but the desktop app still
+// has to write somewhere other than the database directly: with the app opening
+// the file read-only, the server is the only writer, and every write it performs
+// has to go through an endpoint.
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct UrlsPush {
+    #[serde(default)]
+    pub urls: Vec<UrlPush>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct UrlPush {
+    pub id: String,
+    pub title: Option<String>,
+    pub url: String,
+    pub source: Option<String>,
+    /// A JSON array encoded as a string, which is how the table stores it.
+    pub tags: Option<String>,
+    #[serde(rename = "isNew")]
+    pub is_new: bool,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+}
+
+pub async fn push_urls(
+    State(state): State<AppState>,
+    Json(payload): Json<UrlsPush>,
+) -> impl IntoResponse {
+    let server_time = db::server_time_ms();
+    let conn = state.db.get().unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+
+    for entry in payload.urls {
+        tx.execute(
+            "INSERT INTO urls (id, title, url, source, tags, is_new, created_at, updated_at, deleted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)
+             ON CONFLICT(id) DO UPDATE SET
+                title=excluded.title,
+                url=excluded.url,
+                source=excluded.source,
+                tags=excluded.tags,
+                is_new=excluded.is_new,
+                updated_at=excluded.updated_at,
+                deleted_at=NULL",
+            rusqlite::params![
+                entry.id,
+                entry.title,
+                entry.url,
+                entry.source,
+                entry.tags,
+                entry.is_new,
+                entry.created_at,
+                server_time
+            ],
+        )
+        .unwrap();
+    }
+
+    // Tombstones rather than DELETE: every pull filters on deleted_at, so a hard
+    // delete here would leave other clients holding a row nothing ever removes.
+    for id in payload.deleted {
+        let _ = tx.execute(
+            "UPDATE urls SET deleted_at=?1, updated_at=?1 WHERE id=?2",
+            rusqlite::params![server_time, id],
+        );
+    }
+
+    tx.commit().unwrap();
+    Json(SyncAck { server_time })
+}
+
+#[derive(Deserialize)]
+pub struct StoresPush {
+    #[serde(default)]
+    pub stores: Vec<StorePush>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct StorePush {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+}
+
+pub async fn push_stores(
+    State(state): State<AppState>,
+    Json(payload): Json<StoresPush>,
+) -> impl IntoResponse {
+    let server_time = db::server_time_ms();
+    let conn = state.db.get().unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+
+    for store in payload.stores {
+        tx.execute(
+            "INSERT INTO stores (id, name, created_at, updated_at, deleted_at)
+             VALUES (?1, ?2, ?3, ?4, NULL)
+             ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name,
+                updated_at=excluded.updated_at,
+                deleted_at=NULL",
+            rusqlite::params![store.id, store.name, store.created_at, server_time],
+        )
+        .unwrap();
+    }
+
+    for id in payload.deleted {
+        let _ = tx.execute(
+            "UPDATE stores SET deleted_at=?1, updated_at=?1 WHERE id=?2",
+            rusqlite::params![server_time, id],
+        );
+    }
+
+    tx.commit().unwrap();
+    Json(SyncAck { server_time })
+}
+
+#[derive(Deserialize)]
+pub struct FxRatesPush {
+    #[serde(default)]
+    pub rates: Vec<FxRatePush>,
+    #[serde(default)]
+    pub deleted: Vec<FxRateDelete>,
+}
+
+#[derive(Deserialize)]
+pub struct FxRatePush {
+    pub code: String,
+    #[serde(rename = "baseCode")]
+    pub base_code: String,
+    #[serde(rename = "rateDate")]
+    pub rate_date: String,
+    #[serde(rename = "rateToBase")]
+    pub rate_to_base: f64,
+    /// Whether a person entered this by hand. Carried through so a push/pull
+    /// round trip does not quietly turn a manual rate into an automatic one.
+    #[serde(default)]
+    pub manual: bool,
+}
+
+#[derive(Deserialize)]
+pub struct FxRateDelete {
+    pub code: String,
+    #[serde(rename = "baseCode")]
+    pub base_code: String,
+    #[serde(rename = "rateDate")]
+    pub rate_date: String,
+}
+
+pub async fn push_fx_rates(
+    State(state): State<AppState>,
+    Json(payload): Json<FxRatesPush>,
+) -> impl IntoResponse {
+    let server_time = db::server_time_ms();
+    let conn = state.db.get().unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+
+    // The primary key is the (code, base, date) triple rather than an id, so
+    // both the upsert and the tombstone have to name all three.
+    for rate in payload.rates {
+        tx.execute(
+            "INSERT INTO fx_rates (code, base_code, rate_date, rate_to_base, updated_at, manual, deleted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+             ON CONFLICT(code, base_code, rate_date) DO UPDATE SET
+                rate_to_base=excluded.rate_to_base,
+                updated_at=excluded.updated_at,
+                manual=excluded.manual,
+                deleted_at=NULL",
+            rusqlite::params![
+                rate.code,
+                rate.base_code,
+                rate.rate_date,
+                rate.rate_to_base,
+                server_time,
+                rate.manual
+            ],
+        )
+        .unwrap();
+    }
+
+    for rate in payload.deleted {
+        let _ = tx.execute(
+            "UPDATE fx_rates SET deleted_at=?1, updated_at=?1 WHERE code=?2 AND base_code=?3 AND rate_date=?4",
+            rusqlite::params![server_time, rate.code, rate.base_code, rate.rate_date],
+        );
+    }
+
+    tx.commit().unwrap();
+    Json(SyncAck { server_time })
+}
+
 pub async fn push_workouts(
     State(state): State<AppState>,
     Json(payload): Json<WorkoutsPush>,

@@ -150,6 +150,11 @@ pub struct FxRate {
     pub date: String,
     #[serde(rename = "updated_at")]
     pub updated_at: i64,
+    /// Whether a person entered this rate rather than it being fetched. The
+    /// desktop app edits rates in place by reading one back, mutating it and
+    /// pushing it again, so omitting this here would silently drop the flag on
+    /// every edit.
+    pub manual: bool,
 }
 
 pub async fn pull_exercises(
@@ -349,7 +354,7 @@ pub async fn pull_fx_rates(
     let server_time = db::server_time_ms();
     let conn = state.db.get().unwrap();
     let mut stmt = conn
-        .prepare("SELECT code, rate_to_base, rate_date, updated_at FROM fx_rates WHERE base_code = ?1 AND rate_date = ?2 AND updated_at > ?3 AND deleted_at IS NULL ORDER BY updated_at")
+        .prepare("SELECT code, rate_to_base, rate_date, updated_at, manual FROM fx_rates WHERE base_code = ?1 AND rate_date = ?2 AND updated_at > ?3 AND deleted_at IS NULL ORDER BY updated_at")
         .unwrap();
     let items = stmt
         .query_map(rusqlite::params![q.base, q.date, since], |row| {
@@ -358,6 +363,7 @@ pub async fn pull_fx_rates(
                 rate_to_base: row.get(1)?,
                 date: row.get(2)?,
                 updated_at: row.get(3)?,
+                manual: row.get::<_, i64>(4)? != 0,
             })
         })
         .unwrap()
