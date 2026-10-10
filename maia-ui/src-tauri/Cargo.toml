@@ -27,5 +27,8 @@ chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 uuid = { version = "1.0", features = ["v4", "v7", "serde"] }
 sync-server = { path = "../../sync-server" }
+# Default features off: the sync server is reached over plain HTTP on loopback,
+# so pulling in a TLS stack would be dead weight in the binary.
+reqwest = { version = "0.12", default-features = false }
 tokio = { version = "1", features = ["rt", "sync"] }
 

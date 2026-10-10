@@ -2594,6 +2594,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "reqwest 0.12.22",
  "rusqlite",
  "serde",
  "serde_json",

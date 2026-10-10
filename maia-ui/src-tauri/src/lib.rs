@@ -1,36 +1,28 @@
+pub mod api;
 use std::fs;
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 use sync_server::Config as SyncConfig;
 
 /// Shared application state managed by Tauri.
 struct AppState {
     db: Mutex<Connection>,
-    notes_dir: PathBuf,
 }
 
 // ---- Data types ----
 
-#[derive(Serialize, Deserialize, Clone)]
-struct Note {
-    id: i64,
-    title: String,
-    path: String,
-    tags: String, // JSON array
-    created_at: String,
-    updated_at: String,
-}
-
+/// A note, as the `notes` table actually stores it.
+///
+/// The body is a column rather than a file on disk, so there is no path and no
+/// separate read to fail.
 #[derive(Serialize, Deserialize)]
 struct NoteWithContent {
-    id: i64,
+    id: String,
     title: String,
-    path: String,
-    tags: String,
     content: String,
     created_at: String,
     updated_at: String,
@@ -61,30 +53,12 @@ struct Receipt {
     updated_at: i64,
 }
 
-impl Receipt {
-    /// Display status derived from the row, since there is no status column.
-    fn display_status(&self) -> &'static str {
-        if self.archived_at.is_some() {
-            "archived"
-        } else if self.parsed {
-            "parsed"
-        } else {
-            match self.upload_status {
-                1 => "uploading",
-                2 | 4 => "parsing",
-                3 => "error",
-                _ => "local",
-            }
-        }
-    }
-}
-
 const RECEIPT_COLUMNS: &str = "id, local_path, remote_path, upload_status, parsed, parsed_json, \
      parse_error, transaction_id, archived_path, archived_at, created_at, updated_at";
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Task {
-    id: i64,
+    id: String,
     goal_id: Option<i64>,
     title: String,
     description: Option<String>,
@@ -99,7 +73,7 @@ struct Task {
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Goal {
-    id: i64,
+    id: String,
     title: String,
     description: Option<String>,
     status: Option<String>,
@@ -111,12 +85,15 @@ struct Goal {
 
 #[derive(Serialize, Deserialize, Clone)]
 struct SavedUrl {
-    id: i64,
+    /// A TEXT primary key. This was typed as an integer to go with the
+    /// `last_insert_rowid()` insert that has now been replaced by a server push,
+    /// which sends a client-generated uuid.
+    id: String,
     title: Option<String>,
     url: String,
     source: Option<String>,
     tags: String,
-    is_new: i64,
+    is_new: bool,
     created_at: String,
 }
 
@@ -138,12 +115,18 @@ struct CommandResult<T: Serialize> {
 
 // ---- Database initialization ----
 
+/// Opens the database read-only.
+///
+/// The desktop app does not write here. Everything it used to write goes
+/// through the sync server, which makes the server the only writer and leaves
+/// this process unable to migrate the schema even by accident -- two runners
+/// stepping the same database at once was a real source of corruption.
+///
+/// Opening with SQLITE_OPEN_READ_ONLY means SQLite refuses writes at the engine
+/// level, rather than relying on every caller remembering not to write.
 fn init_database(db_path: &str) -> Result<Connection, String> {
-    let conn = Connection::open(db_path).map_err(|e| format!("Failed to open database: {e}"))?;
-    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
-        .map_err(|e| format!("Failed to set pragmas: {e}"))?;
-    sync_server::db::migrate(&conn).map_err(|e| format!("Failed to migrate sync schema: {e}"))?;
-    Ok(conn)
+    Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("Failed to open database read-only: {e}"))
 }
 
 /// Where the database lives, from the shared configuration.
@@ -153,17 +136,6 @@ fn init_database(db_path: &str) -> Result<Connection, String> {
 /// database than the service was using.
 fn get_database_path() -> String {
     sync_config().db_path.display().to_string()
-}
-
-fn get_notes_dir() -> PathBuf {
-    let dir = sync_config()
-        .notes_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("notes"));
-    if !dir.exists() {
-        let _ = fs::create_dir_all(&dir);
-    }
-    dir
 }
 
 
@@ -270,36 +242,7 @@ fn mask_secret(secret: &str) -> String {
     format!("{}...{}", &secret[..4], &secret[secret.len() - 4..])
 }
 
-/// Slugify a title for use as a filename.
-fn slugify(title: &str) -> String {
-    let slug: String = title
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if slug.is_empty() {
-        "untitled".to_string()
-    } else {
-        slug
-    }
-}
 
-/// Generate a unique file path for a new note.
-fn generate_note_path(notes_dir: &PathBuf, title: &str) -> PathBuf {
-    let base = slugify(title);
-    let mut path = notes_dir.join(format!("{}.md", base));
-    let mut counter = 1;
-    while path.exists() {
-        path = notes_dir.join(format!("{}_{}.md", base, counter));
-        counter += 1;
-    }
-    path
-}
 
 // ---- Tauri commands ----
 
@@ -324,60 +267,30 @@ fn read_note(state: tauri::State<AppState>, id: i64) -> CommandResult<NoteWithCo
         }
     };
 
-    let note = match conn.query_row(
-        "SELECT id, title, path, tags, created_at, updated_at FROM notes WHERE id = ?1",
+    match conn.query_row(
+        "SELECT id, title, body, created_at, updated_at FROM notes WHERE id = ?1",
         params![id],
         |row| {
-            Ok(Note {
+            Ok(NoteWithContent {
                 id: row.get(0)?,
                 title: row.get::<_, String>(1).unwrap_or_default(),
-                path: row.get(2)?,
-                tags: row.get::<_, String>(3).unwrap_or_else(|_| "[]".to_string()),
-                created_at: row.get::<_, String>(4).unwrap_or_default(),
-                updated_at: row.get::<_, String>(5).unwrap_or_default(),
+                content: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                created_at: row.get::<_, i64>(3).map(|ms| ms.to_string()).unwrap_or_default(),
+                updated_at: row.get::<_, i64>(4).map(|ms| ms.to_string()).unwrap_or_default(),
             })
         },
     ) {
-        Ok(n) => n,
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some("Note not found".to_string()),
-            };
-        }
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Query error: {e}")),
-            };
-        }
-    };
-
-    let content = match fs::read_to_string(&note.path) {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Failed to read file '{}': {e}", note.path)),
-            };
-        }
-    };
-
-    CommandResult {
-        success: true,
-        data: Some(NoteWithContent {
-            id: note.id,
-            title: note.title,
-            path: note.path,
-            tags: note.tags,
-            content,
-            created_at: note.created_at,
-            updated_at: note.updated_at,
-        }),
-        error: None,
+        Ok(note) => CommandResult { success: true, data: Some(note), error: None },
+        Err(rusqlite::Error::QueryReturnedNoRows) => CommandResult {
+            success: false,
+            data: None,
+            error: Some("Note not found".to_string()),
+        },
+        Err(e) => CommandResult {
+            success: false,
+            data: None,
+            error: Some(format!("Query error: {e}")),
+        },
     }
 }
 
@@ -532,29 +445,6 @@ fn read_receipt_picture(state: tauri::State<AppState>, id: String) -> CommandRes
     }
 }
 
-/// Archive directory for receipts, from `receipts.archived_dir` in maia.json.
-///
-/// Read the archive directory from maia.json's `receipts.archived_dir`, or default.
-fn get_archive_dir() -> PathBuf {
-    if let Ok(content) = fs::read_to_string("maia.json") {
-        if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(receipts) = config.get("receipts") {
-                if let Some(dir) = receipts.get("archived_dir").and_then(|v| v.as_str()) {
-                    let p = PathBuf::from(dir);
-                    if !p.exists() {
-                        let _ = fs::create_dir_all(&p);
-                    }
-                    return p;
-                }
-            }
-        }
-    }
-    let fallback = PathBuf::from("receipts_archive");
-    if !fallback.exists() {
-        let _ = fs::create_dir_all(&fallback);
-    }
-    fallback
-}
 
 /// Content type for a stored receipt image, from its extension.
 fn content_type_for_receipt(path: &Path) -> &'static str {
@@ -577,221 +467,48 @@ fn base64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-/// The `receipt.json` sidecar written beside an archived image, so the archive
-/// folder stays meaningful without the database.
-fn archive_manifest(receipt: &Receipt, source: &str, archived_at: i64) -> serde_json::Value {
-    // `parsed_json` is stored as a text blob; surface it as a real object when
-    // it parses, and fall back to the raw string if it ever doesn't.
-    let parsed = match &receipt.parsed_json {
-        Some(text) => serde_json::from_str::<serde_json::Value>(text)
-            .unwrap_or_else(|_| serde_json::Value::String(text.clone())),
-        None => serde_json::Value::Null,
-    };
-    serde_json::json!({
-        "id": receipt.id,
-        "archivedAt": archived_at,
-        "source": source,
-        "uploadStatus": receipt.upload_status,
-        "parsed": receipt.parsed,
-        "transactionId": receipt.transaction_id,
-        "parsedJson": parsed,
-    })
-}
 
-/// Moves a parsed receipt's image into the archive directory, next to a
-/// `receipt.json` copy of its parsed data.
+/// Archives a parsed receipt: moves its image into the archive folder and writes
+/// the manifest beside it.
 ///
-/// `remote_path` is deliberately left untouched: it records where the image
-/// lived, which is what makes [`restore_receipt`] possible.
+/// The move belongs to the server, which is the only process allowed to write.
+/// The desktop app no longer touches the filesystem for this, so the pairing of
+/// "file moved" and "row updated" cannot drift apart.
 #[tauri::command]
-fn archive_receipt(state: tauri::State<AppState>, id: String) -> CommandResult<Receipt> {
-    let receipt = match load_receipt(&state, &id) {
-        Ok(r) => r,
-        Err(e) => return CommandResult { success: false, data: None, error: Some(e) },
-    };
-
-    if receipt.archived_at.is_some() {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some("Receipt is already archived".to_string()),
-        };
-    }
-    if !receipt.parsed {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some("Receipt has not been parsed yet".to_string()),
-        };
-    }
-
-    let base = receipt_picture_dir();
-    let Some(source_rel) = receipt.remote_path.clone() else {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some("Receipt has no stored image to archive".to_string()),
-        };
-    };
-    let Some(source) = resolve_receipt_file(&base, &source_rel) else {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some("Receipt image path is invalid".to_string()),
-        };
-    };
-    if !source.exists() {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Receipt image not found at {}", source.display())),
-        };
-    }
-
-    let folder = get_archive_dir().join(&id);
-    if let Err(e) = fs::create_dir_all(&folder) {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Cannot create archive folder: {e}")),
-        };
-    }
-    // One folder per receipt id, so the destination name is unambiguous.
-    let ext = source
-        .extension()
-        .map(|e| e.to_string_lossy().to_string())
-        .unwrap_or_else(|| "jpg".to_string());
-    let dest = folder.join(format!("receipt.{ext}"));
-
-    if let Err(e) = fs::rename(&source, &dest) {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Cannot archive image: {e}")),
-        };
-    }
-
-    let archived_at = chrono::Utc::now().timestamp_millis();
-    let manifest = archive_manifest(&receipt, &source_rel, archived_at);
-    if let Err(e) = fs::write(folder.join("receipt.json"), manifest.to_string()) {
-        // Roll the move back so the receipt is not left without its JSON.
-        let _ = fs::rename(&dest, &source);
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Cannot write archive manifest: {e}")),
-        };
-    }
-
-    let archived_folder = folder.to_string_lossy().to_string();
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            }
-        }
-    };
-    if let Err(e) = conn.execute(
-        "UPDATE receipts SET archived_path = ?1, archived_at = ?2, updated_at = ?2 WHERE id = ?3",
-        params![archived_folder, archived_at, id],
-    ) {
-        return CommandResult { success: false, data: None, error: Some(format!("{e}")) };
-    }
-    drop(conn);
-
-    finish_receipt(&state, &id)
+async fn archive_receipt(state: tauri::State<'_, AppState>, id: String) -> Result<CommandResult<Receipt>, String> {
+    let result = push_ok(
+        &format!("/receipt-pictures/{id}/archive"),
+        &serde_json::json!({}),
+        serde_json::json!({}),
+    )
+    .await;
+    Ok(reload_receipt(&state, &id, result))
 }
 
-/// Inverse of [`archive_receipt`]: moves the image back to `remote_path` and
-/// drops the sidecar. `remote_path` was never rewritten, so the original
-/// location is still known.
+/// The inverse of [`archive_receipt`]: puts the image back where it was.
 #[tauri::command]
-fn restore_receipt(state: tauri::State<AppState>, id: String) -> CommandResult<Receipt> {
-    let receipt = match load_receipt(&state, &id) {
-        Ok(r) => r,
-        Err(e) => return CommandResult { success: false, data: None, error: Some(e) },
-    };
-
-    let Some(archived_folder) = receipt.archived_path.clone() else {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some("Receipt is not archived".to_string()),
-        };
-    };
-    let folder = PathBuf::from(&archived_folder);
-    let image = fs::read_dir(&folder)
-        .ok()
-        .and_then(|entries| {
-            entries.flatten().find_map(|e| {
-                let p = e.path();
-                let is_json = p.extension().map(|x| x == "json").unwrap_or(false);
-                (!is_json && p.is_file()).then_some(p)
-            })
-        });
-    let Some(image) = image else {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("No archived image found in {archived_folder}")),
-        };
-    };
-
-    // `remote_path` is relative to the picture directory.
-    let Some(source_rel) = receipt.remote_path.clone() else {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some("Receipt has no recorded image path to restore to".to_string()),
-        };
-    };
-    let Some(dest) = resolve_receipt_file(&receipt_picture_dir(), &source_rel) else {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some("Receipt image path is invalid".to_string()),
-        };
-    };
-    if let Some(parent) = dest.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Err(e) = fs::rename(&image, &dest) {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Cannot restore image: {e}")),
-        };
-    }
-
-    // The archive folder is now redundant once the JSON sidecar is gone.
-    let _ = fs::remove_file(folder.join("receipt.json"));
-    let _ = fs::remove_dir(&folder);
-
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            }
-        }
-    };
-    let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e) = conn.execute(
-        "UPDATE receipts SET archived_path = NULL, archived_at = NULL, updated_at = ?1 WHERE id = ?2",
-        params![now, id],
-    ) {
-        return CommandResult { success: false, data: None, error: Some(format!("{e}")) };
-    }
-    drop(conn);
-
-    finish_receipt(&state, &id)
+async fn restore_receipt(state: tauri::State<'_, AppState>, id: String) -> Result<CommandResult<Receipt>, String> {
+    let result = push_ok(
+        &format!("/receipt-pictures/{id}/restore"),
+        &serde_json::json!({}),
+        serde_json::json!({}),
+    )
+    .await;
+    Ok(reload_receipt(&state, &id, result))
 }
-// ---- Task commands ----
+
+/// Re-reads a receipt after a push, so the caller gets the stored row rather
+/// than echoing back what it asked for.
+fn reload_receipt(
+    state: &tauri::State<'_, AppState>,
+    id: &str,
+    result: CommandResult<serde_json::Value>,
+) -> CommandResult<Receipt> {
+    match result.success {
+        true => finish_receipt(state, id),
+        false => CommandResult { success: false, data: None, error: result.error },
+    }
+}
 
 #[tauri::command]
 fn list_tasks(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
@@ -851,152 +568,96 @@ fn list_urls(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Val
     CommandResult{success:true,data:Some(rows),error:None}
 }
 
+/// A saved url as the frontend expects it back.
 #[tauri::command]
-fn create_url(
-    state: tauri::State<AppState>,
+async fn create_url(
     title: Option<String>,
     url: String,
     source: Option<String>,
     tags: Option<String>,
 ) -> CommandResult<SavedUrl> {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
+    let id = uuid::Uuid::now_v7().to_string();
+    let saved = SavedUrl {
+        id: id.clone(),
+        title: title.clone(),
+        url: url.clone(),
+        source: source.clone(),
+        tags: tags.clone().unwrap_or_else(|| "[]".to_string()),
+        is_new: true,
+        created_at: now_ms().to_string(),
     };
-
-    let tags_str = tags.unwrap_or_else(|| "[]".to_string());
-
-    if let Err(e) = conn.execute(
-        "INSERT INTO urls (title, url, source, tags) VALUES (?1, ?2, ?3, ?4)",
-        params![title, url, source, tags_str],
-    ) {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Failed to create url: {e}")),
-        };
-    }
-
-    let url_id = conn.last_insert_rowid();
-
-    let saved = match conn.query_row(
-        "SELECT id, title, url, source, tags, is_new, created_at
-         FROM urls WHERE id = ?1",
-        params![url_id],
-        |row| {
-            Ok(SavedUrl {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                url: row.get(2)?,
-                source: row.get(3)?,
-                tags: row.get::<_, String>(4).unwrap_or_else(|_| "[]".to_string()),
-                is_new: row.get::<_, i64>(5).unwrap_or(1),
-                created_at: row.get::<_, String>(6).unwrap_or_default(),
-            })
-        },
-    ) {
-        Ok(u) => u,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Failed to read back url: {e}")),
-            };
-        }
-    };
-
-    CommandResult {
-        success: true,
-        data: Some(saved),
-        error: None,
+    let payload = serde_json::json!({
+        "urls": [{
+            "id": id, "title": title, "url": url, "source": source,
+            "tags": tags.unwrap_or_else(|| "[]".to_string()),
+            "isNew": true, "createdAt": now_ms(),
+        }],
+        "deleted": [],
+    });
+    match push_ok("/urls", &payload, serde_json::json!({})).await {
+        CommandResult { success: true, .. } => CommandResult { success: true, data: Some(saved), error: None },
+        CommandResult { error, .. } => CommandResult { success: false, data: None, error },
     }
 }
 
+/// Deletes a url by tombstone.
+///
+/// The server has no DELETE and every pull filters on `deleted_at`, so removing
+/// the row outright would leave other clients holding a bookmark nothing removes.
 #[tauri::command]
-fn delete_url(state: tauri::State<AppState>, id: i64) -> CommandResult<()> {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
-    };
-
-    if let Err(e) = conn.execute("DELETE FROM urls WHERE id = ?1", params![id]) {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Failed to delete url: {e}")),
-        };
-    }
-
-    CommandResult {
-        success: true,
-        data: None,
-        error: None,
+async fn delete_url(id: String) -> CommandResult<()> {
+    match push_ok("/urls", &serde_json::json!({ "urls": [], "deleted": [id] }), serde_json::json!({})).await {
+        CommandResult { success: true, .. } => CommandResult { success: true, data: None, error: None },
+        CommandResult { error, .. } => CommandResult { success: false, data: None, error },
     }
 }
 
+/// Marks a bookmark read by re-sending it with `isNew` false.
 #[tauri::command]
-fn mark_url_read(state: tauri::State<AppState>, id: i64) -> CommandResult<SavedUrl> {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Database lock error: {e}")),
-            };
-        }
+async fn mark_url_read(state: tauri::State<'_, AppState>, id: String) -> Result<CommandResult<SavedUrl>, String> {
+    let Some(mut entry) = read_url_for_push(&state, &id) else {
+        return Ok(CommandResult { success: false, data: None, error: Some("Url not found".into()) });
     };
-
-    if let Err(e) = conn.execute("UPDATE urls SET is_new = 0 WHERE id = ?1", params![id]) {
-        return CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Failed to mark url read: {e}")),
-        };
+    if let Some(obj) = entry.as_object_mut() {
+        obj.insert("isNew".into(), serde_json::json!(false));
     }
+    let saved = saved_url_from(&entry);
+    let result = push_ok("/urls", &serde_json::json!({ "urls": [entry], "deleted": [] }), serde_json::json!({})).await;
+    Ok(match result {
+        CommandResult { success: true, .. } => CommandResult { success: true, data: Some(saved), error: None },
+        CommandResult { error, .. } => CommandResult { success: false, data: None, error },
+    })
+}
 
-    let saved = match conn.query_row(
-        "SELECT id, title, url, source, tags, is_new, created_at
-         FROM urls WHERE id = ?1",
+/// Reads a url back in the shape `POST /urls` expects.
+fn read_url_for_push(state: &tauri::State<'_, AppState>, id: &str) -> Option<serde_json::Value> {
+    let conn = state.db.lock().ok()?;
+    conn.query_row(
+        "SELECT id, title, url, source, tags, is_new, created_at FROM urls WHERE id=?1 AND deleted_at IS NULL",
         params![id],
-        |row| {
-            Ok(SavedUrl {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                url: row.get(2)?,
-                source: row.get(3)?,
-                tags: row.get::<_, String>(4).unwrap_or_else(|_| "[]".to_string()),
-                is_new: row.get::<_, i64>(5).unwrap_or(0),
-                created_at: row.get::<_, String>(6).unwrap_or_default(),
-            })
+        |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "title": r.get::<_, Option<String>>(1)?,
+                "url": r.get::<_, String>(2)?,
+                "source": r.get::<_, Option<String>>(3)?,
+                "tags": r.get::<_, Option<String>>(4)?.unwrap_or_else(|| "[]".to_string()),
+                "isNew": r.get::<_, i64>(5)? != 0,
+                "createdAt": r.get::<_, i64>(6)?,
+            }))
         },
-    ) {
-        Ok(u) => u,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("Failed to read back url: {e}")),
-            };
-        }
-    };
+    ).ok()
+}
 
-    CommandResult {
-        success: true,
-        data: Some(saved),
-        error: None,
+fn saved_url_from(entry: &serde_json::Value) -> SavedUrl {
+    SavedUrl {
+        id: entry.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        title: entry.get("title").and_then(|v| v.as_str()).map(String::from),
+        url: entry.get("url").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        source: entry.get("source").and_then(|v| v.as_str()).map(String::from),
+        tags: entry.get("tags").and_then(|v| v.as_str()).unwrap_or("[]").to_string(),
+        is_new: entry.get("isNew").and_then(|v| v.as_bool()).unwrap_or(false),
+        created_at: entry.get("createdAt").and_then(|v| v.as_i64()).unwrap_or_default().to_string(),
     }
 }
 
@@ -1114,43 +775,180 @@ fn list_fx_rates(state: tauri::State<AppState>, base: Option<String>, date: Opti
     CommandResult{success:true,data:Some(rows),error:None}
 }
 #[tauri::command]
-fn create_store(state: tauri::State<AppState>, name: String) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
+async fn create_store(name: String) -> CommandResult<serde_json::Value> {
     let id = uuid::Uuid::now_v7().to_string();
-    let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e)=conn.execute("INSERT INTO stores (id, name, created_at, updated_at) VALUES (?1,?2,?3,?4)", rusqlite::params![id, name, now, now]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"id":id,"name":name})),error:None}
+    push_ok(
+        "/stores",
+        &serde_json::json!({
+            "stores": [{ "id": id, "name": name, "createdAt": now_ms() }],
+            "deleted": [],
+        }),
+        serde_json::json!({ "id": id, "name": name }),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn create_fx_rate(code: String, baseCode: String, rateDate: String, rateToBase: f64) -> CommandResult<serde_json::Value> {
+    // A rate entered by hand stays manual; the flag is carried explicitly so a
+    // later pull cannot quietly turn it into a fetched one.
+    push_ok(
+        "/fx-rates",
+        &serde_json::json!({
+            "rates": [{
+                "code": code, "baseCode": baseCode, "rateDate": rateDate,
+                "rateToBase": rateToBase, "manual": true,
+            }],
+            "deleted": [],
+        }),
+        serde_json::json!({ "code": code }),
+    )
+    .await
 }
 #[tauri::command]
-fn create_fx_rate(state: tauri::State<AppState>, code: String, baseCode: String, rateDate: String, rateToBase: f64) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
-    let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e)=conn.execute("INSERT INTO fx_rates (code, base_code, rate_date, rate_to_base, updated_at, manual) VALUES (?1,?2,?3,?4,?5,1) ON CONFLICT(code, base_code, rate_date) DO UPDATE SET rate_to_base=excluded.rate_to_base, updated_at=excluded.updated_at, manual=1", rusqlite::params![code, baseCode, rateDate, rateToBase, now]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"code":code})),error:None}
+async fn update_ingredient(state: tauri::State<'_, AppState>, id: String, name: String, caloriesPer100g: f64, proteinPer100g: f64, carbsPer100g: f64, fatPer100g: f64) -> Result<CommandResult<serde_json::Value>, String> {
+    // POST /ingredients replaces the whole row, so an edit has to start from
+    // what is stored rather than send only the fields that changed.
+    let Some(mut ingredient) = read_ingredient_for_push(&state, &id) else {
+        return Ok(CommandResult { success: false, data: None, error: Some(format!("Ingredient {id} not found")) });
+    };
+    if let Some(obj) = ingredient.as_object_mut() {
+        obj.insert("name".into(), serde_json::json!(name));
+        obj.insert("caloriesPer100g".into(), serde_json::json!(caloriesPer100g));
+        obj.insert("proteinPer100g".into(), serde_json::json!(proteinPer100g));
+        obj.insert("carbsPer100g".into(), serde_json::json!(carbsPer100g));
+        obj.insert("fatPer100g".into(), serde_json::json!(fatPer100g));
+    }
+    Ok(push_ok("/ingredients", &ingredient, serde_json::json!({ "id": id })).await)
 }
+
 #[tauri::command]
-fn update_exercise(state: tauri::State<AppState>, id: String, name: String, bodyPart: Option<String>, equipment: Option<String>, primaryMuscle: Option<String>, secondaryMuscle: Option<String>) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
-    let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e)=conn.execute("UPDATE exercises SET name=?1, body_part=?2, equipment=?3, primary_muscle=?4, secondary_muscle=?5, updated_at=?6 WHERE id=?7", rusqlite::params![name, bodyPart, equipment, primaryMuscle, secondaryMuscle, now, id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
-}
-#[tauri::command]
-fn update_ingredient(state: tauri::State<AppState>, id: String, name: String, caloriesPer100g: f64, proteinPer100g: f64, carbsPer100g: f64, fatPer100g: f64) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
-    let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e)=conn.execute("UPDATE ingredients SET name=?1, calories_per100g=?2, protein_per100g=?3, carbs_per100g=?4, fat_per100g=?5, updated_at=?6 WHERE id=?7", rusqlite::params![name, caloriesPer100g, proteinPer100g, carbsPer100g, fatPer100g, now, id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
-}
-#[tauri::command]
-fn create_ingredient(state: tauri::State<AppState>, name: String, caloriesPer100g: f64, proteinPer100g: f64, carbsPer100g: f64, fatPer100g: f64, sodiumPer100g: Option<f64>, fiberPer100g: Option<f64>, sugarPer100g: Option<f64>, brand: Option<String>, barcode: Option<String>) -> CommandResult<serde_json::Value> {
+async fn create_ingredient(name: String, caloriesPer100g: f64, proteinPer100g: f64, carbsPer100g: f64, fatPer100g: f64, sodiumPer100g: Option<f64>, fiberPer100g: Option<f64>, sugarPer100g: Option<f64>, brand: Option<String>, barcode: Option<String>) -> CommandResult<serde_json::Value> {
     // Option only so an older front-end that omits these still calls in cleanly;
     // an omitted field means zero.
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
     let id = uuid::Uuid::now_v7().to_string();
-    let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e)=conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, sodium_per100g, fiber_per100g, sugar_per100g, brand, barcode, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)", rusqlite::params![id, name, caloriesPer100g, proteinPer100g, carbsPer100g, fatPer100g, sodiumPer100g.unwrap_or(0.0), fiberPer100g.unwrap_or(0.0), sugarPer100g.unwrap_or(0.0), brand, barcode, now, now]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+    push_ok("/ingredients", &serde_json::json!({
+        "id": id,
+        "name": name,
+        "caloriesPer100g": caloriesPer100g,
+        "proteinPer100g": proteinPer100g,
+        "carbsPer100g": carbsPer100g,
+        "fatPer100g": fatPer100g,
+        "sodiumPer100g": sodiumPer100g,
+        "fiberPer100g": fiberPer100g,
+        "sugarPer100g": sugarPer100g,
+        "isArchived": false,
+        "brand": brand,
+        "barcode": barcode,
+        "createdAt": now_ms(),
+        "pictures": [],
+        "prices": [],
+        "deleted": [],
+    }), serde_json::json!({ "id": id }))
+    .await
+}
+
+/// Reads an ingredient back in the shape `POST /ingredients` expects.
+///
+/// Includes the pictures and prices sub-tables, because the endpoint upserts all
+/// three: sending empty lists would wipe them.
+fn read_ingredient_for_push(state: &tauri::State<AppState>, id: &str) -> Option<serde_json::Value> {
+    let conn = state.db.lock().ok()?;
+    let base: serde_json::Value = conn.query_row(
+        "SELECT id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g,
+                sodium_per100g, fiber_per100g, sugar_per100g, is_archived, brand, barcode, created_at
+         FROM ingredients WHERE id = ?1 AND deleted_at IS NULL",
+        params![id],
+        |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "name": r.get::<_, String>(1)?,
+                "caloriesPer100g": r.get::<_, f64>(2)?,
+                "proteinPer100g": r.get::<_, f64>(3)?,
+                "carbsPer100g": r.get::<_, f64>(4)?,
+                "fatPer100g": r.get::<_, f64>(5)?,
+                "sodiumPer100g": r.get::<_, Option<f64>>(6)?,
+                "fiberPer100g": r.get::<_, Option<f64>>(7)?,
+                "sugarPer100g": r.get::<_, Option<f64>>(8)?,
+                "isArchived": r.get::<_, i64>(9)? != 0,
+                "brand": r.get::<_, Option<String>>(10)?,
+                "barcode": r.get::<_, Option<String>>(11)?,
+                "createdAt": r.get::<_, i64>(12)?,
+            }))
+        },
+    ).ok()?;
+
+    let mut out = base;
+    let obj = out.as_object_mut()?;
+    obj.insert("pictures".into(), serde_json::Value::Array(sub_rows(&conn, "ingredient_pictures", "ingredient_id", id, &["id", "image_path", "sort_order", "created_at"], "ingredientId")));
+    obj.insert("prices".into(), serde_json::Value::Array(sub_rows(&conn, "ingredient_prices", "ingredient_id", id, &["id", "store_id", "price", "currency_code", "package_grams", "recorded_at"], "ingredientId")));
+    Some(out)
+}
+
+/// Rows of a child table belonging to one parent, shaped for a push payload.
+///
+/// `parent_column` is the local column holding the parent's id and `parent_field`
+/// is the name the payload uses for it, since the two need not match. The filter
+/// matters: sending the whole table would attach every other row's pictures to
+/// this ingredient.
+fn sub_rows(
+    conn: &Connection,
+    table: &str,
+    parent_column: &str,
+    parent_id: &str,
+    columns: &[&str],
+    parent_field: &str,
+) -> Vec<serde_json::Value> {
+    let selected = columns.join(", ");
+    let sql = format!("SELECT {selected} FROM {table} WHERE {parent_column} = ?1 AND deleted_at IS NULL");
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new();
+    };
+    let mapped = stmt.query_map(params![parent_id], |r| {
+        let mut obj = serde_json::Map::new();
+        for (i, name) in columns.iter().enumerate() {
+            obj.insert((*name).to_string(), column_value(r, i));
+        }
+        obj.insert(parent_field.to_string(), serde_json::Value::String(parent_id.to_string()));
+        Ok(serde_json::Value::Object(obj))
+    });
+    match mapped {
+        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// A column as JSON, trying the types that actually occur in these tables.
+fn column_value(row: &rusqlite::Row<'_>, index: usize) -> serde_json::Value {
+    match row.get_ref(index) {
+        Ok(rusqlite::types::ValueRef::Null) => serde_json::Value::Null,
+        Ok(rusqlite::types::ValueRef::Integer(i)) => serde_json::json!(i),
+        Ok(rusqlite::types::ValueRef::Real(f)) => serde_json::json!(f),
+        Ok(rusqlite::types::ValueRef::Text(t)) => {
+            serde_json::Value::String(String::from_utf8_lossy(t).into_owned())
+        }
+        // A blob has no sensible JSON form, and none of these tables use one.
+        Ok(rusqlite::types::ValueRef::Blob(_)) | Err(_) => serde_json::Value::Null,
+    }
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// POSTs to the server and maps the result onto the app's command envelope.
+///
+/// Every write goes through here, so an unreachable server produces the same
+/// clear message everywhere instead of a different failure per command.
+async fn push_ok(
+    path: &str,
+    body: &serde_json::Value,
+    data: serde_json::Value,
+) -> CommandResult<serde_json::Value> {
+    match api::post::<_, serde_json::Value>(path, body).await {
+        Ok(_) => CommandResult { success: true, data: Some(data), error: None },
+        Err(e) => CommandResult { success: false, data: None, error: Some(e.to_message()) },
+    }
 }
 
 // --- Foods (recipes) ------------------------------------------------------
@@ -1281,162 +1079,421 @@ fn list_foods(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Va
 /// Creates a food with its whole composition.
 ///
 /// The composition is written wholesale rather than appended to, so a corrected
-/// recipe cannot leave a stale part behind.
+/// recipe cannot leave a stale part behind -- and `POST /foods` takes the
+/// incoming list as the whole recipe for the same reason.
 #[tauri::command]
-fn create_food(
-    state: tauri::State<AppState>,
+async fn create_food(
+    state: tauri::State<'_, AppState>,
     name: String,
     components: Vec<serde_json::Value>,
-) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
-    if name.trim().is_empty() { return CommandResult{success:false,data:None,error:Some("Name is required".into())}; }
-    if components.is_empty() { return CommandResult{success:false,data:None,error:Some("A food needs at least one ingredient".into())}; }
-    let id = uuid::Uuid::now_v7().to_string();
-    let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e) = conn.execute(
-        "INSERT INTO foods (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
-        rusqlite::params![id, name.trim(), now],
-    ) { return CommandResult{success:false,data:None,error:Some(format!("insert {e}"))}; }
-
-    match write_food_components(&conn, &id, &components) {
-        Ok(()) => {
-            let nutrition = resolve_food_nutrition(&conn, &id).ok().flatten();
-            CommandResult{success:true,data:Some(serde_json::json!({"id":id,"nutrition":nutrition})),error:None}
-        }
-        Err(e) => CommandResult{success:false,data:None,error:Some(e)},
+) -> Result<CommandResult<serde_json::Value>, String> {
+    if let Err(e) = check_food_name(&name) {
+        return Ok(CommandResult { success: false, data: None, error: Some(e) });
     }
+    if let Err(e) = check_components(&state, &components) {
+        return Ok(CommandResult { success: false, data: None, error: Some(e) });
+    }
+    let id = uuid::Uuid::now_v7().to_string();
+    let payload = serde_json::json!({
+        "items": [{
+            "id": id,
+            "name": name.trim(),
+            "createdAt": now_ms(),
+            "archivedAt": serde_json::Value::Null,
+            "components": components,
+        }],
+        "deleted": [],
+    });
+    Ok(push_ok("/foods", &payload, serde_json::json!({ "id": id })).await)
 }
 
 #[tauri::command]
-fn update_food(
-    state: tauri::State<AppState>,
+async fn update_food(
+    state: tauri::State<'_, AppState>,
     id: String,
     name: String,
     components: Vec<serde_json::Value>,
-) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
-    if name.trim().is_empty() { return CommandResult{success:false,data:None,error:Some("Name is required".into())}; }
-    if components.is_empty() { return CommandResult{success:false,data:None,error:Some("A food needs at least one ingredient".into())}; }
-    let exists: i64 = conn
-        .query_row("SELECT count(*) FROM foods WHERE id=?1", [&id], |r| r.get(0))
-        .unwrap_or(0);
-    if exists == 0 { return CommandResult{success:false,data:None,error:Some("Food not found".into())}; }
-
-    let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e) = conn.execute(
-        "UPDATE foods SET name=?1, updated_at=?2 WHERE id=?3",
-        rusqlite::params![name.trim(), now, id],
-    ) { return CommandResult{success:false,data:None,error:Some(format!("update {e}"))}; }
-
-    match write_food_components(&conn, &id, &components) {
-        Ok(()) => {
-            let nutrition = resolve_food_nutrition(&conn, &id).ok().flatten();
-            CommandResult{success:true,data:Some(serde_json::json!({"nutrition":nutrition})),error:None}
-        }
-        Err(e) => CommandResult{success:false,data:None,error:Some(e)},
+) -> Result<CommandResult<serde_json::Value>, String> {
+    if let Err(e) = check_food_name(&name) {
+        return Ok(CommandResult { success: false, data: None, error: Some(e) });
     }
+    if let Err(e) = check_components(&state, &components) {
+        return Ok(CommandResult { success: false, data: None, error: Some(e) });
+    }
+    // The push replaces the whole row, so the fields the form does not carry --
+    // when it was created, whether it is archived -- have to be read back first.
+    let Some(mut food) = read_food_for_push(&state, &id) else {
+        return Ok(CommandResult { success: false, data: None, error: Some("Food not found".into()) });
+    };
+    if let Some(obj) = food.as_object_mut() {
+        obj.insert("name".into(), serde_json::json!(name.trim()));
+        obj.insert("components".into(), serde_json::Value::Array(components));
+    }
+    Ok(push_ok("/foods", &serde_json::json!({ "items": [food], "deleted": [] }), serde_json::json!({ "id": id })).await)
 }
 
-/// Replaces a food's composition.
-///
-/// Part deletion travels by omission, which is why the whole list is rewritten
-/// instead of diffed: there is no way to express "remove this part" otherwise.
-fn write_food_components(
-    conn: &rusqlite::Connection,
-    food_id: &str,
-    components: &[serde_json::Value],
-) -> Result<(), String> {
-    let now = chrono::Utc::now().timestamp_millis();
-    conn.execute(
-        "DELETE FROM food_ingredients WHERE food_id=?1",
-        rusqlite::params![food_id],
-    )
-    .map_err(|e| format!("clear {e}"))?;
+#[tauri::command]
+async fn archive_food(state: tauri::State<'_, AppState>, id: String) -> Result<CommandResult<serde_json::Value>, String> {
+    push_food_archived(&state, id, true).await
+}
 
-    let mut seen: Vec<String> = Vec::new();
-    for component in components {
-        let ingredient_id = component
-            .get("ingredientId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "component is missing ingredientId".to_string())?;
-        let amount = component
-            .get("amount")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| "component is missing amount".to_string())?;
-        // The amounts are the denominator of the per-100g derivation, so a zero
-        // one leaves the food unresolvable.
-        if amount <= 0.0 {
-            return Err("Every amount must be greater than 0".into());
-        }
-        if seen.iter().any(|s| s == ingredient_id) {
-            return Err("The same ingredient cannot appear twice in one food".into());
-        }
-        seen.push(ingredient_id.to_string());
-        // An unknown or archived part is rejected rather than inserted: foreign
-        // keys are enforced, so it would otherwise abort the whole write.
-        let known: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM ingredients WHERE id=?1 AND is_archived=0",
-                [ingredient_id],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        if known == 0 {
-            return Err("An ingredient in this food is unknown or archived".into());
-        }
-        conn.execute(
-            "INSERT INTO food_ingredients (food_id, ingredient_id, amount, updated_at) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![food_id, ingredient_id, amount, now],
-        )
-        .map_err(|e| format!("insert {e}"))?;
+#[tauri::command]
+async fn restore_food(state: tauri::State<'_, AppState>, id: String) -> Result<CommandResult<serde_json::Value>, String> {
+    push_food_archived(&state, id, false).await
+}
+
+/// Archives or restores a food by re-sending it with `archivedAt` set or null.
+///
+/// The server has no archive endpoint for foods; `archivedAt` rides along on the
+/// ordinary push, so the rest of the row has to be read back and resent intact.
+async fn push_food_archived(
+    state: &tauri::State<'_, AppState>,
+    id: String,
+    archived: bool,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let Some(mut food) = read_food_for_push(state, &id) else {
+        return Ok(CommandResult { success: false, data: None, error: Some("Food not found".into()) });
+    };
+    if let Some(obj) = food.as_object_mut() {
+        obj.insert(
+            "archivedAt".into(),
+            if archived { serde_json::json!(now_ms()) } else { serde_json::Value::Null },
+        );
+    }
+    Ok(push_ok("/foods", &serde_json::json!({ "items": [food], "deleted": [] }), serde_json::json!({ "id": id })).await)
+}
+
+fn check_food_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("Name is required".into());
     }
     Ok(())
 }
 
-/// Archives a food rather than deleting it, so meals that logged it keep
-/// rendering from their own snapshot.
-#[tauri::command]
-fn archive_food(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
-    let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e) = conn.execute(
-        "UPDATE foods SET archived_at=?1, updated_at=?1 WHERE id=?2",
-        rusqlite::params![now, id],
-    ) { return CommandResult{success:false,data:None,error:Some(format!("archive {e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+/// Validates a composition before it is sent.
+///
+/// The server does none of this: `POST /foods` silently drops a part naming an
+/// ingredient it has never seen, and accepts negative amounts. Validating here
+/// is what turns those into a clear refusal instead of a recipe that quietly
+/// loses an ingredient after it was reported as saved.
+fn check_components(
+    state: &tauri::State<'_, AppState>,
+    components: &[serde_json::Value],
+) -> Result<(), String> {
+    if components.is_empty() {
+        return Err("A food needs at least one ingredient".into());
+    }
+    let conn = state.db.lock().map_err(|e| format!("lock {e}"))?;
+    let mut seen: Vec<String> = Vec::new();
+    for (i, c) in components.iter().enumerate() {
+        let ingredient_id = c.get("ingredientId").and_then(|v| v.as_str()).unwrap_or_default();
+        if ingredient_id.is_empty() {
+            return Err(format!("Part {} has no ingredient", i + 1));
+        }
+        let amount = c.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        if amount <= 0.0 {
+            return Err(format!("Part {} needs an amount greater than zero", i + 1));
+        }
+        if seen.iter().any(|s| s == ingredient_id) {
+            return Err(format!("Ingredient {ingredient_id} appears twice"));
+        }
+        seen.push(ingredient_id.to_string());
+
+        let known: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM ingredients WHERE id=?1 AND is_archived=0 AND deleted_at IS NULL",
+                params![ingredient_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if known == 0 {
+            return Err(format!("Unknown ingredient {ingredient_id}"));
+        }
+    }
+    Ok(())
+}
+
+/// A food in the shape `POST /foods` expects, with its composition included.
+fn read_food_for_push(state: &tauri::State<'_, AppState>, id: &str) -> Option<serde_json::Value> {
+    let conn = state.db.lock().ok()?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, created_at, archived_at FROM foods WHERE id=?1 AND deleted_at IS NULL")
+        .ok()?;
+    let food = stmt.query_row(params![id], |r| {
+        Ok(serde_json::json!({
+            "id": r.get::<_, String>(0)?,
+            "name": r.get::<_, String>(1)?,
+            "createdAt": r.get::<_, i64>(2)?,
+            "archivedAt": r.get::<_, Option<i64>>(3)?,
+        }))
+    });
+    let food = food.ok()?;
+    drop(stmt);
+
+    let parts: Vec<serde_json::Value> = sub_rows(
+        &conn,
+        "food_ingredients",
+        "food_id",
+        id,
+        &["ingredient_id", "amount"],
+        "food_id",
+    );
+    let mut food = food;
+    if let Some(obj) = food.as_object_mut() {
+        // `food_id` is not part of a component payload; the list is scoped by it.
+        obj.insert("components".into(), serde_json::Value::Array(
+            parts.into_iter().map(|p| {
+                serde_json::json!({
+                    "ingredientId": p.get("ingredient_id").cloned().unwrap_or(serde_json::Value::Null),
+                    "amount": p.get("amount").cloned().unwrap_or(serde_json::Value::Null),
+                })
+            }).collect(),
+        ));
+    }
+    Some(food)
+}
+
+/// Reads a whole template tree in the shape `POST /templates` expects.
+///
+/// The endpoint upserts all three tables from a single payload, so every
+/// template edit has to start from the current state of the tree rather than
+/// sending only the changed row -- otherwise the parts left out of the payload
+/// would be recreated as-is and nothing would ever be removable.
+fn template_payload(state: &tauri::State<'_, AppState>, template_id: &str) -> Option<serde_json::Value> {
+    let conn = state.db.lock().ok()?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, notes, start_date, recurrence, excluded_dates, source_routine_id, created_at, updated_at
+             FROM workout_templates WHERE id=?1 AND deleted_at IS NULL",
+        )
+        .ok()?;
+    let template = stmt.query_row(params![template_id], |r| {
+        Ok(serde_json::json!({
+            "id": r.get::<_, String>(0)?,
+            "name": r.get::<_, String>(1)?,
+            "notes": r.get::<_, Option<String>>(2)?,
+            "startDate": r.get::<_, i64>(3)?,
+            "recurrence": r.get::<_, Option<String>>(4)?,
+            "excludedDates": r.get::<_, Option<String>>(5)?,
+            "sourceRoutineId": r.get::<_, Option<String>>(6)?,
+            "createdAt": r.get::<_, i64>(7)?,
+            "updatedAt": r.get::<_, i64>(8)?,
+        }))
+    });
+    let template = template.ok()?;
+    drop(stmt);
+
+    let exercises: Vec<serde_json::Value> = sub_rows(
+        &conn,
+        "workout_template_exercises",
+        "template_id",
+        template_id,
+        &["id", "exercise_id", "sort_order", "notes"],
+        "template_id",
+    )
+    .into_iter()
+    .map(|r| {
+        serde_json::json!({
+            "id": r.get("id").cloned().unwrap_or(serde_json::Value::Null),
+            "templateId": r.get("template_id").cloned().unwrap_or(serde_json::Value::Null),
+            "exerciseId": r.get("exercise_id").cloned().unwrap_or(serde_json::Value::Null),
+            "sortOrder": r.get("sort_order").cloned().unwrap_or(serde_json::Value::Null),
+            "notes": r.get("notes").cloned().unwrap_or(serde_json::Value::Null),
+        })
+    })
+    .collect();
+
+    // Sets are addressed by their exercise, so every exercise in the tree has
+    // to be walked, not just the one being edited.
+    let mut sets: Vec<serde_json::Value> = Vec::new();
+    for ex in &exercises {
+        let Some(ex_id) = ex.get("id").and_then(|v| v.as_str()) else { continue };
+        for s in sub_rows(
+            &conn,
+            "workout_template_sets",
+            "template_exercise_id",
+            ex_id,
+            &["id", "set_number", "reps", "weight_kg", "rest_seconds", "duration_minutes", "distance_meters"],
+            "template_exercise_id",
+        ) {
+            sets.push(serde_json::json!({
+                "id": s.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                "templateExerciseId": s.get("template_exercise_id").cloned().unwrap_or(serde_json::Value::Null),
+                "setNumber": s.get("set_number").cloned().unwrap_or(serde_json::Value::Null),
+                "reps": s.get("reps").cloned().unwrap_or(serde_json::Value::Null),
+                "weightKg": s.get("weight_kg").cloned().unwrap_or(serde_json::Value::Null),
+                "restSeconds": s.get("rest_seconds").cloned().unwrap_or(serde_json::Value::Null),
+                "durationMinutes": s.get("duration_minutes").cloned().unwrap_or(serde_json::Value::Null),
+                "distanceMeters": s.get("distance_meters").cloned().unwrap_or(serde_json::Value::Null),
+            }));
+        }
+    }
+
+    Some(serde_json::json!({
+        "workoutTemplates": [template],
+        "workoutTemplateExercises": exercises,
+        "workoutTemplateSets": sets,
+        "deleted": [],
+    }))
 }
 
 #[tauri::command]
-fn restore_food(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
-    let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e) = conn.execute(
-        "UPDATE foods SET archived_at=NULL, updated_at=?1 WHERE id=?2",
-        rusqlite::params![now, id],
-    ) { return CommandResult{success:false,data:None,error:Some(format!("restore {e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+async fn create_template(id: String, name: String) -> CommandResult<serde_json::Value> {
+    let now = now_ms();
+    push_ok("/templates", &serde_json::json!({
+        "workoutTemplates": [{
+            "id": id, "name": name, "notes": serde_json::Value::Null,
+            "startDate": now, "recurrence": serde_json::Value::Null,
+            "excludedDates": serde_json::Value::Null, "sourceRoutineId": serde_json::Value::Null,
+            "createdAt": now, "updatedAt": now,
+        }],
+        "workoutTemplateExercises": [],
+        "workoutTemplateSets": [],
+        "deleted": [],
+    }), serde_json::json!({ "id": id }))
+    .await
 }
 
 #[tauri::command]
-fn create_template(state: tauri::State<AppState>, id: String, name: String) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
-    let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e)=conn.execute("INSERT INTO workout_templates (id, name, start_date, created_at, updated_at) VALUES (?1,?2,?3,?4,?5)", rusqlite::params![id, name, now, now, now]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+async fn update_template(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    name: String,
+    notes: Option<String>,
+    recurrence: Option<String>,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let Some(mut payload) = template_payload(&state, &id) else {
+        return Ok(CommandResult { success: false, data: None, error: Some("Template not found".into()) });
+    };
+    if let Some(list) = payload.get_mut("workoutTemplates").and_then(|v| v.as_array_mut()) {
+        if let Some(first) = list.first_mut().and_then(|v| v.as_object_mut()) {
+            first.insert("name".into(), serde_json::json!(name));
+            first.insert("notes".into(), serde_json::json!(notes));
+            first.insert("recurrence".into(), serde_json::json!(recurrence));
+        }
+    }
+    Ok(push_ok("/templates", &payload, serde_json::json!({ "id": id })).await)
 }
+
+/// Deletes a template by tombstoning it.
+///
+/// The server has no DELETE; a tombstone is what every pull filters on, and the
+/// exercises and sets have to be named too or they would be orphaned pointing at
+/// a template nothing can see.
 #[tauri::command]
-fn update_template(state: tauri::State<AppState>, id: String, name: String, notes: Option<String>, recurrence: Option<String>) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
-    let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e)=conn.execute("UPDATE workout_templates SET name=?1, notes=?2, recurrence=?3, updated_at=?4 WHERE id=?5", rusqlite::params![name, notes, recurrence, now, id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+async fn delete_template(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let Some(mut payload) = template_payload(&state, &id) else {
+        return Ok(CommandResult { success: false, data: None, error: Some("Template not found".into()) });
+    };
+    let mut deleted: Vec<String> = vec![id.clone()];
+    if let Some(list) = payload.get("workoutTemplateSets").and_then(|v| v.as_array()) {
+        deleted.extend(list.iter().filter_map(|s| s.get("id").and_then(|v| v.as_str()).map(String::from)));
+    }
+    if let Some(list) = payload.get("workoutTemplateExercises").and_then(|v| v.as_array()) {
+        deleted.extend(list.iter().filter_map(|e| e.get("id").and_then(|v| v.as_str()).map(String::from)));
+    }
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("deleted".into(), serde_json::json!(deleted));
+    }
+    Ok(push_ok("/templates", &payload, serde_json::json!({ "id": id })).await)
 }
+
 #[tauri::command]
-fn delete_template(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
-    if let Err(e)=conn.execute("DELETE FROM workout_templates WHERE id=?1", rusqlite::params![id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+async fn add_template_exercise(
+    state: tauri::State<'_, AppState>,
+    templateId: String,
+    exerciseId: String,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let Some(mut payload) = template_payload(&state, &templateId) else {
+        return Ok(CommandResult { success: false, data: None, error: Some("Template not found".into()) });
+    };
+    let next_sort = payload
+        .get("workoutTemplateExercises")
+        .and_then(|v| v.as_array())
+        .and_then(|list| list.iter().filter_map(|e| e.get("sortOrder").and_then(|v| v.as_i64())).max())
+        .map(|m| m + 1)
+        .unwrap_or(0);
+    let id = uuid::Uuid::now_v7().to_string();
+    if let Some(list) = payload.get_mut("workoutTemplateExercises").and_then(|v| v.as_array_mut()) {
+        list.push(serde_json::json!({
+            "id": id, "templateId": templateId, "exerciseId": exerciseId,
+            "sortOrder": next_sort, "notes": serde_json::Value::Null,
+        }));
+    }
+    Ok(push_ok("/templates", &payload, serde_json::json!({ "id": id })).await)
 }
+
+#[tauri::command]
+async fn update_template_exercise(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    notes: Option<String>,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let Some((template_id, payload)) = find_template_of_exercise(&state, &id) else {
+        return Ok(CommandResult { success: false, data: None, error: Some("Template exercise not found".into()) });
+    };
+    let mut payload = payload;
+    if let Some(list) = payload.get_mut("workoutTemplateExercises").and_then(|v| v.as_array_mut()) {
+        for e in list.iter_mut() {
+            if e.get("id").and_then(|v| v.as_str()) == Some(id.as_str()) {
+                e.as_object_mut().map(|o| o.insert("notes".into(), serde_json::json!(notes)));
+            }
+        }
+    }
+    Ok(push_ok("/templates", &payload, serde_json::json!({ "id": id, "templateId": template_id })).await)
+}
+
+#[tauri::command]
+async fn delete_template_exercise(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let Some((template_id, mut payload)) = find_template_of_exercise(&state, &id) else {
+        return Ok(CommandResult { success: false, data: None, error: Some("Template exercise not found".into()) });
+    };
+    // Its sets go too, or they would be left pointing at a tombstoned exercise.
+    let mut deleted = vec![id.clone()];
+    if let Some(list) = payload.get("workoutTemplateSets").and_then(|v| v.as_array()) {
+        deleted.extend(
+            list.iter()
+                .filter(|s| s.get("templateExerciseId").and_then(|v| v.as_str()) == Some(id.as_str()))
+                .filter_map(|s| s.get("id").and_then(|v| v.as_str()).map(String::from)),
+        );
+    }
+    if let Some(list) = payload.get_mut("workoutTemplateExercises").and_then(|v| v.as_array_mut()) {
+        list.retain(|e| e.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
+    }
+    if let Some(list) = payload.get_mut("workoutTemplateSets").and_then(|v| v.as_array_mut()) {
+        list.retain(|s| s.get("templateExerciseId").and_then(|v| v.as_str()) != Some(id.as_str()));
+    }
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("deleted".into(), serde_json::json!(deleted));
+    }
+    Ok(push_ok("/templates", &payload, serde_json::json!({ "id": id, "templateId": template_id })).await)
+}
+
+/// The template an exercise belongs to, with that template's whole payload.
+fn find_template_of_exercise(
+    state: &tauri::State<'_, AppState>,
+    exercise_id: &str,
+) -> Option<(String, serde_json::Value)> {
+    let conn = state.db.lock().ok()?;
+    let template_id: String = conn
+        .query_row(
+            "SELECT template_id FROM workout_template_exercises WHERE id=?1 AND deleted_at IS NULL",
+            params![exercise_id],
+            |r| r.get(0),
+        )
+        .ok()?;
+    drop(conn);
+    template_payload(state, &template_id).map(|p| (template_id, p))
+}
+
+/// Reads a whole template with its exercises and sets, for the detail pane.
 #[tauri::command]
 fn get_template(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
     let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
@@ -1450,53 +1507,105 @@ fn get_template(state: tauri::State<AppState>, id: String) -> CommandResult<serd
     }
     CommandResult{success:true,data:Some(serde_json::json!({"template":tpl,"exercises":exercises_out})),error:None}
 }
-#[tauri::command]
-fn add_template_exercise(state: tauri::State<AppState>, templateId: String, exerciseId: String) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
-    let now = chrono::Utc::now().timestamp_millis();
-    let id = uuid::Uuid::now_v7().to_string();
-    let max_sort: Option<i64> = conn.query_row("SELECT MAX(sort_order) FROM workout_template_exercises WHERE template_id = ?1 AND deleted_at IS NULL", rusqlite::params![templateId], |r| r.get(0)).unwrap_or(None);
-    let sort_order = max_sort.map(|m| m + 1).unwrap_or(0);
-    if let Err(e)=conn.execute("INSERT INTO workout_template_exercises (id, template_id, exercise_id, sort_order, updated_at) VALUES (?1,?2,?3,?4,?5)", rusqlite::params![id, templateId, exerciseId, sort_order, now]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
-}
-#[tauri::command]
-fn update_template_exercise(state: tauri::State<AppState>, id: String, notes: Option<String>) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
-    let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e)=conn.execute("UPDATE workout_template_exercises SET notes=?1, updated_at=?2 WHERE id=?3", rusqlite::params![notes, now, id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
-}
-#[tauri::command]
-fn delete_template_exercise(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
-    if let Err(e)=conn.execute("DELETE FROM workout_template_exercises WHERE id=?1", rusqlite::params![id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
-}
-#[tauri::command]
-fn add_template_set(state: tauri::State<AppState>, templateExerciseId: String, reps: Option<i64>, weightKg: Option<f64>, restSeconds: Option<i64>, durationMinutes: Option<i64>, distanceMeters: Option<f64>) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
-    let now = chrono::Utc::now().timestamp_millis();
-    let id = uuid::Uuid::now_v7().to_string();
-    let max_num: Option<i64> = conn.query_row("SELECT MAX(set_number) FROM workout_template_sets WHERE template_exercise_id = ?1 AND deleted_at IS NULL", rusqlite::params![templateExerciseId], |r| r.get(0)).unwrap_or(None);
-    let set_number = max_num.map(|m| m + 1).unwrap_or(1);
-    if let Err(e)=conn.execute("INSERT INTO workout_template_sets (id, template_exercise_id, set_number, reps, weight_kg, rest_seconds, duration_minutes, distance_meters, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", rusqlite::params![id, templateExerciseId, set_number, reps, weightKg, restSeconds, durationMinutes, distanceMeters, now]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
-}
-#[tauri::command]
-fn update_template_set(state: tauri::State<AppState>, id: String, reps: Option<i64>, weightKg: Option<f64>, restSeconds: Option<i64>, durationMinutes: Option<i64>, distanceMeters: Option<f64>) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
-    let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e)=conn.execute("UPDATE workout_template_sets SET reps=?1, weight_kg=?2, rest_seconds=?3, duration_minutes=?4, distance_meters=?5, updated_at=?6 WHERE id=?7", rusqlite::params![reps, weightKg, restSeconds, durationMinutes, distanceMeters, now, id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
-}
-#[tauri::command]
-fn delete_template_set(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
-    if let Err(e)=conn.execute("DELETE FROM workout_template_sets WHERE id=?1", rusqlite::params![id]) { return CommandResult{success:false,data:None,error:Some(format!("{e}"))}; }
-    CommandResult{success:true,data:Some(serde_json::json!({"id":id})),error:None}
+
+/// The template a set belongs to, with that template's whole payload.
+fn find_template_of_set(
+    state: &tauri::State<'_, AppState>,
+    set_id: &str,
+) -> Option<(String, serde_json::Value)> {
+    let conn = state.db.lock().ok()?;
+    let exercise_id: String = conn
+        .query_row(
+            "SELECT template_exercise_id FROM workout_template_sets WHERE id=?1 AND deleted_at IS NULL",
+            params![set_id],
+            |r| r.get(0),
+        )
+        .ok()?;
+    drop(conn);
+    find_template_of_exercise(state, &exercise_id)
 }
 
+#[tauri::command]
+async fn add_template_set(
+    state: tauri::State<'_, AppState>,
+    templateExerciseId: String,
+    reps: Option<i64>,
+    weightKg: Option<f64>,
+    restSeconds: Option<i64>,
+    durationMinutes: Option<i64>,
+    distanceMeters: Option<f64>,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let Some((template_id, mut payload)) = find_template_of_exercise(&state, &templateExerciseId) else {
+        return Ok(CommandResult { success: false, data: None, error: Some("Template exercise not found".into()) });
+    };
+    let next_number = payload
+        .get("workoutTemplateSets")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter(|s| s.get("templateExerciseId").and_then(|v| v.as_str()) == Some(templateExerciseId.as_str()))
+                .filter_map(|s| s.get("setNumber").and_then(|v| v.as_i64()))
+                .max()
+                .map(|m| m + 1)
+                .unwrap_or(1)
+        })
+        .unwrap_or(1);
+    let id = uuid::Uuid::now_v7().to_string();
+    if let Some(list) = payload.get_mut("workoutTemplateSets").and_then(|v| v.as_array_mut()) {
+        list.push(serde_json::json!({
+            "id": id, "templateExerciseId": templateExerciseId, "setNumber": next_number,
+            "reps": reps, "weightKg": weightKg, "restSeconds": restSeconds,
+            "durationMinutes": durationMinutes, "distanceMeters": distanceMeters,
+        }));
+    }
+    Ok(push_ok("/templates", &payload, serde_json::json!({ "id": id, "templateId": template_id })).await)
+}
+
+#[tauri::command]
+async fn update_template_set(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    reps: Option<i64>,
+    weightKg: Option<f64>,
+    restSeconds: Option<i64>,
+    durationMinutes: Option<i64>,
+    distanceMeters: Option<f64>,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let Some((template_id, mut payload)) = find_template_of_set(&state, &id) else {
+        return Ok(CommandResult { success: false, data: None, error: Some("Set not found".into()) });
+    };
+    if let Some(list) = payload.get_mut("workoutTemplateSets").and_then(|v| v.as_array_mut()) {
+        for s in list.iter_mut() {
+            if s.get("id").and_then(|v| v.as_str()) == Some(id.as_str()) {
+                if let Some(obj) = s.as_object_mut() {
+                    obj.insert("reps".into(), serde_json::json!(reps));
+                    obj.insert("weightKg".into(), serde_json::json!(weightKg));
+                    obj.insert("restSeconds".into(), serde_json::json!(restSeconds));
+                    obj.insert("durationMinutes".into(), serde_json::json!(durationMinutes));
+                    obj.insert("distanceMeters".into(), serde_json::json!(distanceMeters));
+                }
+            }
+        }
+    }
+    Ok(push_ok("/templates", &payload, serde_json::json!({ "id": id, "templateId": template_id })).await)
+}
+
+#[tauri::command]
+async fn delete_template_set(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let Some((template_id, mut payload)) = find_template_of_set(&state, &id) else {
+        return Ok(CommandResult { success: false, data: None, error: Some("Set not found".into()) });
+    };
+    if let Some(list) = payload.get_mut("workoutTemplateSets").and_then(|v| v.as_array_mut()) {
+        list.retain(|s| s.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
+    }
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("deleted".into(), serde_json::json!([id]));
+    }
+    Ok(push_ok("/templates", &payload, serde_json::json!({ "id": id, "templateId": template_id })).await)
+}
 // ---- Config commands (from T04) ----
 
 #[derive(Serialize)]
@@ -1642,11 +1751,8 @@ fn save_config(json: String) -> ConfigResponse {
 pub fn run() {
     let db_path = get_database_path();
     let conn = init_database(&db_path).expect("Failed to initialize database");
-    let notes_dir = get_notes_dir();
-
     let app_state = AppState {
         db: Mutex::new(conn),
-        notes_dir,
     };
 
     tauri::Builder::default()
@@ -1687,7 +1793,6 @@ pub fn run() {
             list_fx_rates,
             create_store,
             create_fx_rate,
-            update_exercise,
             update_ingredient,
             create_ingredient,
             list_foods,
@@ -1712,6 +1817,37 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    /// The desktop app must not be able to write the database.
+    ///
+    /// That is the whole basis for routing every write through the server: it
+    /// makes this process not just a convention away from writing but
+    /// structurally unable to, and unable to migrate the schema even by
+    /// accident. If the flags are ever loosened this fails.
+    #[test]
+    fn the_app_connection_cannot_write() {
+        let dir = std::env::temp_dir().join(format!("maia-test-ro-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("maia.db");
+
+        // Create the file through the server's migrator first, since the app
+        // opens read-only and cannot create anything itself.
+        let pool = sync_server::db::init_db(&path).unwrap();
+        drop(pool);
+
+        let conn = init_database(path.to_str().unwrap()).expect("read-only open should succeed");
+        conn.query_row("SELECT count(*) FROM stores", [], |r| r.get::<_, i64>(0))
+            .expect("reads should work");
+
+        let write = conn.execute(
+            "INSERT INTO stores (id, name, created_at, updated_at) VALUES ('s1','S',1,1)",
+            [],
+        );
+        assert!(
+            write.is_err(),
+            "the app's connection must refuse writes; got {:?}",
+            write.ok()
+        );
+    }
     use super::*;
     use serde_json::json;
 
