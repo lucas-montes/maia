@@ -82,7 +82,6 @@ mod tests {
 
     #[tokio::test]
     async fn pull_exercises_since_filtering() {
-        use crate::db;
         let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
@@ -125,7 +124,6 @@ mod tests {
 
     #[tokio::test]
     async fn pull_ingredients_nested() {
-        use crate::db;
         let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
@@ -159,7 +157,6 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_and_item_routes() {
-        use crate::db;
         let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
@@ -228,7 +225,6 @@ mod tests {
 
     #[tokio::test]
     async fn pull_fx_rates_filtered() {
-        use crate::db;
         let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
@@ -262,7 +258,6 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_local_hit_and_invalid() {
-        use crate::db;
         let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
@@ -307,7 +302,6 @@ mod tests {
 
     #[tokio::test]
     async fn push_ingredient_idempotent() {
-        use crate::db;
         let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
@@ -344,7 +338,6 @@ mod tests {
 
     #[tokio::test]
     async fn push_foods_idempotent_and_replaces_composition() {
-        use crate::db;
         let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
@@ -429,7 +422,6 @@ mod tests {
 
     #[tokio::test]
     async fn pull_foods_nests_composition_without_nutrition() {
-        use crate::db;
         let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
@@ -768,7 +760,6 @@ mod tests {
     }
     #[tokio::test]
     async fn push_workouts_atomic() {
-        use crate::db;
         let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
@@ -793,7 +784,6 @@ mod tests {
 
     #[tokio::test]
     async fn push_templates_atomic() {
-        use crate::db;
         let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
@@ -818,7 +808,6 @@ mod tests {
 
     #[tokio::test]
     async fn receipt_pictures_json_fallback() {
-        use crate::db;
         let pool = crate::db::init_memory().unwrap();
         let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
         let client = reqwest::Client::new();
@@ -935,7 +924,6 @@ mod tests {
     /// Spins up a server on a temp DB with a (fake) model key so `state.ocr` is
     /// populated, and returns the temp dir so the caller can clean up.
     async fn start_receipt_ocr_server(model_key: Option<&str>) -> (u16, tokio::task::JoinHandle<()>, std::path::PathBuf) {
-        use crate::db;
         let dir = std::env::temp_dir().join(format!("maia-test-ocr-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("maia.db");
@@ -943,7 +931,7 @@ mod tests {
         if let Some(k) = model_key {
             config = config.with_model(k, "gemini-2.5-flash");
         }
-        let pool = db::init_db(&config.db_path).unwrap();
+        let pool = crate::db::init_db(&config.db_path).unwrap();
         let (port, handle) = crate::server::start_test_server_with_config(config, pool).await;
         (port, handle, dir)
     }
@@ -1156,7 +1144,6 @@ mod tests {
         // A phone push must not wipe archive bookkeeping recorded by the
         // desktop: the legacy handler's ON CONFLICT clause lists columns
         // explicitly, so archived_* are left alone.
-        use crate::db;
         let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();
@@ -1498,7 +1485,6 @@ mod tests {
 
     #[tokio::test]
     async fn read_workouts_meals_body_metrics() {
-        use crate::db;
         let pool = crate::db::init_memory().unwrap();
         {
             let conn = pool.get().unwrap();

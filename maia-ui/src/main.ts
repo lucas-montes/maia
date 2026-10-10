@@ -1,10 +1,9 @@
 import "./styles/tailwind.css";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import Chart from "chart.js/auto";
 import QRCode from "qrcode";
 
-type ViewId = "dashboard" | "exercises" | "workouts" | "templates" | "ingredients" | "foods" | "stores" | "meals" | "bodyMetrics" | "experiments" | "todos" | "receipts" | "notes" | "settings" | "goals" | "urls" | "fitfat" | "tags" | "accounts" | "transactions" | "fxRates";
+type ViewId = "dashboard" | "exercises" | "workouts" | "templates" | "ingredients" | "foods" | "stores" | "meals" | "bodyMetrics" | "experiments" | "todos" | "receipts" | "notes" | "settings" | "goals" | "urls" | "sync" | "tags" | "accounts" | "transactions" | "fxRates";
 
 interface Note {
   id: number;
@@ -39,12 +38,12 @@ interface Receipt {
 }
 
 interface SavedUrl {
-  id: number;
+  id: string;
   title: string | null;
   url: string;
   source: string | null;
   tags: string;
-  is_new: number;
+  is_new: boolean;
   created_at: string;
 }
 
@@ -128,25 +127,19 @@ interface UrlsState {
   statusMessage: string;
 }
 
-interface FitFatState {
+interface SyncState {
   status: "idle" | "loading" | "error";
   statusMessage: string;
-  counts: { workouts: number; meals: number; bodyMetrics: number; exercises: number } | null;
-  workouts: any[];
-  meals: any[];
-  bodyMetrics: any[];
-  exercises: any[];
-  filters: { workoutsSince: string; mealsSince: string; bodySince: string };
-  exerciseSearch: string;
-  selectedExerciseId: string | null;
-  syncUrl: string;
+  port: number;
+  localUrl: string;
   lanUrl: string;
+  lanIp: string;
   apiKey: string;
+  isListening: boolean;
   qrDataUrl: string | null;
-  serverHealth: "checking" | "online" | "offline";
-  lastHealthCheck: string;
-  diagnostics: any | null;
 }
+
+interface WorkoutsState { items: any[] }
 
 interface ExercisesState { items: any[]; filtered: any[]; search: string; bodyPart: string; equipment: string; hasImage: string; selectedId: string | null; status: "idle"|"loading"|"error"; statusMessage: string; }
 interface IngredientsState { items: any[]; search: string; selectedId: string | null; status: "idle"|"loading"|"error"; statusMessage: string; showAddModal: boolean; }
@@ -182,7 +175,8 @@ interface AppState {
   goals: GoalsState;
   dashboard: DashboardState;
   urls: UrlsState;
-  fitfat: FitFatState;
+  sync: SyncState;
+  workouts: WorkoutsState;
   exercises: ExercisesState;
   ingredients: IngredientsState;
   foods: FoodsState;
@@ -315,25 +309,18 @@ const defaultAppState = (): AppState => ({
     status: "idle",
     statusMessage: "",
   },
-  fitfat: {
+  sync: {
     status: "idle",
     statusMessage: "",
-    counts: null,
-    workouts: [],
-    meals: [],
-    bodyMetrics: [],
-    exercises: [],
-    filters: { workoutsSince: "", mealsSince: "", bodySince: "" },
-    exerciseSearch: "",
-    selectedExerciseId: null,
-    syncUrl: "",
+    port: 0,
+    localUrl: "",
     lanUrl: "",
+    lanIp: "",
     apiKey: "",
+    isListening: false,
     qrDataUrl: null,
-    serverHealth: "checking",
-    lastHealthCheck: "",
-    diagnostics: null,
   },
+  workouts: { items: [] },
   exercises: { items: [], filtered: [], search: "", bodyPart: "", equipment: "", hasImage: "", selectedId: null, status: "idle", statusMessage: "" },
   ingredients: { items: [], search: "", selectedId: null, status: "idle", statusMessage: "", showAddModal: false },
   foods: { items: [], status: "idle", statusMessage: "", editingId: null, editingName: "", draft: [], search: "" },
@@ -348,20 +335,20 @@ const defaultAppState = (): AppState => ({
 });
 
 let state: AppState = defaultAppState();
-let fitfatCharts: Record<string, Chart> = {};
+
+let syncInterval: number | null = null;
 
 function setView(view: ViewId): void {
-  if (fitfatHealthInterval) { clearInterval(fitfatHealthInterval); fitfatHealthInterval = null; }
+  if (syncInterval) { clearInterval(syncInterval); syncInterval = null; }
   state.view = view;
-  if (view === "fitfat") {
-    loadFitFat();
-    checkServerHealth();
-    loadDiagnostics();
-    fitfatHealthInterval = window.setInterval(() => { checkServerHealth(); loadDiagnostics(); }, 10000);
+  if (view === "sync") {
+    loadSync();
+    // Only the status needs refreshing; the pairing details do not change under
+    // the user, so this is cheap and stops the panel looking stale.
+    syncInterval = window.setInterval(() => { loadSync(); }, 10000);
   }
   if (view === "settings") {
     loadConfig();
-    if (!state.fitfat.lanUrl) loadFitFat();
   } else if (view === "notes") loadNotes();
   else if (view === "receipts") loadReceipts();
   else if (view === "todos") { loadTodos(); loadGoals(); }
@@ -369,7 +356,8 @@ function setView(view: ViewId): void {
   else if (view === "urls") loadUrls();
   else if (view === "dashboard") loadDashboardCounts();
   else if (view === "exercises") loadExercises();
-  else if (view === "workouts" || view === "templates") loadFitFat();
+  else if (view === "workouts") loadWorkouts();
+  else if (view === "templates") loadTemplates();
   else if (view === "ingredients") loadIngredients();
   else if (view === "foods") { loadFoods(); loadIngredients(); }
   else if (view === "stores") loadStores();
@@ -715,210 +703,111 @@ async function loadDashboardCounts(): Promise<void> {
   render();
 }
 
-function dateStrToSince(dateStr: string): number {
-  if (!dateStr) return 0;
-  const d = new Date(dateStr);
-  return isNaN(d.getTime()) ? 0 : d.getTime();
-}
+// ---- Sync, workouts and templates ----
 
-function resolveSyncUrl(raw: string): string {
-  if (!raw) return "http://127.0.0.1:3030";
-  try {
-    const u = new URL(raw);
-    if (u.hostname === "0.0.0.0") u.hostname = "127.0.0.1";
-    return u.toString().replace(/\/$/, "");
-  } catch {
-    return raw.replace(/\/$/, "");
-  }
-}
-
-async function fetchFitFat(path: string, since: number): Promise<any> {
-  const url = resolveSyncUrl(state.fitfat.syncUrl);
-  const sep = path.includes("?") ? "&" : "?";
-  const full = `${url}${path}${sep}since=${since}`;
-  const res = await fetch(full, { headers: { Authorization: `Bearer ${state.fitfat.apiKey}` } });
-  if (!res.ok) throw new Error(`${path} ${res.status}`);
-  return res.json();
-}
-
-async function loadFitFat(): Promise<void> {
-  state.fitfat.status = "loading";
-  state.fitfat.statusMessage = "";
+/// Loads the pairing details from Rust.
+///
+/// Everything comes back from a Tauri command rather than being fetched here.
+/// The webview could not reliably reach the server at all, and the pairing panel
+/// is exactly where that failure is least welcome.
+async function loadSync(): Promise<void> {
+  state.sync.status = "loading";
   render();
   try {
-    const [url, lanUrl, apiKey] = await Promise.all([
-      invoke<string>("get_sync_url"),
-      invoke<string>("get_sync_lan_url").catch(() => "http://127.0.0.1:3030"),
-      invoke<string>("get_sync_api_key"),
-    ]);
-    state.fitfat.syncUrl = url || "http://127.0.0.1:3030";
-    state.fitfat.lanUrl = lanUrl || state.fitfat.syncUrl;
-    state.fitfat.apiKey = apiKey || "fitfat-sync-key";
-    const workoutsSince = dateStrToSince(state.fitfat.filters.workoutsSince);
-    const mealsSince = dateStrToSince(state.fitfat.filters.mealsSince);
-    const bodySince = dateStrToSince(state.fitfat.filters.bodySince);
-    const [workoutsRes, mealsRes, bodyRes, exercisesRes, templatesRes] = await Promise.all([
-      fetchFitFat("/workouts", workoutsSince).catch(() => ({ workouts: [], workoutExercises: [], exerciseSets: [] })),
-      fetchFitFat("/meals", mealsSince).catch(() => ({ meals: [], mealIngredients: [] })),
-      fetchFitFat("/body-metrics", bodySince).catch(() => ({ items: [] })),
-      fetchFitFat("/exercises", 0).catch(() => ({ items: [] })),
-      fetchFitFat("/templates", 0).catch(() => ({ items: [] })),
-    ]);
-    state.fitfat.workouts = workoutsRes.workouts || [];
-    (state.fitfat as any).workoutExercises = workoutsRes.workoutExercises || [];
-    (state.fitfat as any).exerciseSets = workoutsRes.exerciseSets || [];
-    state.fitfat.meals = mealsRes.meals || [];
-    (state.fitfat as any).mealIngredients = mealsRes.mealIngredients || [];
-    state.fitfat.bodyMetrics = bodyRes.items || bodyRes.bodyMetrics || [];
-    state.fitfat.exercises = exercisesRes.items || [];
-    (state as any).templates = { ...((state as any).templates||{}), items: templatesRes.items || [] };
-    const wCount = state.fitfat.workouts.length;
-    const mCount = state.fitfat.meals.length;
-    const bCount = state.fitfat.bodyMetrics.length;
-    const eCount = state.fitfat.exercises.length;
-    state.fitfat.counts = { workouts: wCount, meals: mCount, bodyMetrics: bCount, exercises: eCount };
-    state.fitfat.status = "idle";
-    await generateFitFatQR();
-  } catch (e) {
-    state.fitfat.status = "error";
-    state.fitfat.statusMessage = `Failed to load FitFat data: ${e}`;
-  }
-  render();
-  requestAnimationFrame(renderFitFatCharts);
-}
-
-async function generateFitFatQR(): Promise<void> {
-  const urlForQR = state.fitfat.lanUrl || resolveSyncUrl(state.fitfat.syncUrl);
-  if (!state.fitfat.apiKey || !urlForQR) return;
-  const payload = JSON.stringify({ url: urlForQR, apiKey: state.fitfat.apiKey, version: 1 });
-  try {
-    state.fitfat.qrDataUrl = await QRCode.toDataURL(payload, { width: 180, margin: 1 });
-  } catch {
-    state.fitfat.qrDataUrl = null;
-  }
-}
-
-let fitfatHealthInterval: number | null = null;
-
-async function checkServerHealth(): Promise<void> {
-  const localUrl = "http://127.0.0.1:3030/health";
-  const lanUrl = state.fitfat.lanUrl ? `${state.fitfat.lanUrl}/health` : null;
-  try {
-    const res = await fetch(localUrl);
-    if (res.ok) {
-      state.fitfat.serverHealth = "online";
-      state.fitfat.lastHealthCheck = new Date().toLocaleTimeString();
-      if (lanUrl) {
-        try {
-          const lanRes = await fetch(lanUrl);
-          if (!lanRes.ok) state.fitfat.serverHealth = "online";
-        } catch {}
+    const info = await invoke<any>("sync_info");
+    state.sync = {
+      ...state.sync,
+      status: "idle",
+      statusMessage: "",
+      port: info?.port ?? 0,
+      localUrl: info?.localUrl ?? "",
+      lanUrl: info?.lanUrl ?? "",
+      lanIp: info?.lanIp ?? "",
+      apiKey: info?.apiKey ?? "",
+      isListening: !!info?.isListening,
+    };
+    if (state.sync.apiKey) {
+      try {
+        state.sync.qrDataUrl = await QRCode.toDataURL(pairingPayload(), { width: 180, margin: 1 });
+      } catch {
+        state.sync.qrDataUrl = null;
       }
-    } else {
-      state.fitfat.serverHealth = "offline";
     }
-  } catch {
-    state.fitfat.serverHealth = "offline";
+  } catch (e) {
+    state.sync.status = "error";
+    state.sync.statusMessage = String(e);
   }
-  if (state.view === "fitfat") render();
+  render();
 }
 
-async function loadDiagnostics(): Promise<void> {
+/// The JSON a phone scans to pair with this server.
+function pairingPayload(): string {
+  return JSON.stringify({
+    url: state.sync.lanUrl || state.sync.localUrl,
+    apiKey: state.sync.apiKey,
+    version: 1,
+  });
+}
+
+async function loadWorkouts(): Promise<void> {
   try {
-    state.fitfat.diagnostics = await invoke<any>("get_server_diagnostics");
+    const res = await invoke<any>("list_workouts");
+    const d = res?.data ?? res;
+    state.workouts.items = Array.isArray(d) ? d : (d?.items ?? []);
+  } catch (e) {
+    toast(`Couldn't load workouts: ${e}`, "err");
+  }
+  render();
+}
+
+async function loadTemplates(): Promise<void> {
+  try {
+    const res = await invoke<any>("list_templates");
+    const d = res?.data ?? res;
+    const items = Array.isArray(d) ? d : (d?.items ?? []);
+    (state as any).templates = { ...((state as any).templates || {}), items };
+  } catch (e) {
+    toast(`Couldn't load templates: ${e}`, "err");
+  }
+  render();
+}
+
+// ---- Exercise media ----
+
+const mediaCache = new Map<string, string | null>();
+
+async function loadExerciseMedia(id: string, video: boolean): Promise<string | null> {
+  const key = `${video ? "v" : "i"}:${id}`;
+  if (mediaCache.has(key)) return mediaCache.get(key) ?? null;
+  try {
+    const res = await invoke<any>("exercise_media", { id, video });
+    const data = res?.data ?? res;
+    const url = data?.dataUrl ?? null;
+    mediaCache.set(key, url);
+    return url;
   } catch {
-    state.fitfat.diagnostics = null;
+    mediaCache.set(key, null);
+    return null;
   }
-  if (state.view === "fitfat") render();
 }
 
-async function testFitFatConnection(): Promise<void> {
-  state.fitfat.statusMessage = "Testing connection...";
-  render();
-  const url = resolveSyncUrl(state.fitfat.syncUrl);
-  const lanUrl = state.fitfat.lanUrl;
-  const results: string[] = [];
-  for (const [name, base] of [["local", url], ["lan", lanUrl]] as const) {
-    if (!base) continue;
-    try {
-      const h = await fetch(`${base}/health`);
-      results.push(`${name} /health: ${h.ok ? "✓ " + h.status : "✗ " + h.status}`);
-    } catch (e) {
-      results.push(`${name} /health: ✗ unreachable (${e})`);
-    }
-    try {
-      const r = await fetch(`${base}/exercises?since=0`, { headers: { Authorization: `Bearer ${state.fitfat.apiKey}` } });
-      results.push(`${name} /exercises: ${r.ok ? "✓ " + r.status : "✗ " + r.status}`);
-    } catch (e) {
-      results.push(`${name} /exercises: ✗ unreachable (${e})`);
-    }
-  }
-  state.fitfat.statusMessage = results.join(" | ");
-  render();
+// Filled in after the list paints, so a slow image never holds up the list.
+const exerciseImages: Record<string, string> = {};
+const exerciseVideos: Record<string, string> = {};
+
+function exerciseImage(id: string): string {
+  return exerciseImages[id] ?? "";
 }
 
-function renderFitFatCharts(): void {
-  Object.values(fitfatCharts).forEach((c) => { try { c.destroy(); } catch {} });
-  fitfatCharts = {};
-  if (state.view !== "fitfat" || state.fitfat.status !== "idle") return;
-  const workoutsCanvas = document.getElementById("fitfat-workouts-chart") as HTMLCanvasElement | null;
-  if (workoutsCanvas) {
-    const byWeek: Record<string, number> = {};
-    for (const w of state.fitfat.workouts) {
-      const d = new Date(w.date);
-      const key = `${d.getFullYear()}-W${Math.ceil(((d.getTime() - new Date(d.getFullYear(), 0, 1).getTime()) / 86400000 + new Date(d.getFullYear(), 0, 1).getDay() + 1) / 7)}`;
-      byWeek[key] = (byWeek[key] || 0) + 1;
-    }
-    const labels = Object.keys(byWeek).slice(-12);
-    const data = labels.map((k) => byWeek[k]);
-    fitfatCharts["workouts"] = new Chart(workoutsCanvas, {
-      type: "bar",
-      data: { labels, datasets: [{ label: "Workouts / week", data, backgroundColor: "rgba(14,165,233,0.6)", borderColor: "#0ea5e9", borderWidth: 1 }] },
-      options: { responsive: true, plugins: { legend: { labels: { color: "#cbd5e1" } } }, scales: { x: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }, y: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" }, beginAtZero: true } } },
-    });
-  }
-  const volumeCanvas = document.getElementById("fitfat-volume-chart") as HTMLCanvasElement | null;
-  if (volumeCanvas) {
-    const sets: any[] = (state.fitfat as any).exerciseSets || [];
-    const volByDate: Record<string, number> = {};
-    for (const s of sets) {
-      const w = state.fitfat.workouts.find((w: any) => (state.fitfat as any).workoutExercises?.some((we: any) => we.id === s.workoutExerciseId && we.workoutId === w.id));
-      const d = w ? new Date(w.date).toISOString().slice(0, 10) : "unknown";
-      volByDate[d] = (volByDate[d] || 0) + (s.weightKg || 0) * (s.reps || 0);
-    }
-    const labels = Object.keys(volByDate).sort().slice(-12);
-    const data = labels.map((k) => volByDate[k]);
-    fitfatCharts["volume"] = new Chart(volumeCanvas, {
-      type: "line",
-      data: { labels, datasets: [{ label: "Volume (kg·reps)", data, borderColor: "#10b981", backgroundColor: "rgba(16,185,129,0.2)", tension: 0.3, fill: true }] },
-      options: { responsive: true, plugins: { legend: { labels: { color: "#cbd5e1" } } }, scales: { x: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }, y: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } } } },
-    });
-  }
-  const weightCanvas = document.getElementById("fitfat-weight-chart") as HTMLCanvasElement | null;
-  if (weightCanvas) {
-    const sorted = [...state.fitfat.bodyMetrics].sort((a: any, b: any) => a.date - b.date);
-    const labels = sorted.map((b: any) => new Date(b.date).toISOString().slice(0, 10));
-    const data = sorted.map((b: any) => b.weightKg);
-    fitfatCharts["weight"] = new Chart(weightCanvas, {
-      type: "line",
-      data: { labels, datasets: [{ label: "Weight (kg)", data, borderColor: "#f59e0b", backgroundColor: "rgba(245,158,11,0.2)", tension: 0.3, fill: true }] },
-      options: { responsive: true, plugins: { legend: { labels: { color: "#cbd5e1" } } }, scales: { x: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }, y: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } } } },
-    });
-  }
-  const mealsCanvas = document.getElementById("fitfat-meals-chart") as HTMLCanvasElement | null;
-  if (mealsCanvas) {
-    const calByDate: Record<string, number> = {};
-    for (const m of state.fitfat.meals) {
-      const d = new Date(m.eatenAt).toISOString().slice(0, 10);
-      calByDate[d] = (calByDate[d] || 0) + 300;
-    }
-    const labels = Object.keys(calByDate).sort().slice(-12);
-    const data = labels.map((k) => calByDate[k]);
-    fitfatCharts["meals"] = new Chart(mealsCanvas, {
-      type: "bar",
-      data: { labels, datasets: [{ label: "Meals count", data, backgroundColor: "rgba(139,92,246,0.6)", borderColor: "#8b5cf6", borderWidth: 1 }] },
-      options: { responsive: true, plugins: { legend: { labels: { color: "#cbd5e1" } } }, scales: { x: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }, y: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" }, beginAtZero: true } } },
-    });
+function exerciseVideo(id: string): string {
+  return exerciseVideos[id] ?? "";
+}
+
+async function prefetchExerciseMedia(ids: string[]): Promise<void> {
+  for (const id of ids) {
+    if (exerciseImages[id] !== undefined) continue;
+    exerciseImages[id] = (await loadExerciseMedia(id, false)) ?? "";
+    render();
   }
 }
 
@@ -988,7 +877,7 @@ async function createUrl(): Promise<void> {
   render();
 }
 
-async function deleteUrl(id: number): Promise<void> {
+async function deleteUrl(id: string): Promise<void> {
   state.urls.status = "saving";
   render();
 
@@ -1008,11 +897,11 @@ async function deleteUrl(id: number): Promise<void> {
   render();
 }
 
-async function markUrlRead(id: number): Promise<void> {
+async function markUrlRead(id: string): Promise<void> {
   try {
     await invoke<{ success: boolean }>("mark_url_read", { id });
     const item = state.urls.items.find((u) => u.id === id);
-    if (item) item.is_new = 0;
+    if (item) item.is_new = false;
     render();
   } catch {
     // silently fail
@@ -1034,7 +923,7 @@ function renderSidebar(): string {
     { name: "Health", items: [["bodyMetrics","Body","⚖️"],["experiments","Experiments","🧪"]] },
     { name: "Planning", items: [["todos","Tasks","✓"],["goals","Goals","★"],["notes","Notes","📝"],["urls","URLs","🔗"]] },
     { name: "Finance", items: [["accounts","Accounts","🏦"],["transactions","Transactions","💳"],["receipts","Receipts","🧾"]] },
-    { name: "System", items: [["tags","Tags","🏷️"],["fxRates","FxRates","💱"],["fitfat","Sync","📊"],["dashboard","Dashboard","🎯"],["settings","Settings","⚙️"]] },
+    { name: "System", items: [["tags","Tags","🏷️"],["fxRates","FxRates","💱"],["sync","Sync","📱"],["dashboard","Dashboard","🎯"],["settings","Settings","⚙️"]] },
   ];
   const isActive = (v: ViewId) => state.view === v;
   const groupHtml = groups.map(g => {
@@ -1066,7 +955,7 @@ function renderSidebar(): string {
       <div class="app-sidebar-footer ${state.sidebarCollapsed ? "hidden" : "block"}">
         <div class="flex flex-col gap-1">
           <span class="text-xs text-ink-400">${state.exercises.items.length} ex • ${state.ingredients.items.length} ing</span>
-          <span class="text-xs text-ink-500">maia.db • ${state.fitfat.exercises.length} synced</span>
+          <span class="text-xs text-ink-500">maia.db • ${state.exercises.items.length} exercises</span>
         </div>
       </div>
     </aside>
@@ -1094,7 +983,7 @@ function renderContent(): string {
     case "receipts": return renderReceipts();
     case "notes": return renderNotes();
     case "urls": return renderUrls();
-    case "fitfat": return renderFitFat();
+    case "sync": return renderSync();
     case "settings": return renderSettings();
     default: return `<div class="p-6">Loading...</div>`;
   }
@@ -1349,21 +1238,21 @@ function handleClick(event: MouseEvent): void {
   // Handle delete URL
   const deleteUrlButton = target.closest<HTMLElement>("[data-action='delete-url']");
   if (deleteUrlButton?.dataset.urlId) {
-    deleteUrl(Number(deleteUrlButton.dataset.urlId));
+    deleteUrl(deleteUrlButton.dataset.urlId ?? "");
     return;
   }
 
   // Handle mark URL read
   const markUrlReadButton = target.closest<HTMLElement>("[data-action='mark-url-read']");
   if (markUrlReadButton?.dataset.urlId) {
-    markUrlRead(Number(markUrlReadButton.dataset.urlId));
+    markUrlRead(markUrlReadButton.dataset.urlId ?? "");
     return;
   }
 
   // Handle open URL
   const openUrlButton = target.closest<HTMLElement>("[data-action='open-url']");
   if (openUrlButton?.dataset.urlId) {
-    const id = Number(openUrlButton.dataset.urlId);
+    const id = openUrlButton.dataset.urlId;
     const urlItem = state.urls.items.find((u) => u.id === id);
     if (urlItem) {
       openUrlExternal(urlItem.url);
@@ -1373,60 +1262,26 @@ function handleClick(event: MouseEvent): void {
     return;
   }
 
-  // ---- FitFat handlers ----
-  const fitfatRefresh = target.closest<HTMLElement>("[data-action='fitfat-refresh']");
-  if (fitfatRefresh) {
-    loadFitFat();
+  // ---- Sync panel ----
+  if (target.closest("[data-action='sync-refresh']")) {
+    loadSync();
     return;
   }
-  const fitfatApplyWorkouts = target.closest<HTMLElement>("[data-action='fitfat-apply-workouts']");
-  if (fitfatApplyWorkouts) {
-    const inputs = document.querySelectorAll<HTMLInputElement>("[data-fitfat-filter='workoutsSince']");
-    if (inputs[0]) state.fitfat.filters.workoutsSince = inputs[0].value;
-    loadFitFat();
+  if (target.closest("[data-action='sync-copy-json']")) {
+    navigator.clipboard.writeText(pairingPayload()).catch(() => {});
     return;
   }
-  const fitfatApplyBody = target.closest<HTMLElement>("[data-action='fitfat-apply-body']");
-  if (fitfatApplyBody) {
-    const inp = document.querySelector<HTMLInputElement>("[data-fitfat-filter='bodySince']");
-    if (inp) state.fitfat.filters.bodySince = inp.value;
-    loadFitFat();
+  if (target.closest("[data-action='sync-copy-url']")) {
+    navigator.clipboard.writeText(state.sync.lanUrl || state.sync.localUrl).catch(() => {});
     return;
   }
-  const fitfatApplyMeals = target.closest<HTMLElement>("[data-action='fitfat-apply-meals']");
-  if (fitfatApplyMeals) {
-    const inp = document.querySelector<HTMLInputElement>("[data-fitfat-filter='mealsSince']");
-    if (inp) state.fitfat.filters.mealsSince = inp.value;
-    loadFitFat();
+  if (target.closest("[data-action='sync-copy-key']")) {
+    navigator.clipboard.writeText(state.sync.apiKey).catch(() => {});
     return;
   }
-  const copyQr = target.closest<HTMLElement>("[data-action='fitfat-copy-qr']");
-  if (copyQr) {
-    const urlForQR = state.fitfat.lanUrl || resolveSyncUrl(state.fitfat.syncUrl);
-    const payload = JSON.stringify({ url: urlForQR, apiKey: state.fitfat.apiKey, version: 1 });
-    navigator.clipboard.writeText(payload).catch(() => {});
-    return;
-  }
-  const copyUrl = target.closest<HTMLElement>("[data-action='fitfat-copy-url']");
-  if (copyUrl) {
-    const urlForQR = state.fitfat.lanUrl || resolveSyncUrl(state.fitfat.syncUrl);
-    navigator.clipboard.writeText(urlForQR).catch(() => {});
-    return;
-  }
-  const copyKey = target.closest<HTMLElement>("[data-action='fitfat-copy-key']");
-  if (copyKey) {
-    navigator.clipboard.writeText(state.fitfat.apiKey).catch(() => {});
-    return;
-  }
-  const testConn = target.closest<HTMLElement>("[data-action='fitfat-test-connection']");
-  if (testConn) {
-    testFitFatConnection();
-    return;
-  }
-  const copyCurl = target.closest<HTMLElement>("[data-action='fitfat-copy-curl']");
-  if (copyCurl) {
-    const cmd = `curl -v -H "Authorization: Bearer ${state.fitfat.apiKey}" ${state.fitfat.lanUrl || resolveSyncUrl(state.fitfat.syncUrl)}/health`;
-    navigator.clipboard.writeText(cmd).catch(() => {});
+  if (target.closest("[data-action='sync-copy-curl']")) {
+    const base = state.sync.lanUrl || state.sync.localUrl;
+    navigator.clipboard.writeText(`curl -s -H "Authorization: Bearer ${state.sync.apiKey}" ${base}/health`).catch(() => {});
     return;
   }
   const exSelect = target.closest<HTMLElement>("[data-action='ex-select']");
@@ -1496,19 +1351,19 @@ function handleClick(event: MouseEvent): void {
   }
 
   const tplCreate = target.closest<HTMLElement>("[data-action='tpl-create']");
-  if (tplCreate) { const inp=document.getElementById("tpl-name") as HTMLInputElement; const name=inp?.value.trim(); if(name){ const id=crypto.randomUUID(); invoke<any>("create_template",{id, name}).then((res)=>{ if(res&&res.success===false){ toast(`Couldn't create template: ${res.error||"unknown error"}`, "err"); return; } if(inp) inp.value=""; loadFitFat(); }).catch((e)=>toast(`Couldn't create template: ${e}`, "err")); } return; }
+  if (tplCreate) { const inp=document.getElementById("tpl-name") as HTMLInputElement; const name=inp?.value.trim(); if(name){ const id=crypto.randomUUID(); invoke<any>("create_template",{id, name}).then((res)=>{ if(res&&res.success===false){ toast(`Couldn't create template: ${res.error||"unknown error"}`, "err"); return; } if(inp) inp.value=""; loadTemplates(); }).catch((e)=>toast(`Couldn't create template: ${e}`, "err")); } return; }
   const tplEdit = target.closest<HTMLElement>("[data-action='tpl-edit']");
   if (tplEdit?.dataset.id) { (state as any).templates = { ...((state as any).templates||{}), editingId: tplEdit.dataset.id }; render(); return; }
   const tplCancel = target.closest<HTMLElement>("[data-action='tpl-cancel']");
   if (tplCancel) { (state as any).templates = { ...((state as any).templates||{}), editingId: null }; render(); return; }
   const tplSave = target.closest<HTMLElement>("[data-action='tpl-save']");
-  if (tplSave?.dataset.id) { const id=tplSave.dataset.id; const name=(document.getElementById("tpl-edit-name") as HTMLInputElement)?.value.trim(); const notes=(document.getElementById("tpl-edit-notes") as HTMLInputElement)?.value.trim()||null; const recurrence=(document.getElementById("tpl-edit-recurrence") as HTMLInputElement)?.value.trim()||null; if(!name){ toast("Template name can't be empty", "err"); return; } invoke<any>("update_template",{id, name, notes, recurrence}).then((res)=>{ if(res&&res.success===false){ toast(`Couldn't save template: ${res.error||"unknown error"}`, "err"); return; } (state as any).templates = { ...((state as any).templates||{}), editingId: null }; loadFitFat(); }).catch((e)=>toast(`Couldn't save template: ${e}`, "err")); return; }
+  if (tplSave?.dataset.id) { const id=tplSave.dataset.id; const name=(document.getElementById("tpl-edit-name") as HTMLInputElement)?.value.trim(); const notes=(document.getElementById("tpl-edit-notes") as HTMLInputElement)?.value.trim()||null; const recurrence=(document.getElementById("tpl-edit-recurrence") as HTMLInputElement)?.value.trim()||null; if(!name){ toast("Template name can't be empty", "err"); return; } invoke<any>("update_template",{id, name, notes, recurrence}).then((res)=>{ if(res&&res.success===false){ toast(`Couldn't save template: ${res.error||"unknown error"}`, "err"); return; } (state as any).templates = { ...((state as any).templates||{}), editingId: null }; loadTemplates(); }).catch((e)=>toast(`Couldn't save template: ${e}`, "err")); return; }
   const tplDelete = target.closest<HTMLElement>("[data-action='tpl-delete']");
-  if (tplDelete?.dataset.id) { const id=tplDelete.dataset.id; const it=((state as any).templates?.items||[]).find((x:any)=>x.id===id); confirmDialog("Delete template?", `Delete "${it?.name||id}" and all its exercises and sets? This can't be undone.`).then((ok)=>{ if(!ok) return; invoke<any>("delete_template",{id}).then((res)=>{ if(res&&res.success===false){ toast(`Couldn't delete template: ${res.error||"unknown error"}`, "err"); return; } loadFitFat(); }).catch((e)=>toast(`Couldn't delete template: ${e}`, "err")); }); return; }
+  if (tplDelete?.dataset.id) { const id=tplDelete.dataset.id; const it=((state as any).templates?.items||[]).find((x:any)=>x.id===id); confirmDialog("Delete template?", `Delete "${it?.name||id}" and all its exercises and sets? This can't be undone.`).then((ok)=>{ if(!ok) return; invoke<any>("delete_template",{id}).then((res)=>{ if(res&&res.success===false){ toast(`Couldn't delete template: ${res.error||"unknown error"}`, "err"); return; } loadTemplates(); }).catch((e)=>toast(`Couldn't delete template: ${e}`, "err")); }); return; }
   const tplOpen = target.closest<HTMLElement>("[data-action='tpl-open']");
   if (tplOpen?.dataset.id) { (state as any).templates = { ...((state as any).templates||{}), editingId: null }; loadTemplateDetail(tplOpen.dataset.id); return; }
   const tplBack = target.closest<HTMLElement>("[data-action='tpl-back']");
-  if (tplBack) { (state as any).templates = { ...((state as any).templates||{}), selectedId: null, detail: null, exSearch: "" }; loadFitFat(); return; }
+  if (tplBack) { (state as any).templates = { ...((state as any).templates||{}), selectedId: null, detail: null, exSearch: "" }; loadTemplates(); return; }
   const tplExSearch = target.closest<HTMLElement>("[data-action='tpl-ex-search']");
   if (tplExSearch) { const v=(document.getElementById("tpl-ex-search") as HTMLInputElement)?.value??""; (state as any).templates = { ...((state as any).templates||{}), exSearch: v }; render(); return; }
   const tplAddEx = target.closest<HTMLElement>("[data-action='tpl-add-exercise']");
@@ -1546,19 +1401,6 @@ function handleClick(event: MouseEvent): void {
   if (ingSearch) { const v=(document.getElementById("ing-search") as HTMLInputElement)?.value??""; state.ingredients.search=v.toLowerCase(); render(); return; }
   const trSearch = target.closest<HTMLElement>("[data-action='tr-search']");
   if (trSearch) { const v=(document.getElementById("tr-search") as HTMLInputElement)?.value??""; state.transactions.search=v; render(); return; }
-  const selEx = target.closest<HTMLElement>("[data-action='fitfat-select-exercise']");
-  if (selEx?.dataset.exerciseId) {
-    state.fitfat.selectedExerciseId = selEx.dataset.exerciseId;
-    render();
-    return;
-  }
-  const searchEx = target.closest<HTMLElement>("[data-action='fitfat-search-exercises']");
-  if (searchEx) {
-    const inp = document.querySelector<HTMLInputElement>("[data-fitfat-filter='exerciseSearch']");
-    if (inp) state.fitfat.exerciseSearch = inp.value;
-    render();
-    return;
-  }
 }
 
 function renderDashboard(): string {
@@ -2276,7 +2118,7 @@ function renderUrls(): string {
     statusHtml = `<div class="banner banner-err">${escapeHtml(s.statusMessage)}</div>`;
   }
 
-  const newCount = s.items.filter((u) => u.is_new === 1).length;
+  const newCount = s.items.filter((u) => u.is_new).length;
 
   const urlItems =
     s.items.length === 0
@@ -2285,11 +2127,11 @@ function renderUrls(): string {
           .map(
             (u) => `
             <div class="flex items-start gap-3 p-3 bg-surface-900/50 rounded-lg hover:bg-surface-900/70 transition-colors">
-              ${u.is_new === 1 ? `<span class="mt-1 inline-block w-2 h-2 rounded-full bg-accent-400 shrink-0" title="New"></span>` : `<span class="mt-1 inline-block w-2 h-2 rounded-full bg-transparent shrink-0"></span>`}
+              ${u.is_new ? `<span class="mt-1 inline-block w-2 h-2 rounded-full bg-accent-400 shrink-0" title="New"></span>` : `<span class="mt-1 inline-block w-2 h-2 rounded-full bg-transparent shrink-0"></span>`}
               <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2">
                   <span class="font-medium text-ink-100 truncate">${escapeHtml(u.title || u.url)}</span>
-                  ${u.is_new === 1 ? `<span class="badge badge-info">new</span>` : ""}
+                  ${u.is_new ? `<span class="badge badge-info">new</span>` : ""}
                 </div>
                 <div class="text-xs text-accent-400 truncate mt-0.5">${escapeHtml(u.url)}</div>
                 <div class="flex flex-wrap gap-2 mt-1 text-xs text-ink-500">
@@ -2300,7 +2142,7 @@ function renderUrls(): string {
               </div>
               <div class="flex items-center gap-1 shrink-0">
                 <button class="text-accent-400 hover:text-accent-300 text-sm px-2 py-1" type="button" data-action="open-url" data-url-id="${u.id}" title="Open in browser">↗</button>
-                ${u.is_new === 1 ? `<button class="text-ink-400 hover:text-ink-300 text-xs px-2 py-1" type="button" data-action="mark-url-read" data-url-id="${u.id}" title="Mark as read">✓</button>` : ""}
+                ${u.is_new ? `<button class="text-ink-400 hover:text-ink-300 text-xs px-2 py-1" type="button" data-action="mark-url-read" data-url-id="${u.id}" title="Mark as read">✓</button>` : ""}
                 <button class="text-err-400 hover:text-err-300 text-sm px-2 py-1" type="button" data-action="delete-url" data-url-id="${u.id}" title="Delete URL">✕</button>
               </div>
             </div>
@@ -2375,115 +2217,57 @@ function renderUrlTags(tagsJson: string): string {
   }
 }
 
-function renderFitFat(): string {
-  const ff = state.fitfat;
-  let statusHtml = "";
-  if (ff.status === "loading") statusHtml = `<div class="banner">Loading FitFat data from ${escapeHtml(resolveSyncUrl(ff.syncUrl))}...</div>`;
-  else if (ff.status === "error") statusHtml = `<div class="banner banner-err">${escapeHtml(ff.statusMessage)}</div>`;
-
-  const counts = ff.counts;
-  const countsHtml = counts
-    ? `<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-        <div class="panel p-4"><div class="text-xs text-ink-400">Workouts</div><div class="text-2xl font-semibold text-accent-400">${counts.workouts}</div></div>
-        <div class="panel p-4"><div class="text-xs text-ink-400">Meals</div><div class="text-2xl font-semibold text-ok-400">${counts.meals}</div></div>
-        <div class="panel p-4"><div class="text-xs text-ink-400">Exercises</div><div class="text-2xl font-semibold text-warn-400">${counts.exercises}</div></div>
-        <div class="panel p-4"><div class="text-xs text-ink-400">Body Metrics</div><div class="text-2xl font-semibold text-grape-400">${counts.bodyMetrics}</div></div>
-      </div>`
-    : `<div class="text-sm text-ink-400 mb-4">No data yet — sync from FitFat mobile to see workouts, meals and weight.</div>`;
-
-  const displayUrl = ff.lanUrl || resolveSyncUrl(ff.syncUrl);
-  const qrHtml = ff.qrDataUrl
-    ? `<div class="bg-white p-2 rounded-lg inline-block"><img src="${ff.qrDataUrl}" alt="FitFat QR" class="w-44 h-44" /></div><div class="mt-2 text-xs text-ink-400 break-all max-w-[280px]">${escapeHtml(JSON.stringify({ url: displayUrl, apiKey: ff.apiKey }))}</div><div class="mt-2 flex gap-2"><button class="button secondary text-xs" data-action="fitfat-copy-qr">Copy JSON</button><button class="button secondary text-xs" data-action="fitfat-copy-url">Copy URL</button></div><div class="mt-1 text-xs text-ink-500">LAN IP: ${escapeHtml(displayUrl)} ${displayUrl.includes("127.0.0.1") ? "(offline — connect to Wi-Fi)" : ""}</div>`
-    : `<div class="text-xs text-ink-400">Generating QR...</div>`;
-
-  const lanDisplay = ff.lanUrl || resolveSyncUrl(ff.syncUrl);
-  const healthColor = ff.serverHealth === "online" ? "text-ok-400" : ff.serverHealth === "offline" ? "text-err-400" : "text-ink-400";
-  const healthDot = ff.serverHealth === "online" ? "●" : ff.serverHealth === "offline" ? "○" : "◐";
-  const diag = ff.diagnostics;
-  const healthHtml = `
-    <div class="panel p-4">
-      <div class="flex items-center justify-between mb-2">
-        <h3 class="text-sm font-medium text-ink-200">Server Health</h3>
-        <span class="text-sm ${healthColor}">${healthDot} ${ff.serverHealth === "online" ? "Online" : ff.serverHealth === "offline" ? "Offline" : "Checking"} ${ff.lastHealthCheck ? `— ${escapeHtml(ff.lastHealthCheck)}` : ""}</span>
+/// The Sync panel: server status and the QR a phone scans to pair.
+function renderSync(): string {
+  const s = state.sync;
+  return `<section class="panel">
+    <div class="panel-header flex items-start justify-between gap-4">
+      <div>
+        <h2 class="panel-title">Sync</h2>
+        <p class="panel-subtitle">Pair a phone with this machine</p>
       </div>
-      <div class="text-xs text-ink-400 mb-2">Bind: <code class="bg-surface-800 px-1 rounded">${escapeHtml(diag?.bindAddr || "unknown")}</code> • LAN: <code class="bg-surface-800 px-1 rounded">${escapeHtml(lanDisplay)}</code> • Local: <code class="bg-surface-800 px-1 rounded">${escapeHtml(resolveSyncUrl(ff.syncUrl))}</code></div>
-      ${diag ? `<div class="text-xs text-ink-400 mb-2">Port: ${diag.port} • Listening: ${diag.isListening ? "✓" : "✗"} • LAN IP: ${escapeHtml(diag.lanIp)} • Key: ${escapeHtml(diag.apiKeyMasked)}</div>` : ""}
-      <div class="flex flex-wrap gap-2 mb-3">
-        <button class="button secondary text-xs" data-action="fitfat-test-connection">Test Connection</button>
-        <button class="button secondary text-xs" data-action="fitfat-copy-curl">Copy curl</button>
-      </div>
-      ${ff.statusMessage ? `<div class="rounded border border-surface-700 bg-surface-900/70 p-2 text-xs text-ink-300 break-all">${escapeHtml(ff.statusMessage)}</div>` : ""}
-      <div class="mt-3 text-xs text-ink-500">If mobile can't reach: 1) Phone on same Wi-Fi as ${escapeHtml(diag?.lanIp || ff.lanUrl || "10.229.34.33")} • 2) <code class="bg-surface-800 px-1 rounded">sudo ufw allow ${diag?.port ?? 3030}/tcp</code> • 3) <code class="bg-surface-800 px-1 rounded">curl -v http://${escapeHtml((diag?.lanIp || "10.229.34.33"))}:${diag?.port ?? 3030}/health</code></div>
+      <button class="button secondary shrink-0" data-action="sync-refresh">↻ Refresh</button>
     </div>
-  `;
-  return `
-    <section class="panel">
-      <div class="panel-header">
-        <h2 class="panel-title">FitFat</h2>
-        <p class="panel-subtitle">Visualize workouts, meals, weight synced from FitFat — via ${escapeHtml(lanDisplay)}</p>
+    <div class="panel-content space-y-4">
+      <div class="panel p-4">
+        <div class="flex items-center gap-2">
+          <span class="${s.isListening ? "text-ok-400" : "text-err-400"} text-xl">●</span>
+          <span class="text-sm text-ink-100">${s.isListening ? "Server running" : "Server not reachable"}</span>
+          <span class="text-xs text-ink-500">port ${s.port || "?"}</span>
+        </div>
+        ${
+          s.isListening
+            ? ""
+            : `<p class="mt-2 text-xs text-ink-400">
+                 Reading still works — it comes from the database. Saving is not possible
+                 until the server is back, because it is the only thing that writes.
+               </p>`
+        }
       </div>
-      <div class="panel-content space-y-6">
-        ${statusHtml}
-        ${healthHtml}
-        <div class="flex gap-2">
-          <button class="button secondary text-sm" data-action="fitfat-refresh">↻ Refresh</button>
-          <button class="button secondary text-sm" data-view="settings">Settings → QR</button>
-        </div>
-        ${countsHtml}
 
-        <div class="panel p-4">
-          <div class="flex items-center justify-between mb-2">
-            <h3 class="text-sm font-medium text-ink-200">Workouts / week</h3>
-            <div class="flex items-center gap-2 text-xs"><input type="date" value="${escapeHtml(ff.filters.workoutsSince)}" data-fitfat-filter="workoutsSince" class="bg-surface-800 border border-surface-700 rounded px-2 py-1 text-xs" /><button class="button secondary text-xs" data-action="fitfat-apply-workouts">Apply</button></div>
-          </div>
-          <canvas id="fitfat-workouts-chart" height="120"></canvas>
+      <div class="panel p-4">
+        <h3 class="mb-3 text-sm font-medium text-ink-200">Pairing</h3>
+        ${
+          s.qrDataUrl
+            ? `<div class="bg-white p-2 rounded-lg inline-block"><img src="${s.qrDataUrl}" alt="Pairing QR" class="w-44 h-44" /></div>`
+            : `<div class="text-xs text-ink-400">No pairing code — the server has not reported an API key yet.</div>`
+        }
+        <div class="mt-3 space-y-1 text-xs text-ink-500 break-all">
+          <div>Address: <code class="bg-surface-800 px-1 rounded">${escapeHtml(s.lanUrl || s.localUrl || "—")}</code>
+            <button class="button secondary text-xs ml-2" data-action="sync-copy-url">Copy</button></div>
+          <div>API key: <code class="bg-surface-800 px-1 rounded select-all">${escapeHtml(s.apiKey || "—")}</code>
+            <button class="button secondary text-xs ml-2" data-action="sync-copy-key">Copy</button></div>
+          <div>Payload: <code class="bg-surface-800 px-1 rounded">${escapeHtml(pairingPayload())}</code>
+            <button class="button secondary text-xs ml-2" data-action="sync-copy-json">Copy JSON</button></div>
         </div>
-
-        <div class="panel p-4">
-          <div class="flex items-center justify-between mb-2">
-            <h3 class="text-sm font-medium text-ink-200">Volume (kg·reps) over time</h3>
-            <div class="flex items-center gap-2 text-xs"><input type="date" value="${escapeHtml(ff.filters.workoutsSince)}" data-fitfat-filter="workoutsSince" class="bg-surface-800 border border-surface-700 rounded px-2 py-1 text-xs" /><button class="button secondary text-xs" data-action="fitfat-apply-workouts">Apply</button></div>
-          </div>
-          <canvas id="fitfat-volume-chart" height="120"></canvas>
-        </div>
-
-        <div class="panel p-4">
-          <div class="flex items-center justify-between mb-2">
-            <h3 class="text-sm font-medium text-ink-200">Weight trend</h3>
-            <div class="flex items-center gap-2 text-xs"><input type="date" value="${escapeHtml(ff.filters.bodySince)}" data-fitfat-filter="bodySince" class="bg-surface-800 border border-surface-700 rounded px-2 py-1 text-xs" /><button class="button secondary text-xs" data-action="fitfat-apply-body">Apply</button></div>
-          </div>
-          <canvas id="fitfat-weight-chart" height="120"></canvas>
-        </div>
-
-        <div class="panel p-4">
-          <div class="flex items-center justify-between mb-2">
-            <h3 class="text-sm font-medium text-ink-200">Meals</h3>
-            <div class="flex items-center gap-2 text-xs"><input type="date" value="${escapeHtml(ff.filters.mealsSince)}" data-fitfat-filter="mealsSince" class="bg-surface-800 border border-surface-700 rounded px-2 py-1 text-xs" /><button class="button secondary text-xs" data-action="fitfat-apply-meals">Apply</button></div>
-          </div>
-          <canvas id="fitfat-meals-chart" height="120"></canvas>
-          <div class="mt-3 text-xs text-ink-400">${ff.meals.length} meals loaded${ff.meals.length ? ` — latest: ${escapeHtml(ff.meals[ff.meals.length - 1]?.name || "")}` : ""}</div>
-        </div>
-
-        <div class="panel p-4">
-          <h3 class="text-sm font-medium text-ink-200 mb-2">Exercises — ${(counts as any)?.exercises ?? 0} in maia.db</h3>
-          <div class="flex gap-2 mb-3"><input type="text" placeholder="Search exercises (name, body part, equipment)" value="${escapeHtml(ff.exerciseSearch)}" data-fitfat-filter="exerciseSearch" class="flex-1 bg-surface-800 border border-surface-700 rounded px-3 py-2 text-sm" /><button class="button secondary text-xs" data-action="fitfat-search-exercises">Search</button></div>
-          <div class="max-h-96 overflow-auto list-divided">
-            ${(ff.exercises.filter((e:any)=>{ if(!ff.exerciseSearch) return true; const q=ff.exerciseSearch.toLowerCase(); return (e.name||"").toLowerCase().includes(q)||(e.bodyPart||e.body_part||"").toLowerCase().includes(q)||(e.equipment||"").toLowerCase().includes(q); }).slice(0,100).map((e:any)=>`<button class="w-full text-left px-3 py-2 hover:bg-surface-800 flex items-center gap-3 ${ff.selectedExerciseId===e.id?'bg-surface-700/50':''}" data-action="fitfat-select-exercise" data-exercise-id="${escapeHtml(e.id)}"><img src="${escapeHtml(resolveSyncUrl(ff.syncUrl))}/media/${escapeHtml(e.id)}.jpg" alt="" class="w-10 h-10 rounded bg-surface-700 object-cover" onerror="this.style.display='none'" /><div class="min-w-0"><div class="text-sm text-ink-100 truncate">${escapeHtml(e.name)}</div><div class="text-xs text-ink-400 truncate">${escapeHtml(e.bodyPart||e.body_part||"")}${e.equipment?' • '+escapeHtml(e.equipment):""} ${e.primaryMuscle||e.primary_muscle?' • '+escapeHtml(e.primaryMuscle||e.primary_muscle):""}</div></div></button>`).join("") || `<div class="p-3 text-xs text-ink-400">No exercises match.</div>`)}
-          </div>
-          ${ff.selectedExerciseId ? (()=>{ const ex=(ff.exercises as any[]).find((x:any)=>x.id===ff.selectedExerciseId); if(!ex) return ""; const inst = (()=>{try{const a=JSON.parse(ex.instructions); if(Array.isArray(a)) return a; }catch{} return ex.instructions?[ex.instructions]:[];})(); const tipsArr = (()=>{try{const a=JSON.parse(ex.tips); if(Array.isArray(a)) return a;}catch{} return ex.tips?[ex.tips]:[];})(); return `<div class="mt-4 border-t border-surface-800 pt-4 space-y-3"><div class="flex gap-3"><img src="${escapeHtml(resolveSyncUrl(ff.syncUrl))}/media/${escapeHtml(ex.id)}.jpg" alt="" class="w-24 h-24 rounded bg-surface-800 object-cover" onerror="this.style.display='none'" /><video src="${escapeHtml(resolveSyncUrl(ff.syncUrl))}/media/${escapeHtml(ex.id)}.mp4" controls class="w-48 h-24 rounded bg-surface-800" onerror="this.style.display='none'"></video><div><h4 class="font-medium text-ink-100">${escapeHtml(ex.name)}</h4><p class="text-xs text-ink-400">${escapeHtml(ex.bodyPart||ex.body_part||"")} • ${escapeHtml(ex.equipment||"")}</p><p class="text-xs text-ink-400">Primary: ${escapeHtml(ex.primaryMuscle||ex.primary_muscle||"")}</p><p class="text-xs text-ink-400">Secondary: ${escapeHtml(ex.secondaryMuscle||ex.secondary_muscle||"")}</p></div></div>${inst.length?`<div><h5 class="text-xs font-medium text-ink-300">Instructions</h5><ol class="list-decimal ml-4 text-xs text-ink-400 space-y-1">${inst.map((s:string)=>`<li>${escapeHtml(s)}</li>`).join("")}</ol></div>`:""}${tipsArr.length?`<div><h5 class="text-xs font-medium text-ink-300">Tips</h5><ul class="list-disc ml-4 text-xs text-ink-400 space-y-1">${tipsArr.map((s:string)=>`<li>${escapeHtml(s)}</li>`).join("")}</ul></div>`:""}${ex.faqs?`<div><h5 class="text-xs font-medium text-ink-300">FAQs</h5><p class="text-xs text-ink-400 whitespace-pre-wrap">${escapeHtml(ex.faqs)}</p></div>`:""}</div>`; })():""}
-        </div>
-
-        <div class="panel p-4">
-          <h3 class="text-sm font-medium text-ink-200 mb-2">Pairing QR — URL + Auth Token</h3>
-          <p class="text-xs text-ink-400 mb-3">Scan with FitFat mobile to pair. Contains <code class="bg-surface-800 px-1 rounded">{"url","apiKey"}</code> for <code class="bg-surface-800 px-1 rounded">${escapeHtml(resolveSyncUrl(ff.syncUrl))}</code></p>
-          <div class="flex flex-col items-start gap-3">
-            ${qrHtml}
-            <div class="text-xs text-ink-500">API Key: <code class="bg-surface-800 px-1 rounded select-all">${escapeHtml(ff.apiKey)}</code> <button class="button secondary text-xs ml-2" data-action="fitfat-copy-key">Copy Key</button></div>
-          </div>
-        </div>
+        ${
+          s.lanIp && s.lanIp !== "127.0.0.1"
+            ? ""
+            : `<p class="mt-2 text-xs text-warn-400">Showing loopback — connect to Wi-Fi and refresh to get an address the phone can reach.</p>`
+        }
       </div>
-    </section>
-  `;
+    </div>
+  </section>`;
 }
 
 // ---- Settings config form ----
@@ -2557,14 +2341,13 @@ function renderSettings(): string {
         </div>
 
         <div class="rounded border border-surface-800 bg-surface-900/30 p-4">
-          <h3 class="mb-3 text-sm font-medium text-ink-200">FitFat Sync — Pairing</h3>
-          <p class="mb-3 text-xs text-ink-400">Scan with FitFat mobile to pair. QR contains <code class="bg-surface-800 px-1 rounded">{"url","apiKey"}</code> for <code class="bg-surface-800 px-1 rounded">${escapeHtml(state.fitfat.lanUrl || resolveSyncUrl(state.fitfat.syncUrl) || "http://127.0.0.1:3030")}</code></p>
-          <div class="flex flex-col items-start gap-3">
-            ${state.fitfat.qrDataUrl ? `<div class="bg-white p-2 rounded-lg inline-block"><img src="${state.fitfat.qrDataUrl}" alt="QR" class="w-44 h-44" /></div>` : `<div class="text-xs text-ink-400">QR will appear after visiting FitFat tab or <button class="button secondary text-xs ml-2" data-action="fitfat-refresh">Generate</button></div>`}
-            <div class="text-xs text-ink-500 break-all max-w-full">API Key: <code class="bg-surface-800 px-1 rounded select-all">${escapeHtml(state.fitfat.apiKey || "...")}</code> <button class="button secondary text-xs ml-2" data-action="fitfat-copy-key">Copy Key</button> <button class="button secondary text-xs" data-action="fitfat-copy-qr">Copy JSON</button></div>
-            <div class="text-xs text-ink-500 break-all">Payload: <code class="bg-surface-800 px-1 rounded">${escapeHtml(JSON.stringify({ url: state.fitfat.lanUrl || resolveSyncUrl(state.fitfat.syncUrl), apiKey: state.fitfat.apiKey, version: 1 }))}</code></div>
-            ${state.fitfat.lanUrl && state.fitfat.lanUrl.includes("127.0.0.1") ? `<div class="text-xs text-warn-400">Offline — connect to Wi-Fi for LAN IP (showing loopback)</div>` : ""}
-          </div>
+          <h3 class="mb-3 text-sm font-medium text-ink-200">Sync Server</h3>
+          <p class="mb-3 text-xs text-ink-400">
+            <span class="${state.sync.isListening ? "text-ok-400" : "text-err-400"}">●</span>
+            ${state.sync.isListening ? "running" : "not reachable"}
+            <span class="text-ink-500">· port ${state.sync.port || "?"}</span>
+          </p>
+          <p class="text-xs text-ink-500">The full pairing panel, with a QR code for the phone, is under <strong>Sync</strong>.</p>
         </div>
       </div>
     </section>
@@ -2580,6 +2363,9 @@ async function loadExercises(): Promise<void> {
     state.exercises.status = "idle";
   } catch (e) { state.exercises.status = "error"; state.exercises.statusMessage = String(e); }
   applyExerciseFilter(); render();
+  // Media arrives after the list is on screen; the detail pane's video is only
+  // worth fetching once something is selected.
+  void prefetchExerciseMedia(state.exercises.filtered.slice(0, 60).map((e) => e.id));
 }
 function applyExerciseFilter(): void {
   const q = state.exercises.search.toLowerCase();
@@ -2613,10 +2399,10 @@ function renderExercises(): string {
   return `<section class="panel"><div class="panel-header"><h2 class="panel-title">Exercises — ${state.exercises.items.length}</h2><p class="panel-subtitle">Catalog from data/ parsed • editable • virtual scroll 100</p></div><div class="panel-content space-y-4">
     <div class="flex flex-wrap gap-2"><input id="ex-search" placeholder="Search name/body/equipment" value="${escapeHtml(state.exercises.search)}" class="bg-surface-800 border border-surface-700 rounded px-3 py-2 text-sm flex-1 min-w-[200px]" /><select id="ex-bodypart" class="bg-surface-800 border border-surface-700 rounded px-2 py-2 text-sm"><option value="">All body parts</option>${bodyParts.map(b=>`<option ${state.exercises.bodyPart===b?"selected":""}>${escapeHtml(b)}</option>`).join("")}</select><select id="ex-equip" class="bg-surface-800 border border-surface-700 rounded px-2 py-2 text-sm"><option value="">All equipment</option>${equipments.map(b=>`<option ${state.exercises.equipment===b?"selected":""}>${escapeHtml(b)}</option>`).join("")}</select><select id="ex-hasimg" class="bg-surface-800 border border-surface-700 rounded px-2 py-2 text-sm"><option value="">All</option><option value="yes" ${state.exercises.hasImage==="yes"?"selected":""}>Has image</option><option value="no" ${state.exercises.hasImage==="no"?"selected":""}>No image</option></select><button class="button secondary" data-action="ex-apply">Apply</button></div>
     ${syncInfo}
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4"><div class="border border-surface-800 rounded max-h-[60vh] overflow-auto divide-y divide-surface-800">${list.map((e:any)=>`<button class="w-full text-left p-3 hover:bg-surface-800 flex gap-3 ${state.exercises.selectedId===e.id?"bg-surface-700/50":""}" data-action="ex-select" data-id="${escapeHtml(e.id)}"><img src="${resolveSyncUrl(state.fitfat.syncUrl)}/media/${escapeHtml(e.id)}.jpg" loading="lazy" class="w-12 h-12 rounded bg-surface-700 object-cover" onerror="this.style.display='none'" /><div class="min-w-0"><div class="text-sm text-ink-100 truncate">${escapeHtml(e.name)}</div><div class="text-xs text-ink-400 truncate">${escapeHtml(e.body_part||e.bodyPart||"")} • ${escapeHtml(e.equipment||"")} • ${escapeHtml(e.primary_muscle||e.primaryMuscle||"")}</div></div></button>`).join("")||`<div class="empty-state">No exercises yet.</div>`}</div>
-    <div class="border border-surface-800 rounded p-4 bg-surface-900/30">${sel?`<div class="space-y-3"><div class="flex gap-3"><img src="${resolveSyncUrl(state.fitfat.syncUrl)}/media/${escapeHtml(sel.id)}.jpg" loading="lazy" class="w-24 h-24 rounded bg-surface-800" onerror="this.style.display='none'" /><video src="${resolveSyncUrl(state.fitfat.syncUrl)}/media/${escapeHtml(sel.id)}.mp4" controls class="w-40 h-24 rounded bg-surface-800" onerror="this.style.display='none'"></video><div><h3 class="font-medium text-ink-100">${escapeHtml(sel.name)}</h3><p class="text-xs text-ink-400">${escapeHtml(sel.body_part||sel.bodyPart||"")} • ${escapeHtml(sel.equipment||"")}</p><p class="text-xs text-ink-400">Primary: ${escapeHtml(sel.primary_muscle||sel.primaryMuscle||"")}</p><p class="text-xs text-ink-400">Secondary: ${escapeHtml(sel.secondary_muscle||sel.secondaryMuscle||"")}</p></div></div>${(()=>{try{const a=JSON.parse(sel.instructions); if(Array.isArray(a)) return `<ol class="list-decimal ml-4 text-xs text-ink-400 space-y-1">${a.map((s:string)=>`<li>${escapeHtml(s)}</li>`).join("")}</ol>`;}catch{} return sel.instructions?`<p class="text-xs text-ink-400">${escapeHtml(String(sel.instructions))}</p>`:"";})()}${(()=>{try{const a=JSON.parse(sel.tips); if(Array.isArray(a)) return `<ul class="list-disc ml-4 text-xs text-ink-400">${a.map((s:string)=>`<li>${escapeHtml(s)}</li>`).join("")}</ul>`;}catch{} return "";})()}${sel.faqs?`<p class="text-xs text-ink-400 whitespace-pre-wrap">${escapeHtml(sel.faqs)}</p>`:""}<div class="flex gap-2"><button class="button secondary text-xs" data-action="ex-edit" data-id="${escapeHtml(sel.id)}">Edit (save)</button></div></div>`:`<div class="text-sm text-ink-400">Select an exercise</div>`}</div></div></div></section>`;
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4"><div class="border border-surface-800 rounded max-h-[60vh] overflow-auto divide-y divide-surface-800">${list.map((e:any)=>`<button class="w-full text-left p-3 hover:bg-surface-800 flex gap-3 ${state.exercises.selectedId===e.id?"bg-surface-700/50":""}" data-action="ex-select" data-id="${escapeHtml(e.id)}"><img src="${exerciseImage(e.id)}" loading="lazy" class="w-12 h-12 rounded bg-surface-700 object-cover" onerror="this.style.display='none'" /><div class="min-w-0"><div class="text-sm text-ink-100 truncate">${escapeHtml(e.name)}</div><div class="text-xs text-ink-400 truncate">${escapeHtml(e.body_part||e.bodyPart||"")} • ${escapeHtml(e.equipment||"")} • ${escapeHtml(e.primary_muscle||e.primaryMuscle||"")}</div></div></button>`).join("")||`<div class="empty-state">No exercises yet.</div>`}</div>
+    <div class="border border-surface-800 rounded p-4 bg-surface-900/30">${sel?`<div class="space-y-3"><div class="flex gap-3"><img src="${exerciseImage(sel.id)}" loading="lazy" class="w-24 h-24 rounded bg-surface-800" onerror="this.style.display='none'" /><video src="${exerciseVideo(sel.id)}" controls class="w-40 h-24 rounded bg-surface-800" onerror="this.style.display='none'"></video><div><h3 class="font-medium text-ink-100">${escapeHtml(sel.name)}</h3><p class="text-xs text-ink-400">${escapeHtml(sel.body_part||sel.bodyPart||"")} • ${escapeHtml(sel.equipment||"")}</p><p class="text-xs text-ink-400">Primary: ${escapeHtml(sel.primary_muscle||sel.primaryMuscle||"")}</p><p class="text-xs text-ink-400">Secondary: ${escapeHtml(sel.secondary_muscle||sel.secondaryMuscle||"")}</p></div></div>${(()=>{try{const a=JSON.parse(sel.instructions); if(Array.isArray(a)) return `<ol class="list-decimal ml-4 text-xs text-ink-400 space-y-1">${a.map((s:string)=>`<li>${escapeHtml(s)}</li>`).join("")}</ol>`;}catch{} return sel.instructions?`<p class="text-xs text-ink-400">${escapeHtml(String(sel.instructions))}</p>`:"";})()}${(()=>{try{const a=JSON.parse(sel.tips); if(Array.isArray(a)) return `<ul class="list-disc ml-4 text-xs text-ink-400">${a.map((s:string)=>`<li>${escapeHtml(s)}</li>`).join("")}</ul>`;}catch{} return "";})()}${sel.faqs?`<p class="text-xs text-ink-400 whitespace-pre-wrap">${escapeHtml(sel.faqs)}</p>`:""}<div class="flex gap-2"><button class="button secondary text-xs" data-action="ex-edit" data-id="${escapeHtml(sel.id)}">Edit (save)</button></div></div>`:`<div class="text-sm text-ink-400">Select an exercise</div>`}</div></div></div></section>`;
 }
-function renderWorkouts(): string { const w=state.fitfat.workouts; return `<section class="panel"><div class="panel-header"><h2 class="panel-title">Workouts — ${w.length} (read-only)</h2><p class="panel-subtitle">From maia.db workouts • per-tab sync</p></div><div class="panel-content"><div class="text-xs text-ink-500 mb-2">maia.db • ${w.length} workouts</div><div class="space-y-2 max-h-[60vh] overflow-auto">${w.slice(0,50).map((x:any)=>`<div class="border border-surface-800 rounded p-3 bg-surface-900/30"><div class="text-sm text-ink-100">${escapeHtml(x.name)} — ${new Date(x.date).toLocaleDateString()}</div><div class="text-xs text-ink-400">${escapeHtml(x.notes||"")}</div></div>`).join("")||`<div class="text-xs text-ink-400">No workouts</div>`}</div></div></section>`; }
+function renderWorkouts(): string { const w=state.workouts.items; return `<section class="panel"><div class="panel-header"><h2 class="panel-title">Workouts — ${w.length} (read-only)</h2><p class="panel-subtitle">From maia.db workouts • per-tab sync</p></div><div class="panel-content"><div class="text-xs text-ink-500 mb-2">maia.db • ${w.length} workouts</div><div class="space-y-2 max-h-[60vh] overflow-auto">${w.slice(0,50).map((x:any)=>`<div class="border border-surface-800 rounded p-3 bg-surface-900/30"><div class="text-sm text-ink-100">${escapeHtml(x.name)} — ${new Date(x.date).toLocaleDateString()}</div><div class="text-xs text-ink-400">${escapeHtml(x.notes||"")}</div></div>`).join("")||`<div class="text-xs text-ink-400">No workouts</div>`}</div></div></section>`; }
 async function loadTemplateDetail(id: string): Promise<void> {
   (state as any).templates = { ...((state as any).templates||{}), selectedId: id, detailLoading: true, detail: null, exSearch: "" };
   render();
@@ -2860,16 +2646,6 @@ function handleInput(event: Event): void {
     return;
   }
 
-  if (target.hasAttribute("data-fitfat-filter")) {
-    const key = (target as HTMLElement).getAttribute("data-fitfat-filter");
-    if (key === "exerciseSearch") {
-      state.fitfat.exerciseSearch = (target as HTMLInputElement).value;
-      return;
-    }
-    if (key && key in state.fitfat.filters) {
-      (state.fitfat.filters as Record<string, string>)[key] = (target as HTMLInputElement).value;
-    }
-  }
 
 
 }

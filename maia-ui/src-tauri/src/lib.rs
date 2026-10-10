@@ -510,6 +510,27 @@ fn reload_receipt(
     }
 }
 
+
+/// Lists workout templates, newest first.
+///
+/// The templates view used to be fed by the sync server over HTTP. It reads the
+/// database like everything else now, so it needs a read command of its own.
+#[tauri::command]
+fn list_templates(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    let mut stmt = match conn.prepare("SELECT id, name, notes, start_date, recurrence, created_at, updated_at FROM workout_templates WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 500") { Ok(s)=>s, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("prep {e}"))}};
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"notes":r.get::<_,Option<String>>(2)?,"startDate":r.get::<_,i64>(3)?,"recurrence":r.get::<_,Option<String>>(4)?,"createdAt":r.get::<_,i64>(5)?,"updatedAt":r.get::<_,i64>(6)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    CommandResult{success:true,data:Some(rows),error:None}
+}
+
+/// Lists recorded workouts, newest first.
+#[tauri::command]
+fn list_workouts(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    let mut stmt = match conn.prepare("SELECT id, name, date, started_at, completed_at, notes, routine_id, template_id, created_at, updated_at FROM workouts WHERE deleted_at IS NULL ORDER BY date DESC LIMIT 500") { Ok(s)=>s, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("prep {e}"))}};
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"date":r.get::<_,i64>(2)?,"startedAt":r.get::<_,Option<i64>>(3)?,"completedAt":r.get::<_,Option<i64>>(4)?,"notes":r.get::<_,Option<String>>(5)?,"routineId":r.get::<_,Option<String>>(6)?,"templateId":r.get::<_,Option<String>>(7)?,"createdAt":r.get::<_,i64>(8)?,"updatedAt":r.get::<_,i64>(9)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    CommandResult{success:true,data:Some(rows),error:None}
+}
 #[tauri::command]
 fn list_tasks(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
     let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
@@ -564,7 +585,7 @@ fn get_counts(state: tauri::State<AppState>) -> CommandResult<DashboardCounts> {
 fn list_urls(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
     let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
     let mut stmt = match conn.prepare("SELECT id, title, url, source, tags, is_new, created_at, updated_at FROM urls WHERE deleted_at IS NULL ORDER BY is_new DESC, created_at DESC LIMIT 500") { Ok(s)=>s, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
-    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,Option<String>>(1)?,"url":r.get::<_,String>(2)?,"source":r.get::<_,Option<String>>(3)?,"tags":r.get::<_,Option<String>>(4)?,"is_new":r.get::<_,i64>(5)?,"created_at":r.get::<_,i64>(6)?,"updated_at":r.get::<_,i64>(7)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,Option<String>>(1)?,"url":r.get::<_,String>(2)?,"source":r.get::<_,Option<String>>(3)?,"tags":r.get::<_,Option<String>>(4)?,"is_new":r.get::<_,i64>(5)?!=0,"created_at":r.get::<_,i64>(6)?,"updated_at":r.get::<_,i64>(7)?}))).unwrap().filter_map(|r|r.ok()).collect();
     CommandResult{success:true,data:Some(rows),error:None}
 }
 
@@ -1493,7 +1514,58 @@ fn find_template_of_exercise(
     template_payload(state, &template_id).map(|p| (template_id, p))
 }
 
+
+/// Reads an exercise image or video as a data URL.
+///
+/// The webview cannot be relied on to fetch `GET /media/*` from the server, so
+/// the bytes come through the bridge as base64 and become a `data:` URL. A data
+/// URL also avoids the `asset:` conversion a local file path would need.
+#[tauri::command]
+fn exercise_media(
+    state: tauri::State<AppState>,
+    id: String,
+    video: bool,
+) -> CommandResult<serde_json::Value> {
+    use base64::Engine as _;
+
+    // The id comes from the database but still reaches the filesystem, so it
+    // gets the same check the server applies to its own media routes.
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return CommandResult { success: false, data: None, error: Some("Invalid media id".into()) };
+    }
+
+    let dir = sync_config().media_dir();
+    let (file, content_type) = if video {
+        (dir.join(format!("{id}.mp4")), "video/mp4")
+    } else {
+        (dir.join(format!("{id}.jpg")), "image/jpeg")
+    };
+    let _ = &state;
+
+    match std::fs::read(&file) {
+        Ok(bytes) => {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            CommandResult {
+                success: true,
+                data: Some(serde_json::json!({
+                    "contentType": content_type,
+                    "dataUrl": format!("data:{content_type};base64,{encoded}"),
+                })),
+                error: None,
+            }
+        }
+        // Absent media is normal -- most exercises have no image -- so the
+        // caller gets a null rather than an error it has to special-case.
+        Err(_) => CommandResult { success: true, data: Some(serde_json::Value::Null), error: None },
+    }
+}
 /// Reads a whole template with its exercises and sets, for the detail pane.
+
 #[tauri::command]
 fn get_template(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
     let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
@@ -1775,6 +1847,8 @@ pub fn run() {
             archive_receipt,
             restore_receipt,
             list_tasks,
+            list_templates,
+            list_workouts,
             list_goals,
             get_counts,
             list_urls,
@@ -1804,6 +1878,7 @@ pub fn run() {
             update_template,
             delete_template,
             get_template,
+            exercise_media,
             add_template_exercise,
             update_template_exercise,
             delete_template_exercise,
