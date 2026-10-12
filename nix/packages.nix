@@ -125,7 +125,7 @@ let
       # this every registry request fails with UNABLE_TO_GET_ISSUER_CERT_LOCALLY.
       pkgs.cacert
     ];
-    installPhase = ''
+installPhase = ''
       runHook preInstall
       export HOME=$TMPDIR
       export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
@@ -133,14 +133,34 @@ let
       export npm_config_cafile="$SSL_CERT_FILE"
       pnpm config set store-dir "$out"
       pnpm fetch --frozen-lockfile
+      # The install happens here rather than in the app build, because a store
+      # derivation is read-only once built and pnpm wants to write to it.
+      # pnpm 11's `fetch` populates one layout directory and its `install` tries to
+      # create another, so pointing the app build at this store meant a guaranteed
+      # EACCES on mkdir.
+      #
+      # Hoisted so node_modules is self-contained. pnpm's default layout symlinks
+      # into the store, which works but makes the output's validity depend on
+      # paths outside it.
+      pnpm install --frozen-lockfile --offline --node-linker=hoisted
+
+      # `pnpm install` writes node_modules into the working directory, not into
+      # $out, so it has to be moved to be part of the store path.
+      mv node_modules "$out/node_modules"
+
       # pnpm caches a per-project entry keyed by the checkout's absolute path,
       # which leaves a symlink into /build behind. Nothing reads it, and Nix
       # rejects the output for it.
-      rm -rf "$out"/v10/projects
+      #
+      # The glob rather than a fixed version directory: pnpm names the store
+      # layout after itself (v10 on pnpm 10, v11 on pnpm 11), so naming one
+      # version quietly stops cleaning as soon as pnpm moves on.
+      rm -rf "$out"/*/projects
+      rm -rf "$out/node_modules/.pnpm"
       runHook postInstall
     '';
     outputHashMode = "recursive";
-    outputHash = "sha256-XBLtDV1KjPYF+gfsatg/TW4SiP4DKPs7oRgrrAM2IHQ=";
+    outputHash = lib.fakeSha256;
   };
 
   # Launchers find desktop entries through $XDG_DATA_DIRS/applications, and NixOS
@@ -189,12 +209,22 @@ let
     # Hence the assertion below rather than trusting the hook to have run.
     preBuild = ''
       export HOME="$TMPDIR"
-      pnpm --dir maia-ui config set store-dir "${frontendDeps}"
-      pnpm --dir maia-ui install --frozen-lockfile --offline
-      pnpm --dir maia-ui build
 
-      if [ ! -f maia-ui/dist/index.html ]; then
-        echo "pnpm build produced no maia-ui/dist/index.html; the webview would" >&2
+      # node_modules is built by the frontendDeps derivation, where the pnpm store
+      # is still writable, and linked in here. The app build must not run pnpm
+      # itself: it would try to write to a read-only store path.
+      rm -rf maia-ui/node_modules
+      ln -s "${frontendDeps}/node_modules" maia-ui/node_modules
+
+      # Run the build scripts directly rather than through `pnpm run`, which
+      # would re-enter the store. `build` is `tsc && vite build`.
+      export PATH="$PWD/maia-ui/node_modules/.bin:$PATH"
+      cd maia-ui
+      tsc
+      vite build
+
+      if [ ! -f dist/index.html ]; then
+        echo "the frontend build produced no dist/index.html; the webview would" >&2
         echo "have nothing to load and fall back to the dev server URL" >&2
         exit 1
       fi
