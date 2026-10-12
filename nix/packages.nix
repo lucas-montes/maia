@@ -176,27 +176,42 @@ let
     cargoBuildFlags = [
       "-p"
       "maia-ui"
-      # Without this the webview loads build.devUrl (http://localhost:1420)
-      # rather than the embedded assets, and the packaged app opens a blank
-      # window saying it cannot connect to localhost. The Tauri CLI passes it
-      # automatically; calling cargo directly does not.
-      "--features"
-      "custom-protocol"
     ];
+
+    # tauri-build embeds `frontendDist` at compile time, so the frontend has to be
+    # built before cargo runs.
+    #
+    # The hook is named `preBuild`, not `preBuildHook`: cargoBuildHook replaces
+    # buildPhase and calls `runHook preBuild`, so the older name is silently
+    # ignored. That is not a harmless mistake -- with the name wrong the
+    # frontend was never built, and without custom-protocol nothing noticed, so
+    # the packaged app shipped with no assets and opened a blank window.
+    # Hence the assertion below rather than trusting the hook to have run.
+    preBuild = ''
+      export HOME="$TMPDIR"
+      pnpm --dir maia-ui config set store-dir "${frontendDeps}"
+      pnpm --dir maia-ui install --frozen-lockfile --offline
+      pnpm --dir maia-ui build
+
+      if [ ! -f maia-ui/dist/index.html ]; then
+        echo "pnpm build produced no maia-ui/dist/index.html; the webview would" >&2
+        echo "have nothing to load and fall back to the dev server URL" >&2
+        exit 1
+      fi
+    '';
 
     # The app depends on sync-server, which pulls in utoipa-swagger-ui.
     postPatch = ''
       export SWAGGER_UI_DOWNLOAD_URL="file://${swaggerUi}"
     '';
 
-    # tauri-build embeds `frontendDist` at compile time, so the frontend has to be
-    # built before cargo runs. preBuildHook is the last hook before buildPhase.
-    preBuildHook = ''
-      export HOME="$TMPDIR"
-      pnpm --dir maia-ui config set store-dir "${frontendDeps}"
-      pnpm --dir maia-ui install --frozen-lockfile --offline
-      pnpm --dir maia-ui build
-    '';
+    # Without this the webview loads build.devUrl (http://localhost:1420) rather
+    # than the embedded assets, and the packaged app opens a blank window saying
+    # it cannot connect to localhost. The Tauri CLI passes it automatically;
+    # cargoBuildHook calls cargo directly and does not.
+    cargoBuildFeatures = [
+      "custom-protocol"
+    ];
 
     nativeBuildInputs = [
       pkgs.nodejs
