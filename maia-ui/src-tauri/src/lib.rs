@@ -230,6 +230,28 @@ fn get_server_diagnostics() -> serde_json::Value {
     })
 }
 
+/// Everything the phone needs to pair, as one object.
+///
+/// The URL and key are read here rather than in the webview so the pairing
+/// details never depend on the webview being able to reach the server.
+#[tauri::command]
+async fn sync_info() -> serde_json::Value {
+    let cfg = sync_config();
+    let port = cfg.port();
+    let lan_ip = get_lan_ip_value();
+    serde_json::json!({
+        "port": port,
+        // Always loopback for this machine. The configured address is a *bind*
+        // address, and a bind address is not somewhere to connect to -- the
+        // earlier version handed the webview "0.0.0.0:3030" to fetch from.
+        "localUrl": format!("http://127.0.0.1:{port}"),
+        "lanUrl": format!("http://{}:{}", lan_ip, port),
+        "lanIp": lan_ip,
+        "apiKey": cfg.api_key,
+        "isListening": api::is_reachable().await,
+    })
+}
+
 /// Shows only the first and last few characters of a secret, mirroring how the
 /// sync API key is displayed.
 fn mask_secret(secret: &str) -> String {
@@ -1839,6 +1861,7 @@ pub fn run() {
             get_lan_ip,
             get_sync_lan_url,
             get_server_diagnostics,
+            sync_info,
             list_notes,
             read_note,
             list_receipts,
@@ -1892,6 +1915,83 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    /// Every command the frontend invokes must be registered.
+    ///
+    /// The two halves are separate files that only meet through strings, so
+    /// nothing else catches a rename or a removal on one side. A missing command
+    /// is silent at build time and at runtime: the webview rejects with
+    /// "Command <name> not found" and the panel that wanted it just stops
+    /// working.
+    #[test]
+    fn every_invoked_command_is_registered() {
+        let frontend = include_str!("../../src/main.ts");
+        let backend = include_str!("lib.rs");
+
+        let handler_block = backend
+            .split("invoke_handler")
+            .nth(1)
+            .and_then(|rest| rest.split("])").next())
+            .expect("generate_handler! block should be present");
+
+        let registered: Vec<&str> = handler_block
+            .lines()
+            .filter_map(|l| l.trim().strip_suffix(',').map(str::trim))
+            .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+            .collect();
+
+        let mut invoked: Vec<String> = Vec::new();
+        let mut rest = frontend;
+        while let Some(start) = rest.find("invoke") {
+            rest = &rest[start + "invoke".len()..];
+            // Skip the optional generic argument, then read the string literal.
+            let after_generic = rest.find('<').and_then(|g| rest[g..].find('>').map(|e| g + e + 1)).unwrap_or(0);
+            let candidate = rest[after_generic..].trim_start();
+            if let Some(args) = candidate.strip_prefix('(') {
+                if let Some(open) = args.find('"') {
+                    let literal = &args[open + 1..];
+                    if let Some(close) = literal.find('"') {
+                        let name = &literal[..close];
+                        if !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                            invoked.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        invoked.sort();
+        invoked.dedup();
+
+        let missing: Vec<&String> = invoked.iter().filter(|c| !registered.contains(&c.as_str())).collect();
+        assert!(!invoked.is_empty(), "no commands parsed; the matcher has drifted");
+        assert!(
+            missing.is_empty(),
+            "the frontend invokes commands that are not registered: {missing:?}"
+        );
+    }
+
+    /// The packaged app must load its embedded assets, not a dev server.
+    ///
+    /// `tauri::is_dev()` is `!cfg!(feature = "custom-protocol")`, and in dev mode
+    /// the webview is pointed at build.devUrl -- http://localhost:1420 -- which
+    /// nothing serves outside a `tauri dev` session. That failure is a blank
+    /// window reading "Could not connect to localhost", with no error anywhere
+    /// else, so it is worth a test that fails loudly instead.
+    #[test]
+    fn the_packaged_app_is_not_a_dev_build() {
+        // The feature is declared in Cargo.toml and switched on by the Nix build;
+        // this asserts the declaration survived, since a stray default-feature
+        // change or a rewrite of that file is the way this silently regresses.
+        let manifest = include_str!("../Cargo.toml");
+        assert!(
+            manifest.contains(r#"custom-protocol = ["tauri/custom-protocol"]"#),
+            "the custom-protocol feature declaration is missing from Cargo.toml"
+        );
+        assert!(
+            !manifest.contains("default = [\"custom-protocol\"]"),
+            "custom-protocol must not be a default feature: `tauri dev` needs it off"
+        );
+    }
+
     /// The desktop app must not be able to write the database.
     ///
     /// That is the whole basis for routing every write through the server: it

@@ -17,6 +17,17 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# Must stay off in development and on in production, and it is what tells Tauri
+# which one it is: `tauri::is_dev()` is literally `!cfg!(feature = "custom-protocol")`.
+#
+# With it off, `get_app_url()` returns build.devUrl -- http://localhost:1420 --
+# instead of the embedded assets, so a packaged app opens a window pointing at a
+# Vite dev server that does not exist: "Could not connect to localhost:
+# Connection refused", on a blank page. The Tauri CLI passes this flag itself;
+# the Nix build has to, since it calls cargo directly.
+custom-protocol = ["tauri/custom-protocol"]
+
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"

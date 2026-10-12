@@ -176,6 +176,12 @@ let
     cargoBuildFlags = [
       "-p"
       "maia-ui"
+      # Without this the webview loads build.devUrl (http://localhost:1420)
+      # rather than the embedded assets, and the packaged app opens a blank
+      # window saying it cannot connect to localhost. The Tauri CLI passes it
+      # automatically; calling cargo directly does not.
+      "--features"
+      "custom-protocol"
     ];
 
     # The app depends on sync-server, which pulls in utoipa-swagger-ui.
