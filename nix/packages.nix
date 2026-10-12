@@ -160,7 +160,7 @@ installPhase = ''
       runHook postInstall
     '';
     outputHashMode = "recursive";
-    outputHash = lib.fakeSha256;
+    outputHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
   };
 
   # Launchers find desktop entries through $XDG_DATA_DIRS/applications, and NixOS
