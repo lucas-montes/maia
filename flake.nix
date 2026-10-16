@@ -6,31 +6,33 @@
     # override it with `maia.inputs.nixpkgs.follows = "nixpkgs"`, which is how the
     # NixOS module avoids building these packages against a different channel
     # than the system's.
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     flake-utils.url = "github:numtide/flake-utils";
     sce.url = "github:crocoder-dev/shared-context-engineering";
+    crane.url = "github:ipetkov/crane";
+    crane-tauri.url = "github:JPHutchins/crane-tauri";
   };
 
-  outputs =
-    {
-      self,
-      nixpkgs,
-      rust-overlay,
-      flake-utils,
-      sce,
-      ...
-    }:
+  outputs = {
+    self,
+    nixpkgs,
+    rust-overlay,
+    flake-utils,
+    crane,
+    crane-tauri,
+    sce,
+    ...
+  }:
     flake-utils.lib.eachDefaultSystem (
-      system:
-      let
+      system: let
         # Android SDK / NDK derivations require accepting Google's license.
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ rust-overlay.overlays.default ];
+          overlays = [rust-overlay.overlays.default];
           config = {
             allowUnfree = true;
             android_sdk.accept_license = true;
@@ -38,26 +40,22 @@
         };
 
         packages = import ./nix/packages.nix {
-          inherit pkgs;
+          inherit pkgs crane-tauri;
           lib = nixpkgs.lib;
+          craneLib = crane.mkLib pkgs;
         };
         devShells = import ./nix/devshells.nix {
           inherit pkgs;
           rust-bin = pkgs.rust-bin;
           sce = sce.packages.${system}.default;
         };
-      in
-      {
+      in {
         devShells = {
           default = devShells.default;
         };
 
         packages = {
           inherit (packages) sync-server maia-desktop;
-          ui = packages.maia-ui;
-          chrome = packages.maia-chrome;
-          full = packages.maia-full;
-          default = packages.maia-full;
         };
 
         apps = {
@@ -67,7 +65,7 @@
             name = "sync-server";
           };
           ui = flake-utils.lib.mkApp {
-            drv = packages.maia-ui;
+            drv = packages.maia-desktop;
             name = "maia";
           };
           default = self.apps.${system}.ui;
@@ -85,6 +83,7 @@
         lib,
         pkgs,
         ...
-      }: import ./nix/module.nix { inherit self config lib pkgs; };
+      }:
+        import ./nix/module.nix {inherit self config lib pkgs;};
     };
 }

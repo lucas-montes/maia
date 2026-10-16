@@ -2,6 +2,36 @@
   "nodes": {
     "crane": {
       "locked": {
+        "lastModified": 1791754810,
+        "narHash": "sha256-cN0Mgk+sQtCJcGWs9H4M0CnLRAuC4I8aCwiBTcBJs6E=",
+        "owner": "ipetkov",
+        "repo": "crane",
+        "rev": "bd63bf1d0a0f6dcacd7549c714a671ee63b0db6a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ipetkov",
+        "repo": "crane",
+        "type": "github"
+      }
+    },
+    "crane-tauri": {
+      "locked": {
+        "lastModified": 1790959302,
+        "narHash": "sha256-Wm3IAVBbuC69FYf3TOQZOtGWgrQV30nlAkofMT8cbcg=",
+        "owner": "JPHutchins",
+        "repo": "crane-tauri",
+        "rev": "9cbdfa03b35ae92ca92329265bf119998e654b37",
+        "type": "github"
+      },
+      "original": {
+        "owner": "JPHutchins",
+        "repo": "crane-tauri",
+        "type": "github"
+      }
+    },
+    "crane_2": {
+      "locked": {
         "lastModified": 1773857772,
         "narHash": "sha256-5xsK26KRHf0WytBtsBnQYC/lTWDhQuT57HJ7SzuqZcM=",
         "owner": "ipetkov",
@@ -53,16 +83,16 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1777428379,
-        "narHash": "sha256-ypxFOeDz+CqADEQNL72haqGjvZQdBR5Vc7pyx2JDttI=",
+        "lastModified": 1791662279,
+        "narHash": "sha256-xI8L+UwJLIg75yVJwLPsY+AUEP1teCT3FyuvodyJu2Y=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "755f5aa91337890c432639c60b6064bb7fe67769",
+        "rev": "6fcc160353f63555b560f25588925133c8f61f2a",
         "type": "github"
       },
       "original": {
         "owner": "NixOS",
-        "ref": "nixos-25.11",
+        "ref": "nixos-26.05",
         "repo": "nixpkgs",
         "type": "github"
       }
@@ -120,6 +150,8 @@
     },
     "root": {
       "inputs": {
+        "crane": "crane",
+        "crane-tauri": "crane-tauri",
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay",
@@ -169,7 +201,7 @@
     },
     "sce": {
       "inputs": {
-        "crane": "crane",
+        "crane": "crane_2",
         "flake-utils": "flake-utils_2",
         "nixpkgs": "nixpkgs_2",
         "opencode": "opencode",
