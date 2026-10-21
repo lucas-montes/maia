@@ -13,6 +13,7 @@ This file indexes all durable context artifacts for the Maia project.
 ## Domain Context Files
 | File | Purpose |
 |---|---|
+| `nix/packaging.md` | How the `server` flake packages (`sync-server`, `frontend`, `maia-desktop`) are built: crane deps caching, pnpm frontend, crane-tauri app, utoipa-swagger-ui download vendoring, build-environment gotchas |
 | `ui-rebuild/shell-and-screens.md` | UI shell, core screen implementations, settings editor, and notes file-backed records |
 | `sync/sync-contract.md` | FitFat offline-first sync contract (mirrors `~/Projects/fitfat/docs/api/openapi.yaml` and `context/sync/sync-contract.md`) |
 
