@@ -55,7 +55,7 @@
         };
 
         packages = {
-          inherit (packages) sync-server maia-desktop;
+          inherit (packages) sync-server maia-desktop frontend;
         };
 
         apps = {
