@@ -72,7 +72,7 @@ export function mount(root: HTMLElement): () => void {
     }
     const row = target.closest<HTMLElement>("[data-note-id]");
     if (!row?.dataset.noteId) return;
-    const id = Number(row.dataset.noteId);
+    const id = row.dataset.noteId;
     notesAtom.set({ ...notesAtom.get(), status: "loading", message: "" });
     try {
       const res = await api.readNote(id);

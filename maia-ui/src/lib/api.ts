@@ -154,7 +154,7 @@ export const api = {
 
   listNotes: () => invoke<Envelope<Note[]>>("list_notes"),
 
-  readNote: (id: number) => invoke<Envelope<NoteWithContent>>("read_note", { id }),
+  readNote: (id: string) => invoke<Envelope<NoteWithContent>>("read_note", { id }),
 
   listReceipts: () => invoke<Envelope<Receipt[]>>("list_receipts"),
 

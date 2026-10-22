@@ -277,7 +277,7 @@ fn list_notes(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Va
 }
 
 #[tauri::command]
-fn read_note(state: tauri::State<AppState>, id: i64) -> CommandResult<NoteWithContent> {
+fn read_note(state: tauri::State<AppState>, id: String) -> CommandResult<NoteWithContent> {
     let conn = match state.db.lock() {
         Ok(c) => c,
         Err(e) => {
