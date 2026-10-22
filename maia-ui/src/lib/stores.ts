@@ -9,6 +9,7 @@ import type {
   SyncInfo,
   TemplateDetail,
   Todo,
+  WorkoutDetail,
 } from "./api";
 
 export type Status = "idle" | "loading" | "saving" | "saved" | "error";
@@ -99,7 +100,23 @@ export const syncAtom = atom<
   }
 >({ items: [], status: "idle", message: "", info: null, qrDataUrl: null });
 
-export const workoutsAtom = atom<ListState<any>>(emptyList<any>());
+export const workoutsAtom = atom<{
+  items: any[];
+  status: Status;
+  message: string;
+  detailId: string | null;
+  detail: WorkoutDetail | null;
+  detailStatus: Status;
+  detailMessage: string;
+}>({
+  items: [],
+  status: "idle",
+  message: "",
+  detailId: null,
+  detail: null,
+  detailStatus: "idle",
+  detailMessage: "",
+});
 
 export const exercisesAtom = atom<
   ListState<Exercise> & {

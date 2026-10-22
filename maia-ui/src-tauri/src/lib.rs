@@ -553,6 +553,64 @@ fn list_workouts(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json:
     let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"date":r.get::<_,i64>(2)?,"startedAt":r.get::<_,Option<i64>>(3)?,"completedAt":r.get::<_,Option<i64>>(4)?,"notes":r.get::<_,Option<String>>(5)?,"routineId":r.get::<_,Option<String>>(6)?,"templateId":r.get::<_,Option<String>>(7)?,"createdAt":r.get::<_,i64>(8)?,"updatedAt":r.get::<_,i64>(9)?}))).unwrap().filter_map(|r|r.ok()).collect();
     CommandResult{success:true,data:Some(rows),error:None}
 }
+
+/// Loads one workout with its exercises and sets (read-only detail view).
+#[tauri::command]
+fn get_workout(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
+    let workout = match conn.query_row(
+        "SELECT id, name, date, started_at, completed_at, notes, routine_id, template_id, created_at, updated_at FROM workouts WHERE id = ?1 AND deleted_at IS NULL",
+        params![id],
+        |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"date":r.get::<_,i64>(2)?,"startedAt":r.get::<_,Option<i64>>(3)?,"completedAt":r.get::<_,Option<i64>>(4)?,"notes":r.get::<_,Option<String>>(5)?,"routineId":r.get::<_,Option<String>>(6)?,"templateId":r.get::<_,Option<String>>(7)?,"createdAt":r.get::<_,i64>(8)?,"updatedAt":r.get::<_,i64>(9)?})),
+    ) {
+        Ok(w) => w,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return CommandResult{success:false,data:None,error:Some("Workout not found".to_string())},
+        Err(e) => return CommandResult{success:false,data:None,error:Some(format!("query {e}"))},
+    };
+    let mut ex_stmt = match conn.prepare(
+        "SELECT we.id, we.exercise_id, e.name, we.sort_order, we.notes FROM workout_exercises we JOIN exercises e ON e.id = we.exercise_id WHERE we.workout_id = ?1 AND we.deleted_at IS NULL ORDER BY we.sort_order",
+    ) { Ok(s)=>s, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("prep {e}"))}};
+    let exercise_ids: Vec<(String, String, String, i64, Option<String>)> = ex_stmt
+        .query_map([id], |r| {
+            Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,i64>(3)?, r.get::<_,Option<String>>(4)?))
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    let mut set_stmt = match conn.prepare(
+        "SELECT id, set_number, reps, weight_kg, rest_seconds, actual_reps, actual_weight_kg, actual_rest_seconds, duration_minutes, distance_meters, actual_duration_minutes, actual_distance_meters, notes, completed_at FROM exercise_sets WHERE workout_exercise_id = ?1 AND deleted_at IS NULL ORDER BY set_number",
+    ) { Ok(s)=>s, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("prep {e}"))}};
+    let mut exercises: Vec<serde_json::Value> = Vec::new();
+    for (we_id,exercise_id,exercise_name,sort_order,notes) in exercise_ids {
+        let sets: Vec<serde_json::Value> = set_stmt
+            .query_map([&we_id], |r| {
+                Ok(serde_json::json!({
+                    "id":r.get::<_,String>(0)?,
+                    "setNumber":r.get::<_,i64>(1)?,
+                    "reps":r.get::<_,Option<i64>>(2)?,
+                    "weightKg":r.get::<_,Option<f64>>(3)?,
+                    "restSeconds":r.get::<_,Option<i64>>(4)?,
+                    "actualReps":r.get::<_,Option<i64>>(5)?,
+                    "actualWeightKg":r.get::<_,Option<f64>>(6)?,
+                    "actualRestSeconds":r.get::<_,Option<i64>>(7)?,
+                    "durationMinutes":r.get::<_,Option<i64>>(8)?,
+                    "distanceMeters":r.get::<_,Option<f64>>(9)?,
+                    "actualDurationMinutes":r.get::<_,Option<i64>>(10)?,
+                    "actualDistanceMeters":r.get::<_,Option<f64>>(11)?,
+                    "notes":r.get::<_,Option<String>>(12)?,
+                    "completedAt":r.get::<_,Option<i64>>(13)?
+                }))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        exercises.push(serde_json::json!({"id":we_id,"exerciseId":exercise_id,"exerciseName":exercise_name,"sortOrder":sort_order,"notes":notes,"sets":sets}));
+    }
+    let mut workout = workout;
+    workout.as_object_mut().map(|o| o.insert("exercises".into(), serde_json::Value::Array(exercises)));
+    CommandResult{success:true,data:Some(workout),error:None}
+}
+/// Lists tasks, newest update first.
 #[tauri::command]
 fn list_tasks(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
     let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
@@ -1872,6 +1930,7 @@ pub fn run() {
             list_tasks,
             list_templates,
             list_workouts,
+            get_workout,
             list_goals,
             get_counts,
             list_urls,

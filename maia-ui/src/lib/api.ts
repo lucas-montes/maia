@@ -74,6 +74,59 @@ export interface Todo {
   updatedAt: number;
 }
 
+export interface Workout {
+  id: string;
+  name: string;
+  date: number;
+  startedAt: number | null;
+  completedAt: number | null;
+  notes: string | null;
+  routineId: string | null;
+  templateId: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ExerciseSet {
+  id: string;
+  setNumber: number;
+  reps: number | null;
+  weightKg: number | null;
+  restSeconds: number | null;
+  actualReps: number | null;
+  actualWeightKg: number | null;
+  actualRestSeconds: number | null;
+  durationMinutes: number | null;
+  distanceMeters: number | null;
+  actualDurationMinutes: number | null;
+  actualDistanceMeters: number | null;
+  notes: string | null;
+  completedAt: number | null;
+}
+
+export interface WorkoutExercise {
+  id: string;
+  exerciseId: string;
+  exerciseName: string;
+  sortOrder: number;
+  notes: string | null;
+  sets: ExerciseSet[];
+}
+
+export interface WorkoutDetail {
+  id: string;
+  name: string;
+  date: number;
+  startedAt: number | null;
+  completedAt: number | null;
+  notes: string | null;
+  routineId: string | null;
+  templateId: string | null;
+  createdAt: number;
+  updatedAt: number;
+  exercises: WorkoutExercise[];
+}
+
 export interface Goal {
   id: number;
   title: string;
@@ -186,7 +239,9 @@ export const api = {
 
   syncInfo: () => invoke<SyncInfo>("sync_info"),
 
-  listWorkouts: () => invoke<unknown>("list_workouts"),
+  listWorkouts: () => invoke<Envelope<Workout>>("list_workouts"),
+
+  getWorkout: (id: string) => invoke<Envelope<WorkoutDetail>>("get_workout", { id }),
 
   listTemplates: () => invoke<unknown>("list_templates"),
 
