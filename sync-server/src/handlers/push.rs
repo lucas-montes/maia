@@ -1203,3 +1203,117 @@ pub async fn push_budget_accounts(
     tx.commit().unwrap();
     Json(SyncAck { server_time })
 }
+
+#[derive(Deserialize)]
+pub struct BodyMetricsPush {
+    #[serde(rename = "bodyMetrics", default)]
+    pub body_metrics: Vec<BodyMetricPush>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct BodyMetricPush {
+    pub id: String,
+    pub date: i64,
+    #[serde(rename = "weightKg")]
+    pub weight_kg: Option<f64>,
+    #[serde(rename = "heightCm")]
+    pub height_cm: Option<f64>,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+}
+
+pub async fn push_body_metrics(
+    State(state): State<AppState>,
+    Json(payload): Json<BodyMetricsPush>,
+) -> impl IntoResponse {
+    let server_time = db::server_time_ms();
+    let conn = state.db.get().unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+    for m in payload.body_metrics {
+        tx.execute(
+            "INSERT INTO body_metrics (id, date, weight_kg, height_cm, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL) ON CONFLICT(id) DO UPDATE SET date=excluded.date, weight_kg=excluded.weight_kg, height_cm=excluded.height_cm, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
+            rusqlite::params![m.id, m.date, m.weight_kg, m.height_cm, m.created_at, server_time],
+        ).unwrap();
+    }
+    for id in payload.deleted {
+        let _ = tx.execute("UPDATE body_metrics SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+    }
+    tx.commit().unwrap();
+    Json(SyncAck { server_time })
+}
+
+#[derive(Deserialize)]
+pub struct ExperimentsPush {
+    #[serde(default)]
+    pub experiments: Vec<ExperimentPush>,
+    #[serde(rename = "experimentCheckins", default)]
+    pub experiment_checkins: Vec<ExperimentCheckinPush>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ExperimentPush {
+    pub id: String,
+    pub name: String,
+    pub purpose: Option<String>,
+    #[serde(rename = "startDate")]
+    pub start_date: i64,
+    #[serde(rename = "endDate")]
+    pub end_date: Option<i64>,
+    pub status: String,
+    pub categories: Option<String>,
+    #[serde(rename = "reminderEnabled")]
+    pub reminder_enabled: bool,
+    #[serde(rename = "reminderTimeMinutes")]
+    pub reminder_time_minutes: i64,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+}
+
+#[derive(Deserialize)]
+pub struct ExperimentCheckinPush {
+    pub id: String,
+    #[serde(rename = "experimentId")]
+    pub experiment_id: String,
+    pub day: i64,
+    pub rating: i64,
+    pub note: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+}
+
+pub async fn push_experiments(
+    State(state): State<AppState>,
+    Json(payload): Json<ExperimentsPush>,
+) -> impl IntoResponse {
+    let server_time = db::server_time_ms();
+    let conn = state.db.get().unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+    for e in payload.experiments {
+        tx.execute(
+            "INSERT INTO experiments (id, name, purpose, start_date, end_date, status, categories, reminder_enabled, reminder_time_minutes, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name, purpose=excluded.purpose, start_date=excluded.start_date, end_date=excluded.end_date, status=excluded.status, categories=excluded.categories, reminder_enabled=excluded.reminder_enabled, reminder_time_minutes=excluded.reminder_time_minutes, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
+            rusqlite::params![e.id, e.name, e.purpose, e.start_date, e.end_date, e.status, e.categories, if e.reminder_enabled {1} else {0}, e.reminder_time_minutes, e.created_at, server_time],
+        ).unwrap();
+    }
+    // Check-ins reference experiments(id), so an orphan (experiment never
+    // pushed, e.g. deleted on the phone) is skipped instead of failing the push.
+    for c in payload.experiment_checkins {
+        let known: bool = tx.query_row("SELECT count(*) FROM experiments WHERE id=?1", rusqlite::params![c.experiment_id], |r| r.get::<_,i64>(0)).map(|n| n > 0).unwrap_or(false);
+        if !known {
+            tracing::warn!(id = %c.id, experiment_id = %c.experiment_id, "skipping check-in for unknown experiment");
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO experiment_checkins (id, experiment_id, day, rating, note, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL) ON CONFLICT(id) DO UPDATE SET experiment_id=excluded.experiment_id, day=excluded.day, rating=excluded.rating, note=excluded.note, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
+            rusqlite::params![c.id, c.experiment_id, c.day, c.rating, c.note, c.created_at, server_time],
+        ).unwrap();
+    }
+    for id in payload.deleted {
+        let _ = tx.execute("UPDATE experiments SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+    }
+    tx.commit().unwrap();
+    Json(SyncAck { server_time })
+}

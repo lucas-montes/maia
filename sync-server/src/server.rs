@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use axum::{extract::ConnectInfo, http::HeaderName, middleware, routing::get, Router};
+use axum::{extract::ConnectInfo, http::HeaderName, middleware, routing::get, response::IntoResponse, Router};
 use axum::extract::DefaultBodyLimit;
 use axum::http::Method;
 use axum::routing::post;
@@ -70,15 +70,15 @@ pub fn create_router(state: AppState) -> Router {
         .route("/ingredients/item/:id", get(crate::handlers::pull::get_ingredient_item))
         .route("/foods", get(crate::handlers::pull::pull_foods).post(crate::handlers::push::push_foods))
         .route("/fx-rates", get(crate::handlers::pull::pull_fx_rates).post(crate::handlers::push::push_fx_rates))
-        .route("/workouts", get(crate::handlers::read::pull_workouts))
+        .route("/workouts", get(crate::handlers::read::pull_workouts).post(crate::handlers::push::push_workouts))
         .route("/templates", get(crate::handlers::pull::pull_templates).post(crate::handlers::push::push_templates))
-        .route("/notes", get(crate::handlers::pull::pull_notes))
-        .route("/tasks", get(crate::handlers::pull::pull_tasks))
-        .route("/goals", get(crate::handlers::pull::pull_goals))
-        .route("/meals", get(crate::handlers::read::pull_meals))
-        .route("/body-metrics", get(crate::handlers::read::pull_body_metrics))
-        .route("/transactions", get(crate::handlers::pull::pull_transactions))
-        .route("/budget-accounts", get(crate::handlers::pull::pull_accounts))
+        .route("/notes", get(crate::handlers::pull::pull_notes).post(crate::handlers::push::push_notes))
+        .route("/tasks", get(crate::handlers::pull::pull_tasks).post(crate::handlers::push::push_tasks))
+        .route("/goals", get(crate::handlers::pull::pull_goals).post(crate::handlers::push::push_goals))
+        .route("/meals", get(crate::handlers::read::pull_meals).post(crate::handlers::push::push_meals))
+        .route("/body-metrics", get(crate::handlers::read::pull_body_metrics).post(crate::handlers::push::push_body_metrics))
+        .route("/transactions", get(crate::handlers::pull::pull_transactions).post(crate::handlers::push::push_transactions))
+        .route("/budget-accounts", get(crate::handlers::pull::pull_accounts).post(crate::handlers::push::push_budget_accounts))
         .route("/receipt-pictures", get(crate::handlers::pull::pull_receipts).post(crate::handlers::receipts::push_receipt_pictures))
         .route(
             "/receipt-pictures/upload",
@@ -91,8 +91,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/receipt-pictures/:id/picture", get(crate::handlers::receipt_ocr::get_receipt_picture))
         .route("/receipt-pictures/:id/archive", post(crate::handlers::archive::archive_receipt))
         .route("/receipt-pictures/:id/restore", post(crate::handlers::archive::restore_receipt))
-        .route("/experiments", get(crate::handlers::pull::pull_experiments))
+        .route("/experiments", get(crate::handlers::pull::pull_experiments).post(crate::handlers::push::push_experiments))
         .route("/tags", get(crate::handlers::pull::pull_tags))
+        .route("/phone-logs", post(phone_logs))
         .route("/backup", post(crate::handlers::backup::post_backup)
             // A backup is a whole database, well past axum's 2 MB default. This is
             // the upload ceiling rather than an exact fit: rejecting a large but
@@ -268,6 +269,20 @@ where
         }
     });
     Ok((port, handle))
+}
+
+/// Phone diagnostics: the mobile app ships its recent log lines here on every
+/// sync/push, and each line is traced to the server's stdout (tagged
+/// `phone`), so debugging a device no longer needs `adb logcat` attached.
+async fn phone_logs(
+    axum::Json(payload): axum::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Some(lines) = payload.get("lines").and_then(|l| l.as_array()) {
+        for line in lines {
+            tracing::info!(target: "phone", "{}", line.as_str().unwrap_or(""));
+        }
+    }
+    axum::Json(serde_json::json!({"ok": true}))
 }
 
 #[cfg(test)]

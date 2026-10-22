@@ -773,12 +773,81 @@ mod tests {
             "exerciseSets": [{"id":"s1","workoutExerciseId":"we1","setNumber":1,"reps":8,"weightKg":80.0}]
         });
         let resp = client.post(format!("http://127.0.0.1:{port}/workouts")).header("Authorization","Bearer test-key").json(&payload).send().await.unwrap();
-        assert_eq!(resp.status(), 405);
+        assert_eq!(resp.status(), 200);
         {
             let conn = pool.get().unwrap();
             let c: i64 = conn.query_row("SELECT count(*) FROM workouts WHERE id='w1'", [], |r| r.get(0)).unwrap();
-            assert_eq!(c, 0);
+            assert_eq!(c, 1);
+            let c: i64 = conn.query_row("SELECT count(*) FROM workout_exercises WHERE id='we1'", [], |r| r.get(0)).unwrap();
+            assert_eq!(c, 1);
+            let c: i64 = conn.query_row("SELECT count(*) FROM exercise_sets WHERE id='s1'", [], |r| r.get(0)).unwrap();
+            assert_eq!(c, 1);
         }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn push_body_metrics_upserts() {
+        let pool = crate::db::init_memory().unwrap();
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let payload = serde_json::json!({
+            "bodyMetrics": [{"id":"bm1","date":1000,"weightKg":80.5,"heightCm":180.0,"createdAt":1000}]
+        });
+        let resp = client.post(format!("http://127.0.0.1:{port}/body-metrics")).header("Authorization","Bearer test-key").json(&payload).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        {
+            let conn = pool.get().unwrap();
+            let (weight, date): (f64, i64) = conn.query_row("SELECT weight_kg, date FROM body_metrics WHERE id='bm1'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            assert_eq!(weight, 80.5);
+            assert_eq!(date, 1000);
+        }
+        // Re-pushing the same id must update, not duplicate.
+        let resp = client.post(format!("http://127.0.0.1:{port}/body-metrics")).header("Authorization","Bearer test-key").json(&serde_json::json!({
+            "bodyMetrics": [{"id":"bm1","date":1000,"weightKg":81.0,"heightCm":180.0,"createdAt":1000}]
+        })).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        {
+            let conn = pool.get().unwrap();
+            let (c, weight): (i64, f64) = conn.query_row("SELECT count(*), weight_kg FROM body_metrics WHERE id='bm1'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            assert_eq!(c, 1);
+            assert_eq!(weight, 81.0);
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn push_experiments_and_checkins() {
+        let pool = crate::db::init_memory().unwrap();
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let payload = serde_json::json!({
+            "experiments": [{"id":"e1","name":"Sleep","purpose":null,"startDate":1000,"endDate":null,"status":"active","categories":"[\"body\"]","reminderEnabled":true,"reminderTimeMinutes":1200,"createdAt":1000}],
+            "experimentCheckins": [
+                {"id":"c1","experimentId":"e1","day":1000,"rating":4,"note":"ok","createdAt":1000},
+                {"id":"c2","experimentId":"unknown","day":1000,"rating":3,"note":null,"createdAt":1000}
+            ]
+        });
+        let resp = client.post(format!("http://127.0.0.1:{port}/experiments")).header("Authorization","Bearer test-key").json(&payload).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        {
+            let conn = pool.get().unwrap();
+            let c: i64 = conn.query_row("SELECT count(*) FROM experiments WHERE id='e1'", [], |r| r.get(0)).unwrap();
+            assert_eq!(c, 1);
+            let c: i64 = conn.query_row("SELECT count(*) FROM experiment_checkins WHERE id='c1'", [], |r| r.get(0)).unwrap();
+            assert_eq!(c, 1, "check-in for a pushed experiment must land");
+            let c: i64 = conn.query_row("SELECT count(*) FROM experiment_checkins WHERE id='c2'", [], |r| r.get(0)).unwrap();
+            assert_eq!(c, 0, "orphan check-in must be skipped, not fail the push");
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn phone_logs_are_accepted() {
+        let (port, handle) = crate::server::start_test_server().await;
+        let client = reqwest::Client::new();
+        let resp = client.post(format!("http://127.0.0.1:{port}/phone-logs")).header("Authorization","Bearer test-key").json(&serde_json::json!({"lines":["tip info test line"]})).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
         handle.abort();
     }
 
