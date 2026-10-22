@@ -108,7 +108,7 @@
       # dump the v11 SQLite index to SQL so the hash is platform-independent.
       # Older versions are deprecated and scheduled for removal in 26.11.
       fetcherVersion = 4;
-      hash = "sha256-oXilt0hyZioWEw/6EtFil/a5kawPuWGR2JwRgJaXyJw=";
+      hash = "sha256-Qe07si03npOOpJRYLIbWqxqpxOTKE0vYf2iXmyiWMTc=";
     };
 
     nativeBuildInputs = [

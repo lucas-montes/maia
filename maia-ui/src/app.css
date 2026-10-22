@@ -1,0 +1,277 @@
+@import "tailwindcss";
+@import "./styles/tokens.css";
+
+@plugin "daisyui" {
+  themes: false;
+}
+
+/* Theme copied from the daisyUI dashboard template's output.css (dark
+   variant). DaisyUI components pick these up; our own classes keep using the
+   raw token scales so nothing visually drifts. */
+@plugin "daisyui/theme" {
+  name: "maia";
+  default: true;
+  prefersdark: true;
+  /* Exact token set — key template traits: hairline .5px borders,
+     --depth: 1 for subtle component shadows, stock .25rem control sizing,
+     blue primary, warm-gray near-black surfaces. */
+  color-scheme: dark;
+  --color-base-100: oklch(20.46% .007 257.8);
+  --color-base-200: oklch(22.86% .007 257.8);
+  --color-base-300: oklch(24.86% .007 257.8);
+  --color-base-content: oklch(97.807% .029 256.847);
+  --color-primary: oklch(46% .228 260.92);
+  --color-primary-content: oklch(96% .018 272.314);
+  --color-secondary: oklch(68% .163 184.32);
+  --color-secondary-content: oklch(94% .028 342.258);
+  --color-accent: oklch(36.27% .1049 260.92);
+  --color-accent-content: oklch(73.18% .1049 260.92);
+  --color-neutral: oklch(43% .046 261.32);
+  --color-neutral-content: oklch(92% .004 286.32);
+  --color-info: oklch(29% .066 243.157);
+  --color-info-content: oklch(83% .094 211.43);
+  --color-success: oklch(37% .077 168.94);
+  --color-success-content: oklch(82% .092 163.21);
+  --color-warning: oklch(41% .112 45.904);
+  --color-warning-content: oklch(83% .092 76.54);
+  --color-error: oklch(27% .105 12.094);
+  --color-error-content: oklch(82% .112 24.87);
+  --radius-selector: .5rem;
+  --radius-field: .25rem;
+  --radius-box: .5rem;
+  --size-selector: .25rem;
+  --size-field: .25rem;
+  --border: .5px;
+  --depth: 1;
+  --noise: 0;
+}
+
+@theme {
+  /* Preserve v3 border rendering: v4 defaults borders to currentColor. */
+  --default-border-color: var(--color-base-300);
+
+  /* Readability: the micro sizes used across the views were too small to be
+     comfortable at a 14px-ish UI scale, so xs/sm sit just above the stock
+     sizes the web template uses (0.75rem/0.875rem). Window zoom (Ctrl +/-)
+     scales everything from here. */
+  --text-xs: 0.8125rem;
+  --text-sm: 0.9375rem;
+}
+
+@layer base {
+  /* Zoom factor — adjusted by JS via Ctrl+/- */
+  :root {
+    --zoom-level: 1;
+  }
+
+  html {
+    font-size: calc(16px * var(--zoom-level));
+  }
+
+  html,
+  body,
+  #app {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    @apply bg-base-200 text-base-content antialiased;
+  }
+
+  /* Unified form field styling (same scheme as the old UI) */
+  input,
+  select,
+  textarea {
+    @apply bg-surface-800 text-ink-100;
+    font-size: inherit;
+    line-height: 1.5;
+    box-sizing: border-box;
+  }
+
+  select {
+    appearance: none;
+    -webkit-appearance: none;
+    color-scheme: dark;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.75rem center;
+    background-size: 1rem;
+    padding-right: 2.25rem;
+  }
+
+  select option {
+    background: var(--color-surface-800);
+    color: var(--color-ink-100);
+  }
+
+  select option:hover,
+  select option:focus {
+    background: var(--color-surface-700);
+  }
+
+  :where(a, button, input, select, textarea, [tabindex]):focus-visible {
+    outline: 2px solid var(--color-accent-500);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* ---- App shell (daisyUI dashboard-template style: dark page bg, raised
+     rounded content pane, sidebar on the page bg with menu + sticky
+     account footer) ---- */
+
+  .app-body {
+    @apply grid h-screen min-h-0 grid-cols-[auto_1fr];
+  }
+
+  .app-sidebar {
+    @apply flex h-full w-60 min-h-0 shrink-0 flex-col pt-3;
+  }
+
+  .app-sidebar-brand {
+    @apply flex shrink-0 items-center gap-3 px-4 pb-2;
+  }
+
+  .app-sidebar-brand-mark {
+    @apply grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-primary font-semibold text-primary-content;
+  }
+
+  .app-sidebar-nav {
+    @apply flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto overflow-x-hidden px-3 pb-2;
+  }
+
+  /* Groups expand natively via <details>; the daisyUI menu handles spacing
+     and active-state backgrounds — no bespoke button styles needed. */
+  .app-sidebar-footer {
+    @apply shrink-0 border-t border-base-300 p-2;
+  }
+
+  .app-main {
+    /* Inset rounded content pane that floats on the page bg like the
+       template's drawer-content. */
+    @apply m-2 ml-1 flex min-h-0 min-w-0 flex-col overflow-hidden rounded-box border border-base-300 bg-base-100;
+  }
+  .app-main-scroll {
+    @apply flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4;
+  }
+
+  .app-topbar {
+    @apply flex h-16 shrink-0 items-center gap-4 border-b border-base-300 px-5;
+  }
+
+  /* ---- Panels/cards (template: `card bg-base-200` floating on the
+     bg-base-100 content pane) ---- */
+
+  .panel {
+    @apply flex min-h-0 flex-1 flex-col rounded-box border border-base-300 bg-base-200;
+  }
+
+  .panel-header {
+    @apply shrink-0 px-5 pt-4;
+  }
+
+  .panel-title {
+    @apply text-lg font-semibold text-base-content;
+  }
+
+  .panel-subtitle {
+    @apply mt-0.5 text-sm text-base-content/60;
+  }
+
+  .panel-content {
+    @apply flex min-h-0 flex-1 flex-col px-5 pb-5 pt-2;
+  }
+
+  /* Rows in a divided list: aligned, evenly padded, gap-safe (list items keep
+     room for badges); the well bg comes from .list-divided. */
+  .list-divided > div {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.625rem 0.875rem;
+  }
+
+  .list-divided > div:hover {
+    background: color-mix(in oklab, var(--color-base-200) 55%, transparent);
+  }
+
+  .badge-muted {
+    @apply bg-surface-700/50 text-ink-400;
+  }
+
+  .badge-ok {
+    @apply bg-ok-400/10 text-ok-400;
+  }
+
+  .badge-warn {
+    @apply bg-warn-400/10 text-warn-400;
+  }
+
+  .badge-err {
+    @apply bg-err-400/10 text-err-400;
+  }
+
+  .badge-info {
+    @apply bg-accent-400/10 text-accent-400;
+  }
+
+  .list-row {
+    @apply flex items-start gap-3 rounded-maia-card bg-base-100 p-3 transition-colors;
+  }
+
+  a.list-row,
+  button.list-row {
+    @apply cursor-pointer hover:bg-base-200/60 focus:bg-base-200/60;
+  }
+
+  .list-row.active {
+    @apply border-l-2 border-l-accent-500 bg-surface-800/50;
+  }
+
+  .list-divided {
+    @apply min-h-0 divide-y divide-base-300 overflow-auto rounded-box bg-base-100;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-maia-control border border-surface-700 bg-surface-800 px-1.5 py-0.5 text-xs text-ink-300;
+  }
+
+  .banner {
+    @apply rounded-box border border-base-300 bg-base-100 p-3 text-sm text-base-content/80;
+  }
+
+  .banner-err {
+    @apply border-err-700 bg-err-900/30 text-err-300;
+  }
+
+  .banner-ok {
+    @apply border-ok-700 bg-ok-900/30 text-ok-300;
+  }
+
+  .empty-state {
+    @apply py-8 text-center text-base-content/50;
+  }
+
+  .field-label {
+    @apply mb-1 block text-sm font-medium text-base-content/80;
+  }
+
+  .field-hint {
+    @apply mt-1 text-xs text-base-content/50;
+  }
+}
+
+@layer utilities {
+  @media (max-width: 960px) {
+    .app-main {
+      margin: 0.5rem;
+      margin-left: 0.25rem;
+    }
+
+    .app-main-scroll {
+      padding: 1rem;
+    }
+  }
+}
