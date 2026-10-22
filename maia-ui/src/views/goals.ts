@@ -1,7 +1,7 @@
 import { api, type Goal } from "../lib/api";
 import { escapeHtml, formatDate, setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
-import { goalsAtom, todosAtom } from "../lib/stores";
+import { goalsAtom } from "../lib/stores";
 import { backToDashboard, emptyState, panelClose, panelOpen, statusBanner } from "./shared";
 
 function goalBadge(status: string): string {
@@ -17,7 +17,7 @@ function goalBadge(status: string): string {
   }
 }
 
-function goalCard(g: Goal, taskCount: number): string {
+function goalCard(g: Goal): string {
   const progress = Math.min(100, Math.max(0, g.progress));
   return `
     <div class="rounded-maia-card border border-surface-800 bg-base-100 p-4">
@@ -30,7 +30,6 @@ function goalCard(g: Goal, taskCount: number): string {
       </div>
       <div class="mt-3 flex items-center gap-3 text-sm text-ink-400">
         ${g.deadline ? `<span>Due: ${escapeHtml(formatDate(g.deadline))}</span>` : ""}
-        <span>${taskCount} task${taskCount !== 1 ? "s" : ""}</span>
       </div>
       <div class="mt-3 flex items-center gap-3">
         <progress class="progress flex-1 ${g.progress >= 100 ? "progress-success" : "progress-primary"}" value="${progress}" max="100"></progress>
@@ -58,18 +57,11 @@ export function mount(root: HTMLElement): () => void {
 
   const render = (): void => {
     const s = goalsAtom.get();
-    const tasks = todosAtom.get().items;
-    const taskCounts = new Map<number, number>();
-    for (const t of tasks) {
-      if (t.goal_id !== null) taskCounts.set(t.goal_id, (taskCounts.get(t.goal_id) ?? 0) + 1);
-    }
     setHtml(statusEl, statusBanner(s));
     countEl.textContent = `${s.items.length} goal${s.items.length !== 1 ? "s" : ""}`;
     setHtml(
       listEl,
-      s.items.length
-        ? s.items.map((g) => goalCard(g, taskCounts.get(g.id) ?? 0)).join("")
-        : emptyState("No goals yet. Goals are managed on mobile."),
+      s.items.length ? s.items.map((g) => goalCard(g)).join("") : emptyState("No goals yet. Goals are managed on mobile."),
     );
     refreshIcons(listEl);
   };
@@ -81,19 +73,6 @@ export function mount(root: HTMLElement): () => void {
       else goalsAtom.set({ items: [], status: "error", message: res.error ?? "Failed to load goals" });
     })
     .catch((e) => goalsAtom.set({ items: [], status: "error", message: String(e) }));
-  if (todosAtom.get().items.length === 0) {
-    api
-      .listTasks()
-      .then((res) => {
-        if (res.success && res.data) todosAtom.set({ ...todosAtom.get(), items: res.data, status: "idle", message: "" });
-      })
-      .catch(() => {});
-  }
-
   const unsubGoals = goalsAtom.subscribe(render);
-  const unsubTodos = todosAtom.subscribe(render);
-  return () => {
-    unsubGoals();
-    unsubTodos();
-  };
+  return unsubGoals;
 }

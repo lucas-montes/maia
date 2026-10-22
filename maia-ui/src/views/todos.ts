@@ -1,25 +1,16 @@
 import { api, type Todo } from "../lib/api";
 import { escapeHtml, setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
-import { parseTags } from "../lib/dom";
 import { todosAtom } from "../lib/stores";
 import { backToDashboard, emptyState, panelClose, panelOpen, statusBanner } from "./shared";
 
-function priorityChip(p: string): string {
-  switch (p) {
-    case "high":
-      return `<span class="badge badge-sm badge-err">${p}</span>`;
-    case "medium":
-      return `<span class="badge badge-sm badge-warn">${p}</span>`;
-    case "low":
-      return `<span class="badge badge-sm badge-ok">${p}</span>`;
-    default:
-      return `<span class="badge badge-sm badge-muted">${escapeHtml(p)}</span>`;
-  }
+function formatDateMs(ms: number): string {
+  const d = new Date(ms);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function todoRow(t: Todo, goalTitle: string | undefined): string {
-  const done = t.completed_at !== null;
+function todoRow(t: Todo): string {
+  const done = t.done === 1 || t.taskStatus === 1;
   return `
     <div class="list-row ${done ? "opacity-60" : ""}">
       <span class="mt-1 flex h-4 w-4 items-center justify-center text-sm ${done ? "text-ok-400" : "text-ink-600"}">
@@ -28,10 +19,9 @@ function todoRow(t: Todo, goalTitle: string | undefined): string {
       <div class="min-w-0 flex-1">
         <span class="block font-medium ${done ? "text-ink-500 line-through" : "text-ink-100"}">${escapeHtml(t.title)}</span>
         <div class="mt-1 flex flex-wrap items-center gap-2 text-sm text-ink-400">
-          ${t.priority ? priorityChip(t.priority) : ""}
-          ${t.due_date ? `<span>Due: ${escapeHtml(t.due_date)}</span>` : ""}
-          ${parseTags(t.tags).length ? `<span class="text-xs text-accent-400">${escapeHtml(parseTags(t.tags).join(", "))}</span>` : ""}
-          ${goalTitle ? `<span class="text-accent-400">${escapeHtml(goalTitle)}</span>` : ""}
+          ${t.dueDate ? `<span>Due: ${escapeHtml(formatDateMs(t.dueDate))}</span>` : ""}
+          ${t.carryOver ? `<span class="badge badge-sm badge-muted">carry-over</span>` : ""}
+          ${t.notes ? `<span class="truncate">${escapeHtml(t.notes)}</span>` : ""}
         </div>
       </div>
     </div>`;
@@ -39,9 +29,6 @@ function todoRow(t: Todo, goalTitle: string | undefined): string {
 
 /** Tasks — read-only list with filters (tasks are managed on mobile). */
 export function mount(root: HTMLElement): () => void {
-  // Tasks and goals load together: the list shows each task's goal title.
-  let goalTitles = new Map<number, string>();
-
   root.innerHTML = `
     ${panelOpen("Tasks", "Manage your tasks and priorities")}
       <div data-slot="status"></div>
@@ -64,18 +51,16 @@ export function mount(root: HTMLElement): () => void {
   const render = (): void => {
     const s = todosAtom.get();
     setHtml(statusEl, statusBanner(s));
-    countEl.textContent = `${s.items.length} task${s.items.length !== 1 ? "s" : ""}`;
+    const done = (t: Todo): boolean => t.done === 1 || t.taskStatus === 1;
+    countEl.textContent = `${s.items.filter((t) => !done(t)).length} active task${s.items.filter((t) => !done(t)).length !== 1 ? "s" : ""}`;
 
     let filtered = s.items;
-    if (s.filter === "active") filtered = s.items.filter((t) => t.completed_at === null);
-    else if (s.filter === "completed") filtered = s.items.filter((t) => t.completed_at !== null);
+    if (s.filter === "active") filtered = s.items.filter((t) => !done(t));
+    else if (s.filter === "completed") filtered = s.items.filter(done);
 
-    const goalTitlesMap = goalTitles;
     setHtml(
       listEl,
-      filtered.length
-        ? filtered.map((t) => todoRow(t, goalTitlesMap.get(t.goal_id ?? -1))).join("")
-        : emptyState("No tasks yet. Tasks are managed on mobile."),
+      filtered.length ? filtered.map((t) => todoRow(t)).join("") : emptyState("No tasks yet. Tasks are managed on mobile."),
     );
     // Highlight the active filter button
     root.querySelectorAll<HTMLElement>("[data-filter]").forEach((b) => {
@@ -92,13 +77,6 @@ export function mount(root: HTMLElement): () => void {
 
   render();
 
-  api
-    .listGoals()
-    .then((res) => {
-      if (res.success && res.data) goalTitles = new Map(res.data.map((g) => [g.id, g.title]));
-      render();
-    })
-    .catch(() => {});
   api
     .listTasks()
     .then((res) => {

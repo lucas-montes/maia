@@ -61,17 +61,17 @@ export interface SavedUrl {
 }
 
 export interface Todo {
-  id: number;
-  goal_id: number | null;
+  id: string;
+  date: number;
   title: string;
-  description: string | null;
-  due_date: string | null;
-  priority: string | null;
-  tags: string;
-  order_index: number;
-  completed_at: string | null;
-  created_at: string;
-  updated_at: string;
+  done: number;
+  taskStatus: number | null;
+  carryOver: boolean;
+  sortOrder: number;
+  dueDate: number | null;
+  notes: string | null;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface Goal {
