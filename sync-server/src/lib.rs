@@ -612,7 +612,6 @@ mod tests {
         handle.abort();
     }
 
-
     #[tokio::test]
     async fn push_fx_rates_preserves_the_manual_flag() {
         let pool = crate::db::init_memory().unwrap();
@@ -924,6 +923,47 @@ mod tests {
             assert_eq!(c, 1);
         }
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn pull_templates_returns_exercises_and_sets() {
+        let pool = crate::db::init_memory().unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Bench','weightlifting',1000,1000)", []).unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let payload = serde_json::json!({
+            "workoutTemplates": [{"id":"t1","name":"MyTemplate","startDate":1000,"createdAt":1000,"updatedAt":1000}],
+            "workoutTemplateExercises": [{"id":"te1","templateId":"t1","exerciseId":"e1","sortOrder":0}],
+            "workoutTemplateSets": [{"id":"ts1","templateExerciseId":"te1","setNumber":1,"reps":8,"restSeconds":90,"weightKg":60.0}]
+        });
+        let resp = client.post(format!("http://127.0.0.1:{port}/templates")).header("Authorization","Bearer test-key").json(&payload).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        drop(client);
+
+        let (port2, handle2) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{port2}/templates"))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let t = &body["items"][0];
+        assert_eq!(t["name"], "MyTemplate");
+        let ex = &t["exercises"][0];
+        assert_eq!(ex["exerciseId"], "e1");
+        let set = &ex["sets"][0];
+        assert_eq!(set["reps"], 8);
+        assert_eq!(set["restSeconds"], 90, "rest seconds must survive the pull");
+        assert_eq!(set["weightKg"], 60.0);
+        drop(client);
+        handle.abort();
+        handle2.abort();
     }
 
     #[tokio::test]

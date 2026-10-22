@@ -443,7 +443,43 @@ pub async fn pull_foods(State(state): State<AppState>, Query(q): Query<SinceQuer
 pub async fn pull_templates(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
     let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
     let mut stmt = conn.prepare("SELECT id, name, notes, start_date, recurrence, excluded_dates, source_routine_id, created_at, updated_at FROM workout_templates WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
-    let items: Vec<serde_json::Value> = stmt.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"notes":r.get::<_,Option<String>>(2)?,"startDate":r.get::<_,i64>(3)?,"recurrence":r.get::<_,Option<String>>(4)?,"excludedDates":r.get::<_,Option<String>>(5)?,"sourceRoutineId":r.get::<_,Option<String>>(6)?,"createdAt":r.get::<_,i64>(7)?,"updatedAt":r.get::<_,i64>(8)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    let templates: Vec<(String, serde_json::Value)> = stmt.query_map([since], |r| {
+        Ok((
+            r.get::<_,String>(0)?,
+            serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"notes":r.get::<_,Option<String>>(2)?,"startDate":r.get::<_,i64>(3)?,"recurrence":r.get::<_,Option<String>>(4)?,"excludedDates":r.get::<_,Option<String>>(5)?,"sourceRoutineId":r.get::<_,Option<String>>(6)?,"createdAt":r.get::<_,i64>(7)?,"updatedAt":r.get::<_,i64>(8)?}),
+        ))
+    }).unwrap().filter_map(|r|r.ok()).collect();
+    let mut items: Vec<serde_json::Value> = Vec::with_capacity(templates.len());
+    let mut ex_stmt = conn.prepare("SELECT id, exercise_id, sort_order, notes FROM workout_template_exercises WHERE template_id = ?1 AND deleted_at IS NULL ORDER BY sort_order").unwrap();
+    let mut set_stmt = conn.prepare("SELECT id, set_number, reps, weight_kg, rest_seconds, duration_minutes, distance_meters FROM workout_template_sets WHERE template_exercise_id = ?1 AND deleted_at IS NULL ORDER BY set_number").unwrap();
+    for (tpl_id, mut template) in templates {
+        let ids: Vec<(String, String, i64, Option<String>)> = ex_stmt
+            .query_map([tpl_id], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,i64>(2)?, r.get::<_,Option<String>>(3)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        let mut exercises: Vec<serde_json::Value> = Vec::with_capacity(ids.len());
+        for (ex_id, exercise_id, sort_order, notes) in ids {
+            let sets: Vec<serde_json::Value> = set_stmt
+                .query_map([&ex_id], |r| {
+                    Ok(serde_json::json!({
+                        "id":r.get::<_,String>(0)?,
+                        "setNumber":r.get::<_,i64>(1)?,
+                        "reps":r.get::<_,Option<i64>>(2)?,
+                        "weightKg":r.get::<_,Option<f64>>(3)?,
+                        "restSeconds":r.get::<_,Option<i64>>(4)?,
+                        "durationMinutes":r.get::<_,Option<i64>>(5)?,
+                        "distanceMeters":r.get::<_,Option<f64>>(6)?
+                    }))
+                })
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            exercises.push(serde_json::json!({"id":ex_id,"exerciseId":exercise_id,"sortOrder":sort_order,"notes":notes,"sets":sets}));
+        }
+        template.as_object_mut().map(|o| o.insert("exercises".into(), serde_json::Value::Array(exercises)));
+        items.push(template);
+    }
     let deleted: Vec<String> = conn.prepare("SELECT id FROM workout_templates WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
     Json(PullTemplatesResponse{server_time, items, deleted})
 }
