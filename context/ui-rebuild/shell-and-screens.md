@@ -1,5 +1,13 @@
 # UI Shell and Core Screens
 
+> **Superseded (2026-10-22).** This document describes the pre-rewrite monolith UI
+> (`src/main.ts`, 2,697 lines), which was replaced by the modular vanilla-TS app in
+> `context/plans/ui-vanilla-rewrite.md` (daisyUI dashboard shell, `src/shell/` +
+> `src/views/`). View behavior changed again in `context/plans/sync-ui-bugfixes.md`
+> (notes read by TEXT uuid, task filtering on `done`/`taskStatus`, clickable
+> workout detail, labeled template set columns). Keep for the settings-editor and
+> file-backed-notes sections only until they are rewritten.
+
 Implemented a sober, responsive desktop UI with collapsible sidebar and simplified core screens.
 
 ## Shell Structure

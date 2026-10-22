@@ -43,6 +43,8 @@ This file indexes all durable context artifacts for the Maia project.
 | `fitfat-visualization` | completed | HTTP-leveraged `GET /workouts|/meals|/body-metrics` + Chart.js 4 canvases + per-chart filters + Settings QR auth token |
 | `fix-fitfat-posts` | completed | Fix all 12 FitFat POSTs (camelCase + `deleted[]`), DB nuke to v30 single `maia.db`, UUID v7, missing GET pulls (templates/notes/tasks/goals/transactions/budget-accounts/receipts/experiments/tags), utoipa at `/docs`, WebKit WebVTT gst-plugins-bad |
 | `ui-unified-tabs` | completed | Grouped collapsible sidebar (Training/Nutrition/Health/Planning/Finance) + 13 tabs, virtual scroll, lazy media, per-tab sync |
+| `ui-vanilla-rewrite` | completed | `maia-ui` monolith rewritten as modular vanilla TS (daisyUI dashboard shell, `shell/` + `views/` per screen, no framework) |
+| `sync-ui-bugfixes` | completed | Desktop reads TEXT-uuid notes + `done/taskStatus` filtering, clickable workout detail, labeled set columns; `POST /tags` + `GET /templates` with nested sets; mobile pushes tags/stores/foods |
 
 ## Decisions
 | Decision | Date | Summary |
