@@ -96,17 +96,31 @@ export function mount(root: HTMLElement): () => void {
       : `<div class="space-y-4">
           ${(d.exercises || [])
             .map((b) => {
+              const hasCardio = (b.sets || []).some((st) => st.durationMinutes !== null || st.distanceMeters !== null);
+              const header = `
+                  <div class="flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-ink-500">
+                    <span class="w-6">Set</span>
+                    <span class="w-14">Reps</span>
+                    <span class="w-16">Weight kg</span>
+                    <span class="max-w-16 min-w-12 flex-1">Rest s</span>
+                    ${hasCardio ? `<span class="w-14">Min</span><span class="w-16">Meters</span>` : ""}
+                    <span class="w-6"></span>
+                  </div>`;
               const sets = (b.sets || [])
                 .map(
                   (st) => `
                   <div class="flex items-center gap-1">
                     <span class="w-6 text-xs text-ink-400">${st.setNumber}</span>
-                    <input id="ts-${st.id}-reps" type="number" step="any" value="${setNum(st.reps)}" placeholder="–" class="input input-bordered input-xs w-14" />
-                    <input id="ts-${st.id}-weight" type="number" step="any" value="${setNum(st.weightKg)}" placeholder="–" class="input input-bordered input-xs w-16" />
-                    <input id="ts-${st.id}-rest" type="number" step="any" value="${setNum(st.restSeconds)}" placeholder="–" class="input input-bordered input-xs w-14" />
-                    <input id="ts-${st.id}-dur" type="number" step="any" value="${setNum(st.durationMinutes)}" placeholder="–" class="input input-bordered input-xs w-14" />
-                    <input id="ts-${st.id}-dist" type="number" step="any" value="${setNum(st.distanceMeters)}" placeholder="–" class="input input-bordered input-xs w-16" />
-                    <button class="btn btn-ghost btn-xs px-2" data-action="tpl-delete-set" data-id="${escapeHtml(st.id)}">×</button>
+                    <input id="ts-${st.id}-reps" type="number" step="any" value="${setNum(st.reps)}" placeholder="–" title="Reps" class="input input-bordered input-xs w-14" />
+                    <input id="ts-${st.id}-weight" type="number" step="any" value="${setNum(st.weightKg)}" placeholder="–" title="Weight (kg)" class="input input-bordered input-xs w-16" />
+                    <input id="ts-${st.id}-rest" type="number" step="any" value="${setNum(st.restSeconds)}" placeholder="–" title="Rest (seconds)" class="max-w-16 min-w-12 flex-1 input input-bordered input-xs" />
+                    ${
+                      hasCardio
+                        ? `<input id="ts-${st.id}-dur" type="number" step="any" value="${setNum(st.durationMinutes)}" placeholder="–" title="Duration (minutes)" class="input input-bordered input-xs w-14" />
+                           <input id="ts-${st.id}-dist" type="number" step="any" value="${setNum(st.distanceMeters)}" placeholder="–" title="Distance (meters)" class="input input-bordered input-xs w-16" />`
+                        : ""
+                    }
+                    <button class="btn btn-ghost btn-xs px-2" data-action="tpl-delete-set" data-id="${escapeHtml(st.id)}" title="Delete set">×</button>
                   </div>`,
                 )
                 .join("");
@@ -116,7 +130,12 @@ export function mount(root: HTMLElement): () => void {
                   <button class="btn btn-ghost btn-xs text-err-400" data-action="tpl-remove-exercise" data-id="${escapeHtml(b.id)}">Remove</button>
                 </div>
                 <input id="tpl-exnotes-${b.id}" value="${escapeHtml(b.notes || "")}" placeholder="Exercise note (optional)" class="input input-bordered input-sm w-full" />
-                <div class="text-xs text-ink-500">Set • reps • kg • rest s • min • m</div>
+                ${
+                  hasCardio
+                    ? `<div class="text-xs text-ink-500">Strength sets: reps/kg/rest s. Cardio sets: duration min + distance m.</div>`
+                    : ""
+                }
+                ${hasCardio ? header : ""}
                 ${sets || `<div class="text-xs text-ink-500">No sets yet.</div>`}
                 <div class="flex gap-2">
                   <button class="btn btn-primary btn-xs" data-action="tpl-save-block" data-id="${escapeHtml(b.id)}">Save</button>
