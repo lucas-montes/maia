@@ -92,7 +92,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/receipt-pictures/:id/archive", post(crate::handlers::archive::archive_receipt))
         .route("/receipt-pictures/:id/restore", post(crate::handlers::archive::restore_receipt))
         .route("/experiments", get(crate::handlers::pull::pull_experiments).post(crate::handlers::push::push_experiments))
-        .route("/tags", get(crate::handlers::pull::pull_tags))
+        .route("/tags", get(crate::handlers::pull::pull_tags).post(crate::handlers::push::push_tags))
         .route("/phone-logs", post(phone_logs))
         .route("/backup", post(crate::handlers::backup::post_backup)
             // A backup is a whole database, well past axum's 2 MB default. This is

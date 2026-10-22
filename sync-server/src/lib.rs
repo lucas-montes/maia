@@ -563,6 +563,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn push_tags_upserts_real_names_over_uuid_fallback() {
+        let pool = crate::db::init_memory().unwrap();
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/tags");
+
+        // What the note/task/goal link-pushes do when the tag row is missing:
+        // name = id (a uuid).
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO tags (id, name, created_at, updated_at) VALUES ('t-uuid', 't-uuid', 1000, 1000)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let payload = serde_json::json!({
+            "tags": [{ "id": "t-uuid", "name": "Health", "color": 4282902608i64, "sortOrder": 0, "createdAt": 2000 }]
+        });
+        assert_eq!(
+            client.post(&url).header("Authorization", "Bearer test-key").json(&payload).send().await.unwrap().status(),
+            200
+        );
+
+        {
+            let conn = pool.get().unwrap();
+            let (name, color): (String, Option<i64>) = conn
+                .query_row("SELECT name, color FROM tags WHERE id='t-uuid'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap();
+            assert_eq!(name, "Health", "pushing must replace the uuid name with the real one");
+            assert_eq!(color, Some(4282902608i64));
+        }
+
+        // Deleted[] tombstones.
+        let tomb = serde_json::json!({ "deleted": ["t-uuid"] });
+        assert_eq!(
+            client.post(&url).header("Authorization", "Bearer test-key").json(&tomb).send().await.unwrap().status(),
+            200
+        );
+
+        let conn = pool.get().unwrap();
+        let deleted: Option<i64> = conn
+            .query_row("SELECT deleted_at FROM tags WHERE id='t-uuid'", [], |r| r.get(0))
+            .unwrap();
+        assert!(deleted.is_some(), "tombstoned tag must be soft-deleted");
+        drop(conn);
+        handle.abort();
+    }
+
+
+    #[tokio::test]
     async fn push_fx_rates_preserves_the_manual_flag() {
         let pool = crate::db::init_memory().unwrap();
         let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;

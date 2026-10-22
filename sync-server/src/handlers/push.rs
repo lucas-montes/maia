@@ -504,6 +504,70 @@ pub async fn push_stores(
 }
 
 #[derive(Deserialize)]
+pub struct TagsPush {
+    #[serde(default)]
+    pub tags: Vec<TagPush>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct TagPush {
+    pub id: String,
+    pub name: String,
+    pub color: Option<i64>,
+    #[serde(rename = "sortOrder", default)]
+    pub sort_order: i64,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: Option<i64>,
+}
+
+pub async fn push_tags(
+    State(state): State<AppState>,
+    Json(payload): Json<TagsPush>,
+) -> impl IntoResponse {
+    let server_time = db::server_time_ms();
+    let conn = state.db.get().unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+
+    for tag in payload.tags {
+        // Upsert so a later push carrying the real name replaces the uuid-name
+        // fallback the note/task/goal link pushes insert (`VALUES(?1, ?1)`).
+        tx.execute(
+            "INSERT INTO tags (id, name, color, sort_order, created_at, updated_at, deleted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+             ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name,
+                color=excluded.color,
+                sort_order=excluded.sort_order,
+                updated_at=excluded.updated_at,
+                deleted_at=NULL",
+            rusqlite::params![
+                tag.id,
+                tag.name,
+                tag.color,
+                tag.sort_order,
+                tag.created_at,
+                tag.updated_at.unwrap_or(server_time)
+            ],
+        )
+        .unwrap();
+    }
+
+    for id in payload.deleted {
+        let _ = tx.execute(
+            "UPDATE tags SET deleted_at=?1, updated_at=?1 WHERE id=?2",
+            rusqlite::params![server_time, id],
+        );
+    }
+
+    tx.commit().unwrap();
+    Json(SyncAck { server_time })
+}
+
+#[derive(Deserialize)]
 pub struct FxRatesPush {
     #[serde(default)]
     pub rates: Vec<FxRatePush>,
