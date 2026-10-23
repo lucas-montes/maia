@@ -837,6 +837,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pull_workouts_round_trips_the_actuals() {
+        let pool = crate::db::init_memory().unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Bench','weightlifting',1000,1000)", []).unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let payload = serde_json::json!({
+            "workouts": [{"id":"w1","name":"Push","date":1000,"createdAt":1000,"deletedAt":null}],
+            "workoutExercises": [{"id":"we1","workoutId":"w1","exerciseId":"e1","sortOrder":0,"notes":"felt heavy","deletedAt":null}],
+            "exerciseSets": [{"id":"s1","workoutExerciseId":"we1","setNumber":1,"reps":8,"weightKg":80.0,
+                "restSeconds":90,"actualReps":6,"actualWeightKg":80.0,"actualRestSeconds":95,
+                "completedAt":1700000000000i64,"durationMinutes":null,"distanceMeters":null,
+                "actualDurationMinutes":21,"actualDistanceMeters":5200.0,"notes":"paused","deletedAt":null}]
+        });
+        let resp = client.post(format!("http://127.0.0.1:{port}/workouts")).header("Authorization","Bearer test-key").json(&payload).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let pull: serde_json::Value = client
+            .get(format!("http://127.0.0.1:{port}/workouts?since=0"))
+            .header("Authorization", "Bearer test-key")
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(pull["workouts"].as_array().unwrap().len(), 1);
+        let set = &pull["exerciseSets"].as_array().unwrap()[0];
+        assert_eq!(set["actualReps"], 6);
+        assert_eq!(set["actualWeightKg"], 80.0);
+        assert_eq!(set["actualRestSeconds"], 95);
+        assert_eq!(set["completedAt"], 1700000000000i64);
+        assert_eq!(set["actualDurationMinutes"], 21);
+        assert_eq!(set["actualDistanceMeters"], 5200.0);
+        assert_eq!(set["notes"], "paused");
+        assert_eq!(pull["workoutExercises"].as_array().unwrap()[0]["notes"], "felt heavy");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn push_deleted_wire_state_is_authoritative() {
+        let pool = crate::db::init_memory().unwrap();
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        // A tombstoned row: the phone soft-deleted it and now pushes the state.
+        let payload = serde_json::json!({
+            "tasks": [{"id":"t1","date":1000,"title":"Old","done":1,"carryOver":false,"sortOrder":0,"createdAt":1000,"deletedAt":5000}]
+        });
+        let resp = client.post(format!("http://127.0.0.1:{port}/tasks")).header("Authorization","Bearer test-key").json(&payload).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        {
+            let conn = pool.get().unwrap();
+            let d: i64 = conn.query_row("SELECT count(*) FROM tasks WHERE id='t1' AND deleted_at IS NOT NULL", [], |r| r.get(0)).unwrap();
+            assert_eq!(d, 1, "wire deletedAt must arm the server tombstone");
+        }
+        // Same row pushed alive: the phone's local state is truth, so the
+        // tombstone clears instead of pinning the row forever.
+        let alive = serde_json::json!({
+            "tasks": [{"id":"t1","date":1000,"title":"Old","done":1,"carryOver":false,"sortOrder":0,"createdAt":1000,"deletedAt":null}]
+        });
+        let resp = client.post(format!("http://127.0.0.1:{port}/tasks")).header("Authorization","Bearer test-key").json(&alive).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        {
+            let conn = pool.get().unwrap();
+            let d: i64 = conn.query_row("SELECT count(*) FROM tasks WHERE id='t1' AND deleted_at IS NULL", [], |r| r.get(0)).unwrap();
+            assert_eq!(d, 1, "wire deletedAt null must clear the tombstone");
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
     async fn push_body_metrics_upserts() {
         let pool = crate::db::init_memory().unwrap();
         let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;

@@ -98,6 +98,11 @@ pub struct WorkoutPush {
     pub template_id: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
+    /// The phone's own tombstone state. The wire is authoritative for
+    /// liveness: a soft-deleted row ships with its timestamp and re-arms the
+    /// server tombstone, an alive row ships `null` and clears it.
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -110,6 +115,8 @@ pub struct WorkoutExercisePush {
     #[serde(rename = "sortOrder")]
     pub sort_order: i64,
     pub notes: Option<String>,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -141,6 +148,8 @@ pub struct ExerciseSetPush {
     #[serde(rename = "actualDistanceMeters")]
     pub actual_distance_meters: Option<f64>,
     pub notes: Option<String>,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -171,6 +180,8 @@ pub struct WorkoutTemplatePush {
     pub created_at: i64,
     #[serde(rename = "updatedAt")]
     pub updated_at: i64,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -183,6 +194,8 @@ pub struct WorkoutTemplateExercisePush {
     #[serde(rename = "sortOrder")]
     pub sort_order: i64,
     pub notes: Option<String>,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -201,6 +214,8 @@ pub struct WorkoutTemplateSetPush {
     pub duration_minutes: Option<i64>,
     #[serde(rename = "distanceMeters")]
     pub distance_meters: Option<f64>,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 pub async fn push_ingredient(
@@ -651,22 +666,22 @@ pub async fn push_workouts(
 
     for w in payload.workouts {
         tx.execute(
-            "INSERT INTO workouts (id, name, date, started_at, completed_at, notes, routine_id, template_id, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name, date=excluded.date, started_at=excluded.started_at, completed_at=excluded.completed_at, notes=excluded.notes, routine_id=excluded.routine_id, template_id=excluded.template_id, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![w.id, w.name, w.date, w.started_at, w.completed_at, w.notes, w.routine_id, w.template_id, w.created_at, server_time],
+            "INSERT INTO workouts (id, name, date, started_at, completed_at, notes, routine_id, template_id, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) ON CONFLICT(id) DO UPDATE SET name=excluded.name, date=excluded.date, started_at=excluded.started_at, completed_at=excluded.completed_at, notes=excluded.notes, routine_id=excluded.routine_id, template_id=excluded.template_id, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![w.id, w.name, w.date, w.started_at, w.completed_at, w.notes, w.routine_id, w.template_id, w.created_at, server_time, w.deleted_at],
         )
         .unwrap();
     }
     for we in payload.workout_exercises {
         tx.execute(
-            "INSERT INTO workout_exercises (id, workout_id, exercise_id, sort_order, notes, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL) ON CONFLICT(id) DO UPDATE SET workout_id=excluded.workout_id, exercise_id=excluded.exercise_id, sort_order=excluded.sort_order, notes=excluded.notes, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![we.id, we.workout_id, we.exercise_id, we.sort_order, we.notes, server_time],
+            "INSERT INTO workout_exercises (id, workout_id, exercise_id, sort_order, notes, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(id) DO UPDATE SET workout_id=excluded.workout_id, exercise_id=excluded.exercise_id, sort_order=excluded.sort_order, notes=excluded.notes, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![we.id, we.workout_id, we.exercise_id, we.sort_order, we.notes, server_time, we.deleted_at],
         )
         .unwrap();
     }
     for s in payload.exercise_sets {
         tx.execute(
-            "INSERT INTO exercise_sets (id, workout_exercise_id, set_number, reps, weight_kg, rest_seconds, actual_reps, actual_weight_kg, actual_rest_seconds, completed_at, duration_minutes, distance_meters, actual_duration_minutes, actual_distance_meters, notes, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, NULL) ON CONFLICT(id) DO UPDATE SET workout_exercise_id=excluded.workout_exercise_id, set_number=excluded.set_number, reps=excluded.reps, weight_kg=excluded.weight_kg, rest_seconds=excluded.rest_seconds, actual_reps=excluded.actual_reps, actual_weight_kg=excluded.actual_weight_kg, actual_rest_seconds=excluded.actual_rest_seconds, completed_at=excluded.completed_at, duration_minutes=excluded.duration_minutes, distance_meters=excluded.distance_meters, actual_duration_minutes=excluded.actual_duration_minutes, actual_distance_meters=excluded.actual_distance_meters, notes=excluded.notes, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![s.id, s.workout_exercise_id, s.set_number, s.reps, s.weight_kg, s.rest_seconds, s.actual_reps, s.actual_weight_kg, s.actual_rest_seconds, s.completed_at, s.duration_minutes, s.distance_meters, s.actual_duration_minutes, s.actual_distance_meters, s.notes, server_time],
+            "INSERT INTO exercise_sets (id, workout_exercise_id, set_number, reps, weight_kg, rest_seconds, actual_reps, actual_weight_kg, actual_rest_seconds, completed_at, duration_minutes, distance_meters, actual_duration_minutes, actual_distance_meters, notes, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) ON CONFLICT(id) DO UPDATE SET workout_exercise_id=excluded.workout_exercise_id, set_number=excluded.set_number, reps=excluded.reps, weight_kg=excluded.weight_kg, rest_seconds=excluded.rest_seconds, actual_reps=excluded.actual_reps, actual_weight_kg=excluded.actual_weight_kg, actual_rest_seconds=excluded.actual_rest_seconds, completed_at=excluded.completed_at, duration_minutes=excluded.duration_minutes, distance_meters=excluded.distance_meters, actual_duration_minutes=excluded.actual_duration_minutes, actual_distance_meters=excluded.actual_distance_meters, notes=excluded.notes, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![s.id, s.workout_exercise_id, s.set_number, s.reps, s.weight_kg, s.rest_seconds, s.actual_reps, s.actual_weight_kg, s.actual_rest_seconds, s.completed_at, s.duration_minutes, s.distance_meters, s.actual_duration_minutes, s.actual_distance_meters, s.notes, server_time, s.deleted_at],
         ).unwrap();
     }
     for id in payload.deleted {
@@ -689,22 +704,22 @@ pub async fn push_templates(
 
     for t in payload.workout_templates {
         tx.execute(
-            "INSERT INTO workout_templates (id, name, notes, start_date, recurrence, excluded_dates, source_routine_id, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name, notes=excluded.notes, start_date=excluded.start_date, recurrence=excluded.recurrence, excluded_dates=excluded.excluded_dates, source_routine_id=excluded.source_routine_id, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![t.id, t.name, t.notes, t.start_date, t.recurrence, t.excluded_dates, t.source_routine_id, t.created_at, t.updated_at],
+            "INSERT INTO workout_templates (id, name, notes, start_date, recurrence, excluded_dates, source_routine_id, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT(id) DO UPDATE SET name=excluded.name, notes=excluded.notes, start_date=excluded.start_date, recurrence=excluded.recurrence, excluded_dates=excluded.excluded_dates, source_routine_id=excluded.source_routine_id, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![t.id, t.name, t.notes, t.start_date, t.recurrence, t.excluded_dates, t.source_routine_id, t.created_at, t.updated_at, t.deleted_at],
         )
         .unwrap();
     }
     for te in payload.workout_template_exercises {
         tx.execute(
-            "INSERT INTO workout_template_exercises (id, template_id, exercise_id, sort_order, notes, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL) ON CONFLICT(id) DO UPDATE SET template_id=excluded.template_id, exercise_id=excluded.exercise_id, sort_order=excluded.sort_order, notes=excluded.notes, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![te.id, te.template_id, te.exercise_id, te.sort_order, te.notes, server_time],
+            "INSERT INTO workout_template_exercises (id, template_id, exercise_id, sort_order, notes, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(id) DO UPDATE SET template_id=excluded.template_id, exercise_id=excluded.exercise_id, sort_order=excluded.sort_order, notes=excluded.notes, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![te.id, te.template_id, te.exercise_id, te.sort_order, te.notes, server_time, te.deleted_at],
         )
         .unwrap();
     }
     for ts in payload.workout_template_sets {
         tx.execute(
-            "INSERT INTO workout_template_sets (id, template_exercise_id, set_number, reps, weight_kg, rest_seconds, duration_minutes, distance_meters, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL) ON CONFLICT(id) DO UPDATE SET template_exercise_id=excluded.template_exercise_id, set_number=excluded.set_number, reps=excluded.reps, weight_kg=excluded.weight_kg, rest_seconds=excluded.rest_seconds, duration_minutes=excluded.duration_minutes, distance_meters=excluded.distance_meters, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![ts.id, ts.template_exercise_id, ts.set_number, ts.reps, ts.weight_kg, ts.rest_seconds, ts.duration_minutes, ts.distance_meters, server_time],
+            "INSERT INTO workout_template_sets (id, template_exercise_id, set_number, reps, weight_kg, rest_seconds, duration_minutes, distance_meters, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT(id) DO UPDATE SET template_exercise_id=excluded.template_exercise_id, set_number=excluded.set_number, reps=excluded.reps, weight_kg=excluded.weight_kg, rest_seconds=excluded.rest_seconds, duration_minutes=excluded.duration_minutes, distance_meters=excluded.distance_meters, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![ts.id, ts.template_exercise_id, ts.set_number, ts.reps, ts.weight_kg, ts.rest_seconds, ts.duration_minutes, ts.distance_meters, server_time, ts.deleted_at],
         )
         .unwrap();
     }
@@ -730,6 +745,8 @@ pub struct NoteAudioPush {
     pub position: i64,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -753,6 +770,8 @@ pub struct NotePush {
     pub updated_at: i64,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -803,6 +822,8 @@ pub struct TaskPush {
     pub series_id: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -850,6 +871,8 @@ pub struct GoalPush {
     pub created_at: i64,
     #[serde(rename = "updatedAt")]
     pub updated_at: i64,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -863,6 +886,8 @@ pub struct GoalProgressEntryPush {
     pub note: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -903,13 +928,13 @@ pub async fn push_notes(
             let _ = std::fs::write(&path, &bytes);
             let stored_path = path.to_string_lossy().to_string();
             conn.execute(
-                "INSERT INTO note_audio (id, note_id, audio_path, duration_ms, position, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL) ON CONFLICT(id) DO UPDATE SET note_id=excluded.note_id, audio_path=excluded.audio_path, duration_ms=excluded.duration_ms, position=excluded.position, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
-                rusqlite::params![note_audio.id, note_audio.note_id, stored_path, note_audio.duration_ms, note_audio.position, note_audio.created_at, server_time],
+                "INSERT INTO note_audio (id, note_id, audio_path, duration_ms, position, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(id) DO UPDATE SET note_id=excluded.note_id, audio_path=excluded.audio_path, duration_ms=excluded.duration_ms, position=excluded.position, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+                rusqlite::params![note_audio.id, note_audio.note_id, stored_path, note_audio.duration_ms, note_audio.position, note_audio.created_at, server_time, note_audio.deleted_at],
             ).unwrap();
         } else {
             conn.execute(
-                "INSERT INTO note_audio (id, note_id, audio_path, duration_ms, position, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL) ON CONFLICT(id) DO UPDATE SET note_id=excluded.note_id, audio_path=excluded.audio_path, duration_ms=excluded.duration_ms, position=excluded.position, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
-                rusqlite::params![note_audio.id, note_audio.note_id, note_audio.audio_path, note_audio.duration_ms, note_audio.position, note_audio.created_at, server_time],
+                "INSERT INTO note_audio (id, note_id, audio_path, duration_ms, position, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(id) DO UPDATE SET note_id=excluded.note_id, audio_path=excluded.audio_path, duration_ms=excluded.duration_ms, position=excluded.position, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+                rusqlite::params![note_audio.id, note_audio.note_id, note_audio.audio_path, note_audio.duration_ms, note_audio.position, note_audio.created_at, server_time, note_audio.deleted_at],
             ).unwrap();
         }
         return (StatusCode::OK, Json(serde_json::json!({"server_time": server_time}))).into_response();
@@ -922,8 +947,8 @@ pub async fn push_notes(
     let tx = conn.unchecked_transaction().unwrap();
     for n in payload.notes {
         tx.execute(
-            "INSERT INTO notes (id, title, body, updated_at, created_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL) ON CONFLICT(id) DO UPDATE SET title=excluded.title, body=excluded.body, updated_at=excluded.updated_at, created_at=excluded.created_at, deleted_at=NULL",
-            rusqlite::params![n.id, n.title, n.body, n.updated_at, n.created_at],
+            "INSERT INTO notes (id, title, body, updated_at, created_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET title=excluded.title, body=excluded.body, updated_at=excluded.updated_at, created_at=excluded.created_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![n.id, n.title, n.body, n.updated_at, n.created_at, n.deleted_at],
         )
         .unwrap();
     }
@@ -941,8 +966,8 @@ pub async fn push_notes(
     }
     for na in payload.note_audio {
         tx.execute(
-            "INSERT INTO note_audio (id, note_id, audio_path, duration_ms, position, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL) ON CONFLICT(id) DO UPDATE SET note_id=excluded.note_id, audio_path=excluded.audio_path, duration_ms=excluded.duration_ms, position=excluded.position, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![na.id, na.note_id, na.audio_path, na.duration_ms, na.position, na.created_at, server_time],
+            "INSERT INTO note_audio (id, note_id, audio_path, duration_ms, position, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(id) DO UPDATE SET note_id=excluded.note_id, audio_path=excluded.audio_path, duration_ms=excluded.duration_ms, position=excluded.position, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![na.id, na.note_id, na.audio_path, na.duration_ms, na.position, na.created_at, server_time, na.deleted_at],
         )
         .unwrap();
     }
@@ -1002,8 +1027,8 @@ pub async fn push_tasks(
     let tx = conn.unchecked_transaction().unwrap();
     for t in payload.tasks {
         tx.execute(
-            "INSERT INTO tasks (id, date, title, done, task_status, carry_over, sort_order, due_date, due_time_minutes, start_time_minutes, end_time_minutes, notes, workout_id, workout_template_id, recurrence, series_id, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, NULL) ON CONFLICT(id) DO UPDATE SET date=excluded.date, title=excluded.title, done=excluded.done, task_status=excluded.task_status, carry_over=excluded.carry_over, sort_order=excluded.sort_order, due_date=excluded.due_date, due_time_minutes=excluded.due_time_minutes, start_time_minutes=excluded.start_time_minutes, end_time_minutes=excluded.end_time_minutes, notes=excluded.notes, workout_id=excluded.workout_id, workout_template_id=excluded.workout_template_id, recurrence=excluded.recurrence, series_id=excluded.series_id, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![t.id, t.date, t.title, t.done, t.task_status, if t.carry_over {1} else {0}, t.sort_order, t.due_date, t.due_time_minutes, t.start_time_minutes, t.end_time_minutes, t.notes, t.workout_id, t.workout_template_id, t.recurrence, t.series_id, t.created_at, server_time],
+            "INSERT INTO tasks (id, date, title, done, task_status, carry_over, sort_order, due_date, due_time_minutes, start_time_minutes, end_time_minutes, notes, workout_id, workout_template_id, recurrence, series_id, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19) ON CONFLICT(id) DO UPDATE SET date=excluded.date, title=excluded.title, done=excluded.done, task_status=excluded.task_status, carry_over=excluded.carry_over, sort_order=excluded.sort_order, due_date=excluded.due_date, due_time_minutes=excluded.due_time_minutes, start_time_minutes=excluded.start_time_minutes, end_time_minutes=excluded.end_time_minutes, notes=excluded.notes, workout_id=excluded.workout_id, workout_template_id=excluded.workout_template_id, recurrence=excluded.recurrence, series_id=excluded.series_id, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![t.id, t.date, t.title, t.done, t.task_status, if t.carry_over {1} else {0}, t.sort_order, t.due_date, t.due_time_minutes, t.start_time_minutes, t.end_time_minutes, t.notes, t.workout_id, t.workout_template_id, t.recurrence, t.series_id, t.created_at, server_time, t.deleted_at],
         ).unwrap();
     }
     for tt in payload.task_tags {
@@ -1035,14 +1060,14 @@ pub async fn push_goals(
     let tx = conn.unchecked_transaction().unwrap();
     for g in payload.goals {
         tx.execute(
-            "INSERT INTO goals (id, title, description, start_date, end_date, status, target_type, target_value, baseline_value, unit, reminder_enabled, reminder_time_minutes, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL) ON CONFLICT(id) DO UPDATE SET title=excluded.title, description=excluded.description, start_date=excluded.start_date, end_date=excluded.end_date, status=excluded.status, target_type=excluded.target_type, target_value=excluded.target_value, baseline_value=excluded.baseline_value, unit=excluded.unit, reminder_enabled=excluded.reminder_enabled, reminder_time_minutes=excluded.reminder_time_minutes, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![g.id, g.title, g.description, g.start_date, g.end_date, g.status, g.target_type, g.target_value, g.baseline_value, g.unit, if g.reminder_enabled {1} else {0}, g.reminder_time_minutes, g.created_at, g.updated_at],
+            "INSERT INTO goals (id, title, description, start_date, end_date, status, target_type, target_value, baseline_value, unit, reminder_enabled, reminder_time_minutes, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) ON CONFLICT(id) DO UPDATE SET title=excluded.title, description=excluded.description, start_date=excluded.start_date, end_date=excluded.end_date, status=excluded.status, target_type=excluded.target_type, target_value=excluded.target_value, baseline_value=excluded.baseline_value, unit=excluded.unit, reminder_enabled=excluded.reminder_enabled, reminder_time_minutes=excluded.reminder_time_minutes, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![g.id, g.title, g.description, g.start_date, g.end_date, g.status, g.target_type, g.target_value, g.baseline_value, g.unit, if g.reminder_enabled {1} else {0}, g.reminder_time_minutes, g.created_at, g.updated_at, g.deleted_at],
         ).unwrap();
     }
     for e in payload.goal_progress_entries {
         tx.execute(
-            "INSERT INTO goal_progress_entries (id, goal_id, recorded_at, value, note, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL) ON CONFLICT(id) DO UPDATE SET goal_id=excluded.goal_id, recorded_at=excluded.recorded_at, value=excluded.value, note=excluded.note, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![e.id, e.goal_id, e.recorded_at, e.value, e.note, e.created_at, server_time],
+            "INSERT INTO goal_progress_entries (id, goal_id, recorded_at, value, note, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(id) DO UPDATE SET goal_id=excluded.goal_id, recorded_at=excluded.recorded_at, value=excluded.value, note=excluded.note, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![e.id, e.goal_id, e.recorded_at, e.value, e.note, e.created_at, server_time, e.deleted_at],
         ).unwrap();
     }
     for gt in payload.goal_tags {
@@ -1084,6 +1109,8 @@ pub struct MealPush {
     pub eaten_at: i64,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 /// A food logged in a meal.
@@ -1111,6 +1138,8 @@ pub struct MealFoodPush {
     pub fiber: Option<f64>,
     #[serde(default)]
     pub sugar: Option<f64>,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -1146,6 +1175,8 @@ pub struct TransactionPush {
     pub is_draft: bool,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -1167,6 +1198,8 @@ pub struct AccountPush {
     pub note: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 pub async fn push_meals(
@@ -1178,8 +1211,8 @@ pub async fn push_meals(
     let tx = conn.unchecked_transaction().unwrap();
     for m in payload.meals {
         tx.execute(
-            "INSERT INTO meals (id, name, eaten_at, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name, eaten_at=excluded.eaten_at, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![m.id, m.name, m.eaten_at, m.created_at, server_time],
+            "INSERT INTO meals (id, name, eaten_at, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET name=excluded.name, eaten_at=excluded.eaten_at, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![m.id, m.name, m.eaten_at, m.created_at, server_time, m.deleted_at],
         )
         .unwrap();
     }
@@ -1202,7 +1235,7 @@ pub async fn push_meals(
             continue;
         }
         tx.execute(
-            "INSERT INTO meal_foods (id, meal_id, food_id, amount, calories, protein, carbs, fat, sodium, fiber, sugar, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL) ON CONFLICT(id) DO UPDATE SET meal_id=excluded.meal_id, food_id=excluded.food_id, amount=excluded.amount, calories=excluded.calories, protein=excluded.protein, carbs=excluded.carbs, fat=excluded.fat, sodium=excluded.sodium, fiber=excluded.fiber, sugar=excluded.sugar, updated_at=excluded.updated_at, deleted_at=NULL",
+            "INSERT INTO meal_foods (id, meal_id, food_id, amount, calories, protein, carbs, fat, sodium, fiber, sugar, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) ON CONFLICT(id) DO UPDATE SET meal_id=excluded.meal_id, food_id=excluded.food_id, amount=excluded.amount, calories=excluded.calories, protein=excluded.protein, carbs=excluded.carbs, fat=excluded.fat, sodium=excluded.sodium, fiber=excluded.fiber, sugar=excluded.sugar, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
             rusqlite::params![
                 mf.id,
                 mf.meal_id,
@@ -1215,7 +1248,8 @@ pub async fn push_meals(
                 mf.sodium.unwrap_or(0.0),
                 mf.fiber.unwrap_or(0.0),
                 mf.sugar.unwrap_or(0.0),
-                server_time
+                server_time,
+                mf.deleted_at
             ],
         )
         .unwrap();
@@ -1237,8 +1271,8 @@ pub async fn push_transactions(
     let tx = conn.unchecked_transaction().unwrap();
     for t in payload.transactions {
         tx.execute(
-            "INSERT INTO transactions (id, type, amount, currency_code, amount_base, rate_used, account_id, to_account_id, category, date, note, receipt_id, is_draft, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, NULL) ON CONFLICT(id) DO UPDATE SET type=excluded.type, amount=excluded.amount, currency_code=excluded.currency_code, amount_base=excluded.amount_base, rate_used=excluded.rate_used, account_id=excluded.account_id, to_account_id=excluded.to_account_id, category=excluded.category, date=excluded.date, note=excluded.note, receipt_id=excluded.receipt_id, is_draft=excluded.is_draft, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![t.id, t.type_, t.amount, t.currency_code, t.amount_base, t.rate_used, t.account_id, t.to_account_id, t.category, t.date, t.note, t.receipt_id, if t.is_draft {1} else {0}, t.created_at, server_time],
+            "INSERT INTO transactions (id, type, amount, currency_code, amount_base, rate_used, account_id, to_account_id, category, date, note, receipt_id, is_draft, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) ON CONFLICT(id) DO UPDATE SET type=excluded.type, amount=excluded.amount, currency_code=excluded.currency_code, amount_base=excluded.amount_base, rate_used=excluded.rate_used, account_id=excluded.account_id, to_account_id=excluded.to_account_id, category=excluded.category, date=excluded.date, note=excluded.note, receipt_id=excluded.receipt_id, is_draft=excluded.is_draft, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![t.id, t.type_, t.amount, t.currency_code, t.amount_base, t.rate_used, t.account_id, t.to_account_id, t.category, t.date, t.note, t.receipt_id, if t.is_draft {1} else {0}, t.created_at, server_time, t.deleted_at],
         ).unwrap();
     }
     for id in payload.deleted {
@@ -1257,8 +1291,8 @@ pub async fn push_budget_accounts(
     let tx = conn.unchecked_transaction().unwrap();
     for a in payload.accounts {
         tx.execute(
-            "INSERT INTO accounts (id, name, type, opening_balance, note, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, opening_balance=excluded.opening_balance, note=excluded.note, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![a.id, a.name, a.type_, a.opening_balance, a.note, a.created_at, server_time],
+            "INSERT INTO accounts (id, name, type, opening_balance, note, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, opening_balance=excluded.opening_balance, note=excluded.note, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![a.id, a.name, a.type_, a.opening_balance, a.note, a.created_at, server_time, a.deleted_at],
         ).unwrap();
     }
     for id in payload.deleted {
@@ -1286,6 +1320,8 @@ pub struct BodyMetricPush {
     pub height_cm: Option<f64>,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 pub async fn push_body_metrics(
@@ -1297,8 +1333,8 @@ pub async fn push_body_metrics(
     let tx = conn.unchecked_transaction().unwrap();
     for m in payload.body_metrics {
         tx.execute(
-            "INSERT INTO body_metrics (id, date, weight_kg, height_cm, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL) ON CONFLICT(id) DO UPDATE SET date=excluded.date, weight_kg=excluded.weight_kg, height_cm=excluded.height_cm, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![m.id, m.date, m.weight_kg, m.height_cm, m.created_at, server_time],
+            "INSERT INTO body_metrics (id, date, weight_kg, height_cm, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(id) DO UPDATE SET date=excluded.date, weight_kg=excluded.weight_kg, height_cm=excluded.height_cm, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![m.id, m.date, m.weight_kg, m.height_cm, m.created_at, server_time, m.deleted_at],
         ).unwrap();
     }
     for id in payload.deleted {
@@ -1335,6 +1371,8 @@ pub struct ExperimentPush {
     pub reminder_time_minutes: i64,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -1347,6 +1385,8 @@ pub struct ExperimentCheckinPush {
     pub note: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
+    #[serde(rename = "deletedAt", default)]
+    pub deleted_at: Option<i64>,
 }
 
 pub async fn push_experiments(
@@ -1358,8 +1398,8 @@ pub async fn push_experiments(
     let tx = conn.unchecked_transaction().unwrap();
     for e in payload.experiments {
         tx.execute(
-            "INSERT INTO experiments (id, name, purpose, start_date, end_date, status, categories, reminder_enabled, reminder_time_minutes, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name, purpose=excluded.purpose, start_date=excluded.start_date, end_date=excluded.end_date, status=excluded.status, categories=excluded.categories, reminder_enabled=excluded.reminder_enabled, reminder_time_minutes=excluded.reminder_time_minutes, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![e.id, e.name, e.purpose, e.start_date, e.end_date, e.status, e.categories, if e.reminder_enabled {1} else {0}, e.reminder_time_minutes, e.created_at, server_time],
+            "INSERT INTO experiments (id, name, purpose, start_date, end_date, status, categories, reminder_enabled, reminder_time_minutes, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) ON CONFLICT(id) DO UPDATE SET name=excluded.name, purpose=excluded.purpose, start_date=excluded.start_date, end_date=excluded.end_date, status=excluded.status, categories=excluded.categories, reminder_enabled=excluded.reminder_enabled, reminder_time_minutes=excluded.reminder_time_minutes, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![e.id, e.name, e.purpose, e.start_date, e.end_date, e.status, e.categories, if e.reminder_enabled {1} else {0}, e.reminder_time_minutes, e.created_at, server_time, e.deleted_at],
         ).unwrap();
     }
     // Check-ins reference experiments(id), so an orphan (experiment never
@@ -1371,8 +1411,8 @@ pub async fn push_experiments(
             continue;
         }
         tx.execute(
-            "INSERT INTO experiment_checkins (id, experiment_id, day, rating, note, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL) ON CONFLICT(id) DO UPDATE SET experiment_id=excluded.experiment_id, day=excluded.day, rating=excluded.rating, note=excluded.note, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
-            rusqlite::params![c.id, c.experiment_id, c.day, c.rating, c.note, c.created_at, server_time],
+            "INSERT INTO experiment_checkins (id, experiment_id, day, rating, note, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(id) DO UPDATE SET experiment_id=excluded.experiment_id, day=excluded.day, rating=excluded.rating, note=excluded.note, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![c.id, c.experiment_id, c.day, c.rating, c.note, c.created_at, server_time, c.deleted_at],
         ).unwrap();
     }
     for id in payload.deleted {

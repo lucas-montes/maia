@@ -67,6 +67,23 @@ pub struct ExerciseSetRead {
     pub weight_kg: Option<f64>,
     #[serde(rename = "restSeconds")]
     pub rest_seconds: Option<i64>,
+    #[serde(rename = "actualReps")]
+    pub actual_reps: Option<i64>,
+    #[serde(rename = "actualWeightKg")]
+    pub actual_weight_kg: Option<f64>,
+    #[serde(rename = "actualRestSeconds")]
+    pub actual_rest_seconds: Option<i64>,
+    #[serde(rename = "completedAt")]
+    pub completed_at: Option<i64>,
+    #[serde(rename = "durationMinutes")]
+    pub duration_minutes: Option<i64>,
+    #[serde(rename = "distanceMeters")]
+    pub distance_meters: Option<f64>,
+    #[serde(rename = "actualDurationMinutes")]
+    pub actual_duration_minutes: Option<i64>,
+    #[serde(rename = "actualDistanceMeters")]
+    pub actual_distance_meters: Option<f64>,
+    pub notes: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -190,7 +207,7 @@ pub async fn pull_workouts(
         if !we.is_empty() {
             let we_ids: Vec<String> = we.iter().map(|w| w.id.clone()).collect();
             let ph = we_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql3 = format!("SELECT id, workout_exercise_id, set_number, reps, weight_kg, rest_seconds FROM exercise_sets WHERE workout_exercise_id IN ({}) AND deleted_at IS NULL", ph);
+            let sql3 = format!("SELECT id, workout_exercise_id, set_number, reps, weight_kg, rest_seconds, actual_reps, actual_weight_kg, actual_rest_seconds, completed_at, duration_minutes, distance_meters, actual_duration_minutes, actual_distance_meters, notes FROM exercise_sets WHERE workout_exercise_id IN ({}) AND deleted_at IS NULL", ph);
             let mut stmt3 = conn.prepare(&sql3).unwrap();
             let params3: Vec<&dyn rusqlite::ToSql> = we_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
             es = stmt3
@@ -202,6 +219,15 @@ pub async fn pull_workouts(
                         reps: row.get(3)?,
                         weight_kg: row.get(4)?,
                         rest_seconds: row.get(5)?,
+                        actual_reps: row.get(6)?,
+                        actual_weight_kg: row.get(7)?,
+                        actual_rest_seconds: row.get(8)?,
+                        completed_at: row.get(9)?,
+                        duration_minutes: row.get(10)?,
+                        distance_meters: row.get(11)?,
+                        actual_duration_minutes: row.get(12)?,
+                        actual_distance_meters: row.get(13)?,
+                        notes: row.get(14)?,
                     })
                 })
                 .unwrap()
