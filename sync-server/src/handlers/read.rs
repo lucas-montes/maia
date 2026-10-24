@@ -30,6 +30,8 @@ pub struct PullMealsResponse {
     #[serde(rename = "mealFoods")]
     pub meal_foods: Vec<MealFoodRead>,
     pub deleted: Vec<String>,
+    #[serde(rename = "deletedMealFoods")]
+    pub deleted_meal_foods: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -109,7 +111,8 @@ pub async fn pull_workouts(
                     w.routine_id, w.template_id, w.created_at, w.updated_at \
              FROM workouts w \
              WHERE w.deleted_at IS NULL AND ( \
-                 w.updated_at > ?1 \
+                 ?1 <= 0 \
+                 OR w.updated_at > ?1 \
                  OR EXISTS (SELECT 1 FROM workout_exercises we \
                             WHERE we.workout_id = w.id AND we.updated_at > ?1) \
                  OR EXISTS (SELECT 1 FROM exercise_sets s \
@@ -256,8 +259,20 @@ pub async fn pull_meals(
     let server_time = db::server_time_ms();
     let conn = state.db.get().unwrap();
 
+    // A meal is returned when the meal row changed, or when any of its logged
+    // foods changed. Filtering on the parent alone meant adding or editing a
+    // food on another device never reached this one.
     let mut stmt = conn
-        .prepare("SELECT id, name, eaten_at, created_at, updated_at FROM meals WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at")
+        .prepare(
+            "SELECT m.id, m.name, m.eaten_at, m.created_at, m.updated_at \
+             FROM meals m \
+             WHERE m.deleted_at IS NULL AND ( \
+                 ?1 <= 0 \
+                 OR m.updated_at > ?1 \
+                 OR EXISTS (SELECT 1 FROM meal_foods mf \
+                            WHERE mf.meal_id = m.id AND mf.updated_at > ?1) \
+             ) ORDER BY m.updated_at",
+        )
         .unwrap();
     let meals = stmt
         .query_map([since], |row| {
@@ -311,11 +326,21 @@ pub async fn pull_meals(
         .collect::<Result<Vec<String>, _>>()
         .unwrap_or_default();
 
+    let mut food_del_stmt = conn
+        .prepare("SELECT id FROM meal_foods WHERE deleted_at IS NOT NULL AND deleted_at > ?1")
+        .unwrap();
+    let deleted_meal_foods = food_del_stmt
+        .query_map([since], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<String>, _>>()
+        .unwrap_or_default();
+
     Json(PullMealsResponse {
         server_time,
         meals,
         meal_foods: mis,
         deleted,
+        deleted_meal_foods,
     })
 }
 
@@ -328,7 +353,7 @@ pub async fn pull_body_metrics(
     let conn = state.db.get().unwrap();
 
     let mut stmt = conn
-        .prepare("SELECT id, date, weight_kg, height_cm, created_at, updated_at FROM body_metrics WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at")
+        .prepare("SELECT id, date, weight_kg, height_cm, created_at, updated_at FROM body_metrics WHERE deleted_at IS NULL AND (?1 <= 0 OR updated_at > ?1) ORDER BY updated_at")
         .unwrap();
     let items = stmt
         .query_map([since], |row| {

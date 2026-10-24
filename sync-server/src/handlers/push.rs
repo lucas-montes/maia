@@ -980,12 +980,20 @@ pub async fn push_notes(
     };
     let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
+    let note_ids: Vec<String> = payload.notes.iter().map(|n| n.id.clone()).collect();
     for n in payload.notes {
         tx.execute(
             "INSERT INTO notes (id, title, body, updated_at, created_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET title=excluded.title, body=excluded.body, updated_at=excluded.updated_at, created_at=excluded.created_at, deleted_at=excluded.deleted_at",
             rusqlite::params![n.id, n.title, n.body, n.updated_at, n.created_at, n.deleted_at],
         )
         .unwrap();
+    }
+    // Full-state push: the links below are the complete set for these notes.
+    for note_id in &note_ids {
+        let _ = tx.execute(
+            "DELETE FROM note_tags WHERE note_id=?1",
+            rusqlite::params![note_id],
+        );
     }
     for nt in payload.note_tags {
         ensure_tag(&tx, &nt.tag_id, nt.tag_name.as_deref(), server_time);
@@ -1005,7 +1013,7 @@ pub async fn push_notes(
     for id in payload.deleted {
         let _ = tx.execute("UPDATE notes SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
         let _ = tx.execute("UPDATE note_audio SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
-        let _ = tx.execute("UPDATE note_tags SET deleted_at=?1 WHERE tag_id=?2 OR note_id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("DELETE FROM note_tags WHERE tag_id=?1 OR note_id=?1", rusqlite::params![id]);
     }
     tx.commit().unwrap();
     (StatusCode::OK, Json(serde_json::json!({"server_time": server_time}))).into_response()
@@ -1056,11 +1064,21 @@ pub async fn push_tasks(
     let server_time = db::server_time_ms();
     let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
+    let task_ids: Vec<String> = payload.tasks.iter().map(|t| t.id.clone()).collect();
     for t in payload.tasks {
         tx.execute(
             "INSERT INTO tasks (id, date, title, done, task_status, carry_over, sort_order, due_date, due_time_minutes, start_time_minutes, end_time_minutes, notes, workout_id, workout_template_id, recurrence, series_id, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19) ON CONFLICT(id) DO UPDATE SET date=excluded.date, title=excluded.title, done=excluded.done, task_status=excluded.task_status, carry_over=excluded.carry_over, sort_order=excluded.sort_order, due_date=excluded.due_date, due_time_minutes=excluded.due_time_minutes, start_time_minutes=excluded.start_time_minutes, end_time_minutes=excluded.end_time_minutes, notes=excluded.notes, workout_id=excluded.workout_id, workout_template_id=excluded.workout_template_id, recurrence=excluded.recurrence, series_id=excluded.series_id, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
             rusqlite::params![t.id, t.date, t.title, t.done, t.task_status, if t.carry_over {1} else {0}, t.sort_order, t.due_date, t.due_time_minutes, t.start_time_minutes, t.end_time_minutes, t.notes, t.workout_id, t.workout_template_id, t.recurrence, t.series_id, t.created_at, server_time, t.deleted_at],
         ).unwrap();
+    }
+    // The phone pushes its complete task set, so the tag links in this payload
+    // are the whole truth for these tasks. Inserting without clearing left an
+    // unlinked tag on the server, which the next pull then resurrected.
+    for task_id in &task_ids {
+        let _ = tx.execute(
+            "DELETE FROM task_tags WHERE task_id=?1",
+            rusqlite::params![task_id],
+        );
     }
     for tt in payload.task_tags {
         ensure_tag(&tx, &tt.tag_id, tt.tag_name.as_deref(), server_time);
@@ -1072,7 +1090,7 @@ pub async fn push_tasks(
     }
     for id in payload.deleted {
         let _ = tx.execute("UPDATE tasks SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
-        let _ = tx.execute("UPDATE task_tags SET deleted_at=?1 WHERE tag_id=?2 OR task_id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("DELETE FROM task_tags WHERE tag_id=?1 OR task_id=?1", rusqlite::params![id]);
     }
     tx.commit().unwrap();
     Json(SyncAck { server_time })
@@ -1085,11 +1103,25 @@ pub async fn push_goals(
     let server_time = db::server_time_ms();
     let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
+    let goal_ids: Vec<String> = payload.goals.iter().map(|g| g.id.clone()).collect();
     for g in payload.goals {
         tx.execute(
             "INSERT INTO goals (id, title, description, start_date, end_date, status, target_type, target_value, baseline_value, unit, reminder_enabled, reminder_time_minutes, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) ON CONFLICT(id) DO UPDATE SET title=excluded.title, description=excluded.description, start_date=excluded.start_date, end_date=excluded.end_date, status=excluded.status, target_type=excluded.target_type, target_value=excluded.target_value, baseline_value=excluded.baseline_value, unit=excluded.unit, reminder_enabled=excluded.reminder_enabled, reminder_time_minutes=excluded.reminder_time_minutes, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
             rusqlite::params![g.id, g.title, g.description, g.start_date, g.end_date, g.status, g.target_type, g.target_value, g.baseline_value, g.unit, if g.reminder_enabled {1} else {0}, g.reminder_time_minutes, g.created_at, g.updated_at, g.deleted_at],
         ).unwrap();
+    }
+    // Full-state push: replace this goal's children rather than merging into
+    // whatever the server had. A removed progress entry or tag link otherwise
+    // survived and came back on the next pull.
+    for goal_id in &goal_ids {
+        let _ = tx.execute(
+            "DELETE FROM goal_tags WHERE goal_id=?1",
+            rusqlite::params![goal_id],
+        );
+        let _ = tx.execute(
+            "DELETE FROM goal_progress_entries WHERE goal_id=?1",
+            rusqlite::params![goal_id],
+        );
     }
     for e in payload.goal_progress_entries {
         tx.execute(
@@ -1108,7 +1140,7 @@ pub async fn push_goals(
     for id in payload.deleted {
         let _ = tx.execute("UPDATE goals SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
         let _ = tx.execute("UPDATE goal_progress_entries SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
-        let _ = tx.execute("UPDATE goal_tags SET deleted_at=?1 WHERE tag_id=?2 OR goal_id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute("DELETE FROM goal_tags WHERE tag_id=?1 OR goal_id=?1", rusqlite::params![id]);
     }
     tx.commit().unwrap();
     Json(SyncAck { server_time })
@@ -1232,12 +1264,21 @@ pub async fn push_meals(
     let server_time = db::server_time_ms();
     let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
+    let meal_ids: Vec<String> = payload.meals.iter().map(|m| m.id.clone()).collect();
     for m in payload.meals {
         tx.execute(
             "INSERT INTO meals (id, name, eaten_at, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET name=excluded.name, eaten_at=excluded.eaten_at, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
             rusqlite::params![m.id, m.name, m.eaten_at, m.created_at, server_time, m.deleted_at],
         )
         .unwrap();
+    }
+    // Full-state push: each meal's logged foods are replaced wholesale, so a
+    // food removed on the phone cannot linger here and be pulled back.
+    for meal_id in &meal_ids {
+        let _ = tx.execute(
+            "DELETE FROM meal_foods WHERE meal_id=?1",
+            rusqlite::params![meal_id],
+        );
     }
     for mf in payload.meal_foods {
         // A logged food may reference a recipe this server has never seen — the
