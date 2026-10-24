@@ -825,13 +825,6 @@ fn list_body_metrics(state: tauri::State<AppState>) -> CommandResult<Vec<serde_j
     CommandResult{success:true,data:Some(rows),error:None}
 }
 #[tauri::command]
-fn list_experiments(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
-    let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
-    let mut stmt = conn.prepare("SELECT id, name, purpose, start_date, end_date, status, categories, reminder_enabled, reminder_time_minutes, created_at FROM experiments ORDER BY start_date DESC LIMIT 200").unwrap();
-    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"purpose":r.get::<_,Option<String>>(2)?,"startDate":r.get::<_,i64>(3)?,"endDate":r.get::<_,Option<i64>>(4)?,"status":r.get::<_,String>(5)?,"categories":r.get::<_,Option<String>>(6)?,"reminderEnabled":r.get::<_,i64>(7)?,"reminderTimeMinutes":r.get::<_,i64>(8)?,"createdAt":r.get::<_,i64>(9)?}))).unwrap().filter_map(|r|r.ok()).collect();
-    CommandResult{success:true,data:Some(rows),error:None}
-}
-#[tauri::command]
 fn list_tags(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
     let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))}};
     let mut stmt = conn.prepare("SELECT id, name, color, sort_order, created_at FROM tags ORDER BY sort_order").unwrap();
@@ -839,10 +832,9 @@ fn list_tags(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Val
     let mut out=Vec::new();
     for (id,name,color,order) in rows {
         let taskCount: i64 = conn.query_row("SELECT count(*) FROM task_tags WHERE tag_id=?1", [&id], |r| r.get(0)).unwrap_or(0);
-        let expCount: i64 = conn.query_row("SELECT count(*) FROM experiment_tags WHERE tag_id=?1", [&id], |r| r.get(0)).unwrap_or(0);
         let goalCount: i64 = conn.query_row("SELECT count(*) FROM goal_tags WHERE tag_id=?1", [&id], |r| r.get(0)).unwrap_or(0);
         let noteCount: i64 = conn.query_row("SELECT count(*) FROM note_tags WHERE tag_id=?1", [&id], |r| r.get(0)).unwrap_or(0);
-        out.push(serde_json::json!({"id":id,"name":name,"color":color,"sortOrder":order,"taskCount":taskCount,"experimentCount":expCount,"goalCount":goalCount,"noteCount":noteCount}));
+        out.push(serde_json::json!({"id":id,"name":name,"color":color,"sortOrder":order,"taskCount":taskCount,"goalCount":goalCount,"noteCount":noteCount}));
     }
     CommandResult{success:true,data:Some(out),error:None}
 }
@@ -1942,7 +1934,6 @@ pub fn run() {
             list_stores,
             list_meals,
             list_body_metrics,
-            list_experiments,
             list_tags,
             list_accounts,
             list_transactions,

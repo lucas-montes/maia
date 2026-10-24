@@ -15,7 +15,6 @@ const KNOWN: ViewId[] = [
   "stores",
   "meals",
   "bodyMetrics",
-  "experiments",
   "todos",
   "receipts",
   "notes",

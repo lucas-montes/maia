@@ -15,75 +15,12 @@ pub struct SinceQuery {
 #[derive(Serialize)]
 pub struct PullWorkoutsResponse {
     pub server_time: i64,
-    pub workouts: Vec<WorkoutRead>,
-    #[serde(rename = "workoutExercises")]
-    pub workout_exercises: Vec<WorkoutExerciseRead>,
-    #[serde(rename = "exerciseSets")]
-    pub exercise_sets: Vec<ExerciseSetRead>,
+    pub items: Vec<serde_json::Value>,
     pub deleted: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub struct WorkoutRead {
-    pub id: String,
-    pub name: String,
-    pub date: i64,
-    #[serde(rename = "startedAt")]
-    pub started_at: Option<i64>,
-    #[serde(rename = "completedAt")]
-    pub completed_at: Option<i64>,
-    pub notes: Option<String>,
-    #[serde(rename = "routineId")]
-    pub routine_id: Option<String>,
-    #[serde(rename = "templateId")]
-    pub template_id: Option<String>,
-    #[serde(rename = "createdAt")]
-    pub created_at: i64,
-    #[serde(rename = "updatedAt")]
-    pub updated_at: i64,
-}
-
-#[derive(Serialize)]
-pub struct WorkoutExerciseRead {
-    pub id: String,
-    #[serde(rename = "workoutId")]
-    pub workout_id: String,
-    #[serde(rename = "exerciseId")]
-    pub exercise_id: String,
-    #[serde(rename = "sortOrder")]
-    pub sort_order: i64,
-    pub notes: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct ExerciseSetRead {
-    pub id: String,
-    #[serde(rename = "workoutExerciseId")]
-    pub workout_exercise_id: String,
-    #[serde(rename = "setNumber")]
-    pub set_number: i64,
-    pub reps: Option<i64>,
-    #[serde(rename = "weightKg")]
-    pub weight_kg: Option<f64>,
-    #[serde(rename = "restSeconds")]
-    pub rest_seconds: Option<i64>,
-    #[serde(rename = "actualReps")]
-    pub actual_reps: Option<i64>,
-    #[serde(rename = "actualWeightKg")]
-    pub actual_weight_kg: Option<f64>,
-    #[serde(rename = "actualRestSeconds")]
-    pub actual_rest_seconds: Option<i64>,
-    #[serde(rename = "completedAt")]
-    pub completed_at: Option<i64>,
-    #[serde(rename = "durationMinutes")]
-    pub duration_minutes: Option<i64>,
-    #[serde(rename = "distanceMeters")]
-    pub distance_meters: Option<f64>,
-    #[serde(rename = "actualDurationMinutes")]
-    pub actual_duration_minutes: Option<i64>,
-    #[serde(rename = "actualDistanceMeters")]
-    pub actual_distance_meters: Option<f64>,
-    pub notes: Option<String>,
+    #[serde(rename = "deletedExercises")]
+    pub deleted_exercises: Vec<String>,
+    #[serde(rename = "deletedSets")]
+    pub deleted_sets: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -160,97 +97,154 @@ pub async fn pull_workouts(
     let server_time = db::server_time_ms();
     let conn = state.db.get().unwrap();
 
+    // A workout is returned whole whenever *anything* in its graph changed:
+    // the row itself, one of its exercises, or one of their sets. Filtering on
+    // the parent alone was why a pull could return a header with no children —
+    // the phone had already seen `workouts.updated_at`, so an exercise added on
+    // another device never came back.
+    let u = if since > 0 { since } else { 0 };
     let mut stmt = conn
-        .prepare("SELECT id, name, date, started_at, completed_at, notes, routine_id, template_id, created_at, updated_at FROM workouts WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at")
+        .prepare(
+            "SELECT w.id, w.name, w.date, w.started_at, w.completed_at, w.notes, \
+                    w.routine_id, w.template_id, w.created_at, w.updated_at \
+             FROM workouts w \
+             WHERE w.deleted_at IS NULL AND ( \
+                 w.updated_at > ?1 \
+                 OR EXISTS (SELECT 1 FROM workout_exercises we \
+                            WHERE we.workout_id = w.id AND we.updated_at > ?1) \
+                 OR EXISTS (SELECT 1 FROM exercise_sets s \
+                            JOIN workout_exercises we ON we.id = s.workout_exercise_id \
+                            WHERE we.workout_id = w.id AND s.updated_at > ?1) \
+             ) ORDER BY w.updated_at",
+        )
         .unwrap();
     let workouts = stmt
-        .query_map([since], |row| {
-            Ok(WorkoutRead {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                date: row.get(2)?,
-                started_at: row.get(3)?,
-                completed_at: row.get(4)?,
-                notes: row.get(5)?,
-                routine_id: row.get(6)?,
-                template_id: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
-            })
+        .query_map([u], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "name": row.get::<_, String>(1)?,
+                    "date": row.get::<_, i64>(2)?,
+                    "startedAt": row.get::<_, Option<i64>>(3)?,
+                    "completedAt": row.get::<_, Option<i64>>(4)?,
+                    "notes": row.get::<_, Option<String>>(5)?,
+                    "routineId": row.get::<_, Option<String>>(6)?,
+                    "templateId": row.get::<_, Option<String>>(7)?,
+                    "createdAt": row.get::<_, i64>(8)?,
+                    "updatedAt": row.get::<_, i64>(9)?,
+                }),
+            ))
         })
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_default();
+        .filter_map(|r| r.ok())
+        .collect::<Vec<(String, serde_json::Value)>>();
 
-    let workout_ids: Vec<String> = workouts.iter().map(|w| w.id.clone()).collect();
-    let mut we = Vec::new();
-    let mut es = Vec::new();
-    if !workout_ids.is_empty() {
-        let placeholders = workout_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("SELECT id, workout_id, exercise_id, sort_order, notes FROM workout_exercises WHERE workout_id IN ({}) AND deleted_at IS NULL", placeholders);
-        let mut stmt2 = conn.prepare(&sql).unwrap();
-        let params: Vec<&dyn rusqlite::ToSql> = workout_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-        we = stmt2
-            .query_map(params.as_slice(), |row| {
-                Ok(WorkoutExerciseRead {
-                    id: row.get(0)?,
-                    workout_id: row.get(1)?,
-                    exercise_id: row.get(2)?,
-                    sort_order: row.get(3)?,
-                    notes: row.get(4)?,
-                })
+    let mut ex_stmt = conn
+        .prepare(
+            "SELECT id, exercise_id, sort_order, notes FROM workout_exercises \
+             WHERE workout_id = ?1 AND deleted_at IS NULL ORDER BY sort_order",
+        )
+        .unwrap();
+    let mut set_stmt = conn
+        .prepare(
+            "SELECT id, set_number, reps, weight_kg, rest_seconds, actual_reps, \
+                    actual_weight_kg, actual_rest_seconds, completed_at, \
+                    duration_minutes, distance_meters, actual_duration_minutes, \
+                    actual_distance_meters, notes \
+             FROM exercise_sets \
+             WHERE workout_exercise_id = ?1 AND deleted_at IS NULL ORDER BY set_number",
+        )
+        .unwrap();
+
+    let mut items = Vec::with_capacity(workouts.len());
+    for (workout_id, mut workout) in workouts {
+        let exercise_rows: Vec<(String, String, i64, Option<String>)> = ex_stmt
+            .query_map([&workout_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
             })
             .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap_or_default();
-
-        if !we.is_empty() {
-            let we_ids: Vec<String> = we.iter().map(|w| w.id.clone()).collect();
-            let ph = we_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql3 = format!("SELECT id, workout_exercise_id, set_number, reps, weight_kg, rest_seconds, actual_reps, actual_weight_kg, actual_rest_seconds, completed_at, duration_minutes, distance_meters, actual_duration_minutes, actual_distance_meters, notes FROM exercise_sets WHERE workout_exercise_id IN ({}) AND deleted_at IS NULL", ph);
-            let mut stmt3 = conn.prepare(&sql3).unwrap();
-            let params3: Vec<&dyn rusqlite::ToSql> = we_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-            es = stmt3
-                .query_map(params3.as_slice(), |row| {
-                    Ok(ExerciseSetRead {
-                        id: row.get(0)?,
-                        workout_exercise_id: row.get(1)?,
-                        set_number: row.get(2)?,
-                        reps: row.get(3)?,
-                        weight_kg: row.get(4)?,
-                        rest_seconds: row.get(5)?,
-                        actual_reps: row.get(6)?,
-                        actual_weight_kg: row.get(7)?,
-                        actual_rest_seconds: row.get(8)?,
-                        completed_at: row.get(9)?,
-                        duration_minutes: row.get(10)?,
-                        distance_meters: row.get(11)?,
-                        actual_duration_minutes: row.get(12)?,
-                        actual_distance_meters: row.get(13)?,
-                        notes: row.get(14)?,
-                    })
+            .filter_map(|r| r.ok())
+            .collect();
+        let mut exercises = Vec::with_capacity(exercise_rows.len());
+        for (ex_id, exercise_id, sort_order, notes) in exercise_rows {
+            let sets: Vec<serde_json::Value> = set_stmt
+                .query_map([&ex_id], |r| {
+                    Ok(serde_json::json!({
+                        "id": r.get::<_, String>(0)?,
+                        "workoutExerciseId": ex_id,
+                        "setNumber": r.get::<_, i64>(1)?,
+                        "reps": r.get::<_, Option<i64>>(2)?,
+                        "weightKg": r.get::<_, Option<f64>>(3)?,
+                        "restSeconds": r.get::<_, Option<i64>>(4)?,
+                        "actualReps": r.get::<_, Option<i64>>(5)?,
+                        "actualWeightKg": r.get::<_, Option<f64>>(6)?,
+                        "actualRestSeconds": r.get::<_, Option<i64>>(7)?,
+                        "completedAt": r.get::<_, Option<i64>>(8)?,
+                        "durationMinutes": r.get::<_, Option<i64>>(9)?,
+                        "distanceMeters": r.get::<_, Option<f64>>(10)?,
+                        "actualDurationMinutes": r.get::<_, Option<i64>>(11)?,
+                        "actualDistanceMeters": r.get::<_, Option<f64>>(12)?,
+                        "notes": r.get::<_, Option<String>>(13)?,
+                    }))
                 })
                 .unwrap()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap_or_default();
+                .filter_map(|r| r.ok())
+                .collect();
+            exercises.push(serde_json::json!({
+                "id": ex_id,
+                "workoutId": workout_id,
+                "exerciseId": exercise_id,
+                "sortOrder": sort_order,
+                "notes": notes,
+                "sets": sets,
+            }));
         }
+        workout
+            .as_object_mut()
+            .map(|o| o.insert("exercises".into(), serde_json::Value::Array(exercises)));
+        items.push(workout);
     }
 
-    let mut del_stmt = conn
+    let deleted: Vec<String> = conn
         .prepare("SELECT id FROM workouts WHERE deleted_at IS NOT NULL AND deleted_at > ?1")
-        .unwrap();
-    let deleted = del_stmt
+        .unwrap()
         .query_map([since], |row| row.get(0))
         .unwrap()
-        .collect::<Result<Vec<String>, _>>()
-        .unwrap_or_default();
+        .filter_map(|r| r.ok())
+        .collect();
+    let deleted_exercises: Vec<String> = conn
+        .prepare(
+            "SELECT id FROM workout_exercises \
+             WHERE deleted_at IS NOT NULL AND deleted_at > ?1",
+        )
+        .unwrap()
+        .query_map([since], |row| row.get(0))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    let deleted_sets: Vec<String> = conn
+        .prepare(
+            "SELECT id FROM exercise_sets \
+             WHERE deleted_at IS NOT NULL AND deleted_at > ?1",
+        )
+        .unwrap()
+        .query_map([since], |row| row.get(0))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
 
     Json(PullWorkoutsResponse {
         server_time,
-        workouts,
-        workout_exercises: we,
-        exercise_sets: es,
+        items,
         deleted,
+        deleted_exercises,
+        deleted_sets,
     })
 }
 

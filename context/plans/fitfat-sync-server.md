@@ -140,6 +140,32 @@ Create a standalone Rust crate `sync-server` (Axum + rusqlite bundled + tokio) t
   - Evidence: cargo test --workspace ok (16 sync-server + workspace tests), cargo check --workspace ok (7.64s), context files updated with sync-server architecture, glossary terms, context-map indexed fitfat-sync-server completed
   - Notes: Axum param syntax fixed :id vs {id} for 0.7.9; 0.0.0.0 LAN binding preserved; context/tmp retained per SCE (no deletion required)
 
+## Post-MVP changes (2026-10-24)
+
+- **Schema v4** (`LATEST_VERSION = 4`): drops the six experiment tables
+  (`experiments`, `experiment_checkins`, `experiment_tags`, `task_experiments`,
+  `experiment_goals`, `experiment_notes`). The feature is gone from the server,
+  the mobile app and the desktop UI.
+- **`POST /exercises`** (added alongside `GET /exercises`): body
+  `{exercises: [...], deleted: [...]}`. Exercise rows created on the phone
+  (not in the shared catalog) ship here so a workout/template push cannot
+  violate the server's foreign keys. It is insert-if-absent:
+  `ON CONFLICT(id) DO UPDATE SET deleted_at=NULL, updated_at=excluded.updated_at`
+  — an existing row is never overwritten, a tombstoned id is revived. Media
+  paths (`imagePath`, `videoPath`) are ignored; the server owns media.
+- **`GET /stores`**: the shared store vocabulary mirrors on its own, using the
+  same envelope as the other pulls (`items[]` with camelCase `createdAt` /
+  `updatedAt`, plus `deleted[]`). Stores are also nested in `GET /ingredients`.
+- **Workout / template pulls return aggregates.** `GET /workouts` and
+  `GET /templates` now nest `exercises[]` (each with `sets[]`) under the parent
+  and add `deletedExercises[]` / `deletedSets[]` for child tombstones. The
+  parent is returned when *any* child has an `updated_at > since`
+  (`EXISTS` subqueries), so a child-only change is never lost. The old flat
+  `workoutExercises` / `exerciseSets` arrays are gone.
+- **Full-state pulls.** The phone always requests `?since=0`; the push routes
+  are full-state upserts per entity. The server keeps `since` support (it is
+  still correct), but correctness no longer depends on the cursor.
+
 ## Open questions
 - Where to persist `api_key` and `fitfat_sync.db` path — `tauri-plugin-store`, `maia.json`, or OS data dir? Decision needed in T09.
 - Should `POST /ingredients` also update `GET /ingredients` Pull `deleted[]` tombstones when `isArchived=true` vs hard delete? Current spec: ingredients soft-archive, exercises hard delete.

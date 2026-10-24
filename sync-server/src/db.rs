@@ -120,13 +120,28 @@ pub const MIGRATIONS: &[(i64, Step)] = &[
     // `meal_ingredients` was superseded by the `foods` / `food_ingredients` /
     // `meal_foods` layer and nothing on the server reads it any more.
     (3, Step::Sql("DROP TABLE IF EXISTS meal_ingredients;")),
+    // The Experiments feature was removed end to end. Its tables only carried
+    // rows no client can display or push any more, so drop them rather than
+    // leaving dead data in every synced database. Children first: they hold
+    // the foreign keys pointing at `experiments`.
+    (
+        4,
+        Step::Sql(
+            "DROP TABLE IF EXISTS experiment_checkins;\n\
+             DROP TABLE IF EXISTS experiment_tags;\n\
+             DROP TABLE IF EXISTS task_experiments;\n\
+             DROP TABLE IF EXISTS experiment_goals;\n\
+             DROP TABLE IF EXISTS experiment_notes;\n\
+             DROP TABLE IF EXISTS experiments;",
+        ),
+    ),
 ];
 
 /// Highest version in `MIGRATIONS`.
 ///
 /// A database newer than this means the data is newer than the binary, which is
 /// what a Nix rollback looks like. `migrate` refuses rather than serving.
-pub const LATEST_VERSION: i64 = 3;
+pub const LATEST_VERSION: i64 = 4;
 
 /// The v1 schema, exactly as it shipped.
 ///

@@ -334,7 +334,6 @@ export const api = {
 
   listBodyMetrics: () => invoke<unknown>("list_body_metrics"),
 
-  listExperiments: () => invoke<unknown>("list_experiments"),
 
   listTags: () => invoke<unknown>("list_tags"),
 

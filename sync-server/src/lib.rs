@@ -563,6 +563,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pull_stores_returns_items_and_tombstones() {
+        let pool = crate::db::init_memory().unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute("INSERT INTO stores (id, name, created_at, updated_at) VALUES ('s1','Carrefour',1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO stores (id, name, created_at, updated_at, deleted_at) VALUES ('s2','Aldi',1000,2000,2000)", []).unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool).await;
+        let client = reqwest::Client::new();
+        let body: serde_json::Value = client
+            .get(format!("http://127.0.0.1:{port}/stores?since=0"))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["items"][0]["name"], "Carrefour");
+        assert_eq!(body["items"][0]["createdAt"], 1000);
+        assert_eq!(body["deleted"], serde_json::json!(["s2"]));
+        handle.abort();
+    }
+
+    #[tokio::test]
     async fn push_tags_upserts_real_names_over_uuid_fallback() {
         let pool = crate::db::init_memory().unwrap();
         let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
@@ -859,8 +885,10 @@ mod tests {
             .get(format!("http://127.0.0.1:{port}/workouts?since=0"))
             .header("Authorization", "Bearer test-key")
             .send().await.unwrap().json().await.unwrap();
-        assert_eq!(pull["workouts"].as_array().unwrap().len(), 1);
-        let set = &pull["exerciseSets"].as_array().unwrap()[0];
+        assert_eq!(pull["items"].as_array().unwrap().len(), 1);
+        let workout = &pull["items"][0];
+        let exercise = &workout["exercises"].as_array().unwrap()[0];
+        let set = &exercise["sets"].as_array().unwrap()[0];
         assert_eq!(set["actualReps"], 6);
         assert_eq!(set["actualWeightKg"], 80.0);
         assert_eq!(set["actualRestSeconds"], 95);
@@ -868,7 +896,7 @@ mod tests {
         assert_eq!(set["actualDurationMinutes"], 21);
         assert_eq!(set["actualDistanceMeters"], 5200.0);
         assert_eq!(set["notes"], "paused");
-        assert_eq!(pull["workoutExercises"].as_array().unwrap()[0]["notes"], "felt heavy");
+        assert_eq!(exercise["notes"], "felt heavy");
         handle.abort();
     }
 
@@ -929,32 +957,6 @@ mod tests {
             let (c, weight): (i64, f64) = conn.query_row("SELECT count(*), weight_kg FROM body_metrics WHERE id='bm1'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
             assert_eq!(c, 1);
             assert_eq!(weight, 81.0);
-        }
-        handle.abort();
-    }
-
-    #[tokio::test]
-    async fn push_experiments_and_checkins() {
-        let pool = crate::db::init_memory().unwrap();
-        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
-        let client = reqwest::Client::new();
-        let payload = serde_json::json!({
-            "experiments": [{"id":"e1","name":"Sleep","purpose":null,"startDate":1000,"endDate":null,"status":"active","categories":"[\"body\"]","reminderEnabled":true,"reminderTimeMinutes":1200,"createdAt":1000}],
-            "experimentCheckins": [
-                {"id":"c1","experimentId":"e1","day":1000,"rating":4,"note":"ok","createdAt":1000},
-                {"id":"c2","experimentId":"unknown","day":1000,"rating":3,"note":null,"createdAt":1000}
-            ]
-        });
-        let resp = client.post(format!("http://127.0.0.1:{port}/experiments")).header("Authorization","Bearer test-key").json(&payload).send().await.unwrap();
-        assert_eq!(resp.status(), 200);
-        {
-            let conn = pool.get().unwrap();
-            let c: i64 = conn.query_row("SELECT count(*) FROM experiments WHERE id='e1'", [], |r| r.get(0)).unwrap();
-            assert_eq!(c, 1);
-            let c: i64 = conn.query_row("SELECT count(*) FROM experiment_checkins WHERE id='c1'", [], |r| r.get(0)).unwrap();
-            assert_eq!(c, 1, "check-in for a pushed experiment must land");
-            let c: i64 = conn.query_row("SELECT count(*) FROM experiment_checkins WHERE id='c2'", [], |r| r.get(0)).unwrap();
-            assert_eq!(c, 0, "orphan check-in must be skipped, not fail the push");
         }
         handle.abort();
     }
@@ -1732,9 +1734,13 @@ mod tests {
         let resp = client.get(format!("http://127.0.0.1:{port}/workouts?since=0")).header("Authorization","Bearer test-key").send().await.unwrap();
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["workouts"].as_array().unwrap().len(), 1);
-        assert_eq!(body["workoutExercises"].as_array().unwrap().len(), 1);
-        assert_eq!(body["exerciseSets"].as_array().unwrap().len(), 1);
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        let workout = &body["items"][0];
+        assert_eq!(workout["exercises"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            workout["exercises"][0]["sets"].as_array().unwrap().len(),
+            1
+        );
         let resp = client.get(format!("http://127.0.0.1:{port}/meals?since=0")).header("Authorization","Bearer test-key").send().await.unwrap();
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = resp.json().await.unwrap();
@@ -1752,6 +1758,111 @@ mod tests {
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["items"].as_array().unwrap().len(), 1);
         assert_eq!(body["items"][0]["weightKg"], 70.5);
+        handle.abort();
+    }
+
+    /// A child-only change must still return the whole workout: the phone had
+    /// already seen the parent row, which used to suppress the graph forever.
+    #[tokio::test]
+    async fn pull_workouts_returns_the_graph_when_only_a_child_changed() {
+        let pool = crate::db::init_memory().unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Bench','weightlifting',1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO workouts (id, name, date, created_at, updated_at) VALUES ('w1','Push',1000,1000,1000)", []).unwrap();
+            // The exercise was added later than the workout itself.
+            conn.execute("INSERT INTO workout_exercises (id, workout_id, exercise_id, sort_order, updated_at) VALUES ('we1','w1','e1',0,2000)", []).unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool).await;
+        let client = reqwest::Client::new();
+        let body: serde_json::Value = client
+            .get(format!("http://127.0.0.1:{port}/workouts?since=1500"))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["items"][0]["exercises"].as_array().unwrap().len(), 1);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn push_exercises_inserts_missing_and_never_overwrites() {
+        let pool = crate::db::init_memory().unwrap();
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let payload = serde_json::json!({
+            "exercises": [{
+                "id": "custom1",
+                "name": "Sled push",
+                "exerciseType": "cardio",
+                "instructions": "[\"Push the sled\"]",
+                "isCanonical": true,
+                "createdAt": 1000,
+                "imagePath": "/local/only.jpg",
+                "videoPath": null
+            }]
+        });
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/exercises"))
+            .header("Authorization", "Bearer test-key")
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        {
+            let conn = pool.get().unwrap();
+            let (name, created_at): (String, i64) = conn
+                .query_row(
+                    "SELECT name, created_at FROM exercises WHERE id='custom1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(name, "Sled push");
+            assert_eq!(created_at, 1000);
+        }
+
+        // A later push must not rewrite the row, only revive it.
+        let update = serde_json::json!({
+            "exercises": [{"id": "custom1", "name": "Renamed", "exerciseType": "cardio", "createdAt": 999}]
+        });
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/exercises"))
+            .header("Authorization", "Bearer test-key")
+            .json(&update)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        {
+            let conn = pool.get().unwrap();
+            let name: String = conn
+                .query_row("SELECT name FROM exercises WHERE id='custom1'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(name, "Sled push");
+        }
+
+        let delete = serde_json::json!({"deleted": ["custom1"]});
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/exercises"))
+            .header("Authorization", "Bearer test-key")
+            .json(&delete)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        {
+            let conn = pool.get().unwrap();
+            let deleted: Option<i64> = conn
+                .query_row("SELECT deleted_at FROM exercises WHERE id='custom1'", [], |r| r.get(0))
+                .unwrap();
+            assert!(deleted.is_some());
+        }
         handle.abort();
     }
 }

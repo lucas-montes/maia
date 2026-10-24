@@ -47,7 +47,6 @@ const GROUPS: { name: string; icon: string; items: NavItem[] }[] = [
     icon: "scale",
     items: [
       { view: "bodyMetrics", label: "Body", icon: "scale" },
-      { view: "experiments", label: "Experiments", icon: "flask-conical" },
     ],
   },
   {

@@ -36,7 +36,6 @@ export type ViewId =
   | "stores"
   | "meals"
   | "bodyMetrics"
-  | "experiments"
   | "todos"
   | "receipts"
   | "notes"
@@ -168,8 +167,6 @@ export const storesAtom = atom<ListState<any>>(emptyList<any>());
 export const mealsAtom = atom<ListState<any>>(emptyList<any>());
 
 export const bodyMetricsAtom = atom<ListState<any>>(emptyList<any>());
-
-export const experimentsAtom = atom<ListState<any>>(emptyList<any>());
 
 export const tagsAtom = atom<ListState<any>>(emptyList<any>());
 

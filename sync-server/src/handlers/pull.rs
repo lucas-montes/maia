@@ -374,7 +374,15 @@ pub async fn pull_fx_rates(
 }
 
 #[derive(Serialize)]
-pub struct PullTemplatesResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, pub deleted: Vec<String> }
+pub struct PullTemplatesResponse {
+    pub server_time: i64,
+    pub items: Vec<serde_json::Value>,
+    pub deleted: Vec<String>,
+    #[serde(rename = "deletedExercises")]
+    pub deleted_exercises: Vec<String>,
+    #[serde(rename = "deletedSets")]
+    pub deleted_sets: Vec<String>,
+}
 #[derive(Serialize)]
 pub struct PullFoodsResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, pub deleted: Vec<String> }
         #[derive(Serialize)]
@@ -389,8 +397,6 @@ pub struct PullTransactionsResponse { pub server_time: i64, pub items: Vec<serde
 pub struct PullAccountsResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, pub deleted: Vec<String> }
 #[derive(Serialize)]
 pub struct PullReceiptsResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, pub deleted: Vec<String> }
-#[derive(Serialize)]
-pub struct PullExperimentsResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, pub checkins: Vec<serde_json::Value>, pub deleted: Vec<String> }
 #[derive(Serialize)]
 pub struct PullTagsResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, pub deleted: Vec<String> }
 
@@ -442,11 +448,36 @@ pub async fn pull_foods(State(state): State<AppState>, Query(q): Query<SinceQuer
 }
 pub async fn pull_templates(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
     let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
-    let mut stmt = conn.prepare("SELECT id, name, notes, start_date, recurrence, excluded_dates, source_routine_id, created_at, updated_at FROM workout_templates WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
+    // Same aggregate rule as workouts: return the whole template when the
+    // blueprint or any of its exercises/sets changed since the cursor, so a
+    // child-only edit is never lost.
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.name, t.notes, t.start_date, t.recurrence, t.excluded_dates, \
+                t.source_routine_id, t.created_at, t.updated_at \
+         FROM workout_templates t \
+         WHERE t.deleted_at IS NULL AND ( \
+             t.updated_at > ?1 \
+             OR EXISTS (SELECT 1 FROM workout_template_exercises te \
+                        WHERE te.template_id = t.id AND te.updated_at > ?1) \
+             OR EXISTS (SELECT 1 FROM workout_template_sets ts \
+                        JOIN workout_template_exercises te ON te.id = ts.template_exercise_id \
+                        WHERE te.template_id = t.id AND ts.updated_at > ?1) \
+         ) ORDER BY t.updated_at",
+    ).unwrap();
     let templates: Vec<(String, serde_json::Value)> = stmt.query_map([since], |r| {
         Ok((
             r.get::<_,String>(0)?,
-            serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"notes":r.get::<_,Option<String>>(2)?,"startDate":r.get::<_,i64>(3)?,"recurrence":r.get::<_,Option<String>>(4)?,"excludedDates":r.get::<_,Option<String>>(5)?,"sourceRoutineId":r.get::<_,Option<String>>(6)?,"createdAt":r.get::<_,i64>(7)?,"updatedAt":r.get::<_,i64>(8)?}),
+            serde_json::json!({
+                "id":r.get::<_,String>(0)?,
+                "name":r.get::<_,String>(1)?,
+                "notes":r.get::<_,Option<String>>(2)?,
+                "startDate":r.get::<_,i64>(3)?,
+                "recurrence":r.get::<_,Option<String>>(4)?,
+                "excludedDates":r.get::<_,Option<String>>(5)?,
+                "sourceRoutineId":r.get::<_,Option<String>>(6)?,
+                "createdAt":r.get::<_,i64>(7)?,
+                "updatedAt":r.get::<_,i64>(8)?,
+            }),
         ))
     }).unwrap().filter_map(|r|r.ok()).collect();
     let mut items: Vec<serde_json::Value> = Vec::with_capacity(templates.len());
@@ -481,7 +512,9 @@ pub async fn pull_templates(State(state): State<AppState>, Query(q): Query<Since
         items.push(template);
     }
     let deleted: Vec<String> = conn.prepare("SELECT id FROM workout_templates WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
-    Json(PullTemplatesResponse{server_time, items, deleted})
+    let deleted_exercises: Vec<String> = conn.prepare("SELECT id FROM workout_template_exercises WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
+    let deleted_sets: Vec<String> = conn.prepare("SELECT id FROM workout_template_sets WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
+    Json(PullTemplatesResponse{server_time, items, deleted, deleted_exercises, deleted_sets})
 }
 pub async fn pull_notes(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
     let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
@@ -539,21 +572,12 @@ pub async fn pull_receipts(State(state): State<AppState>, Query(q): Query<SinceQ
     let deleted: Vec<String> = conn.prepare("SELECT id FROM receipts WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
     Json(PullReceiptsResponse{server_time, items, deleted})
 }
-pub async fn pull_experiments(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
-    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
-    let mut stmt = conn.prepare("SELECT id, name, purpose, start_date, end_date, status, categories, reminder_enabled, reminder_time_minutes, created_at, updated_at FROM experiments WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
-    let items: Vec<serde_json::Value> = stmt.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"purpose":r.get::<_,Option<String>>(2)?,"startDate":r.get::<_,i64>(3)?,"endDate":r.get::<_,Option<i64>>(4)?,"status":r.get::<_,String>(5)?,"categories":r.get::<_,Option<String>>(6)?,"reminderEnabled":r.get::<_,i64>(7)?!=0,"reminderTimeMinutes":r.get::<_,i64>(8)?,"createdAt":r.get::<_,i64>(9)?,"updatedAt":r.get::<_,i64>(10)?}))).unwrap().filter_map(|r|r.ok()).collect();
-    let mut stmt2 = conn.prepare("SELECT id, experiment_id, day, rating, note, created_at FROM experiment_checkins WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
-    let checkins: Vec<serde_json::Value> = stmt2.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"experimentId":r.get::<_,String>(1)?,"day":r.get::<_,i64>(2)?,"rating":r.get::<_,i64>(3)?,"note":r.get::<_,Option<String>>(4)?,"createdAt":r.get::<_,i64>(5)?}))).unwrap().filter_map(|r|r.ok()).collect();
-    let mut deleted: Vec<String> = conn.prepare("SELECT id FROM experiments WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
-    let mut stmt3 = conn.prepare("SELECT id FROM experiment_checkins WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap();
-    let cdel: Vec<String> = stmt3.query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
-    deleted.extend(cdel);
-    Json(PullExperimentsResponse{server_time, items, checkins, deleted})
-}
 pub async fn pull_tags(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
     let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
-    let mut stmt = conn.prepare("SELECT id, name, color, sort_order, created_at, updated_at FROM tags WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY updated_at").unwrap();
+    // Skip placeholder tags (name copied from the id) that older pushes created
+    // before the full tag vocabulary was sent: they are not real names, and
+    // letting them reach the phone poisons the UNIQUE name index.
+    let mut stmt = conn.prepare("SELECT id, name, color, sort_order, created_at, updated_at FROM tags WHERE deleted_at IS NULL AND updated_at > ?1 AND name <> id AND name <> '' ORDER BY updated_at").unwrap();
     let items: Vec<serde_json::Value> = stmt.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"color":r.get::<_,Option<i64>>(2)?,"sortOrder":r.get::<_,i64>(3)?,"createdAt":r.get::<_,i64>(4)?,"updatedAt":r.get::<_,i64>(5)?}))).unwrap().filter_map(|r|r.ok()).collect();
     let deleted: Vec<String> = conn.prepare("SELECT id FROM tags WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
     Json(PullTagsResponse{server_time, items, deleted})
@@ -747,4 +771,66 @@ pub async fn get_ingredient_item(
         "pictures": pictures,
     });
     (StatusCode::OK, Json(body)).into_response()
+}
+
+#[derive(Serialize)]
+pub struct PullStoresResponse {
+    pub server_time: i64,
+    pub items: Vec<StoreItem>,
+    pub deleted: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct StoreItem {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: i64,
+}
+
+/// The shared store vocabulary. Stores are also nested in the ingredient pull;
+/// this route exists so the phone can mirror them on their own (Push all /
+/// Pull all treats stores as one of the entities).
+pub async fn pull_stores(
+    State(state): State<AppState>,
+    Query(q): Query<SinceQuery>,
+) -> impl IntoResponse {
+    let since = q.since.unwrap_or(0);
+    let server_time = db::server_time_ms();
+    let conn = state.db.get().unwrap();
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, created_at, updated_at FROM stores WHERE deleted_at IS NULL AND updated_at > ?1 ORDER BY name",
+        )
+        .unwrap();
+    let items = stmt
+        .query_map([since], |row| {
+            Ok(StoreItem {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_default();
+
+    let mut del_stmt = conn
+        .prepare("SELECT id FROM stores WHERE deleted_at IS NOT NULL AND deleted_at > ?1")
+        .unwrap();
+    let deleted = del_stmt
+        .query_map([since], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<String>, _>>()
+        .unwrap_or_default();
+
+    Json(PullStoresResponse {
+        server_time,
+        items,
+        deleted,
+    })
 }

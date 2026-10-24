@@ -16,7 +16,6 @@ import * as foods from "./foods";
 import * as stores from "./stores";
 import * as meals from "./meals";
 import * as bodyMetrics from "./bodyMetrics";
-import * as experiments from "./experiments";
 import * as tags from "./tags";
 import * as accounts from "./accounts";
 import * as transactions from "./transactions";
@@ -39,7 +38,6 @@ export const routes: Record<ViewId, ViewModule> = {
   stores,
   meals,
   bodyMetrics,
-  experiments,
   tags,
   accounts,
   transactions,

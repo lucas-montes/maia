@@ -539,6 +539,35 @@ pub struct TagPush {
     pub updated_at: Option<i64>,
 }
 
+/// Ensures a tag id referenced by a link payload exists server-side.
+///
+/// The link payloads carry the tag's real name in `tagName` (the phone knows
+/// it). Inserting that name avoids the old placeholder (`name = id`) that the
+/// pull then sent back and used to overwrite the real local name. When the name
+/// is missing or already equal to the id we keep the old placeholder behaviour;
+/// the full `/tags` push still replaces it because that upsert is by id.
+fn ensure_tag(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    name: Option<&str>,
+    server_time: i64,
+) {
+    match name.filter(|n| !n.is_empty() && *n != id) {
+        Some(name) => {
+            let _ = tx.execute(
+                "INSERT INTO tags (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3) ON CONFLICT(id) DO NOTHING",
+                rusqlite::params![id, name, server_time],
+            );
+        }
+        None => {
+            let _ = tx.execute(
+                "INSERT OR IGNORE INTO tags (id, name, created_at, updated_at) VALUES (?1, ?1, ?2, ?2)",
+                rusqlite::params![id, server_time],
+            );
+        }
+    }
+}
+
 pub async fn push_tags(
     State(state): State<AppState>,
     Json(payload): Json<TagsPush>,
@@ -778,6 +807,8 @@ pub struct NotePush {
 pub struct NoteTagPush {
     #[serde(rename = "tagId")]
     pub tag_id: String,
+    #[serde(rename = "tagName", default)]
+    pub tag_name: Option<String>,
     #[serde(rename = "noteId")]
     pub note_id: String,
 }
@@ -830,6 +861,8 @@ pub struct TaskPush {
 pub struct TaskTagPush {
     #[serde(rename = "tagId")]
     pub tag_id: String,
+    #[serde(rename = "tagName", default)]
+    pub tag_name: Option<String>,
     #[serde(rename = "taskId")]
     pub task_id: String,
 }
@@ -894,6 +927,8 @@ pub struct GoalProgressEntryPush {
 pub struct GoalTagPush {
     #[serde(rename = "tagId")]
     pub tag_id: String,
+    #[serde(rename = "tagName", default)]
+    pub tag_name: Option<String>,
     #[serde(rename = "goalId")]
     pub goal_id: String,
 }
@@ -953,11 +988,7 @@ pub async fn push_notes(
         .unwrap();
     }
     for nt in payload.note_tags {
-        tx.execute(
-            "INSERT OR IGNORE INTO tags (id, name, created_at, updated_at) VALUES (?1, ?1, ?2, ?2)",
-            rusqlite::params![nt.tag_id, server_time],
-        )
-        .unwrap();
+        ensure_tag(&tx, &nt.tag_id, nt.tag_name.as_deref(), server_time);
         tx.execute(
             "INSERT OR IGNORE INTO note_tags (tag_id, note_id) VALUES (?1, ?2)",
             rusqlite::params![nt.tag_id, nt.note_id],
@@ -1032,11 +1063,7 @@ pub async fn push_tasks(
         ).unwrap();
     }
     for tt in payload.task_tags {
-        tx.execute(
-            "INSERT OR IGNORE INTO tags (id, name, created_at, updated_at) VALUES (?1, ?1, ?2, ?2)",
-            rusqlite::params![tt.tag_id, server_time],
-        )
-        .unwrap();
+        ensure_tag(&tx, &tt.tag_id, tt.tag_name.as_deref(), server_time);
         tx.execute(
             "INSERT OR IGNORE INTO task_tags (tag_id, task_id) VALUES (?1, ?2)",
             rusqlite::params![tt.tag_id, tt.task_id],
@@ -1071,11 +1098,7 @@ pub async fn push_goals(
         ).unwrap();
     }
     for gt in payload.goal_tags {
-        tx.execute(
-            "INSERT OR IGNORE INTO tags (id, name, created_at, updated_at) VALUES (?1, ?1, ?2, ?2)",
-            rusqlite::params![gt.tag_id, server_time],
-        )
-        .unwrap();
+        ensure_tag(&tx, &gt.tag_id, gt.tag_name.as_deref(), server_time);
         tx.execute(
             "INSERT OR IGNORE INTO goal_tags (tag_id, goal_id) VALUES (?1, ?2)",
             rusqlite::params![gt.tag_id, gt.goal_id],
@@ -1344,79 +1367,91 @@ pub async fn push_body_metrics(
     Json(SyncAck { server_time })
 }
 
+/// Exercises owned by the phone (rows the shared catalog does not know).
+///
+/// Insert-if-absent: the catalog is authoritative for exercises it already
+/// ships, so a push never overwrites an existing row — it only fills in an id
+/// the server is missing and revives one that was tombstoned. That is what lets
+/// a workout referencing a custom exercise land without tripping the server's
+/// foreign keys. Client-local media paths are deliberately ignored: media is
+/// served by the server, never uploaded here.
 #[derive(Deserialize)]
-pub struct ExperimentsPush {
+pub struct ExercisesPush {
     #[serde(default)]
-    pub experiments: Vec<ExperimentPush>,
-    #[serde(rename = "experimentCheckins", default)]
-    pub experiment_checkins: Vec<ExperimentCheckinPush>,
+    pub exercises: Vec<ExercisePush>,
     #[serde(default)]
     pub deleted: Vec<String>,
 }
 
 #[derive(Deserialize)]
-pub struct ExperimentPush {
+pub struct ExercisePush {
     pub id: String,
     pub name: String,
-    pub purpose: Option<String>,
-    #[serde(rename = "startDate")]
-    pub start_date: i64,
-    #[serde(rename = "endDate")]
-    pub end_date: Option<i64>,
-    pub status: String,
-    pub categories: Option<String>,
-    #[serde(rename = "reminderEnabled")]
-    pub reminder_enabled: bool,
-    #[serde(rename = "reminderTimeMinutes")]
-    pub reminder_time_minutes: i64,
+    #[serde(rename = "exerciseType")]
+    pub exercise_type: String,
+    #[serde(rename = "bodyPart")]
+    pub body_part: Option<String>,
+    pub equipment: Option<String>,
+    #[serde(rename = "primaryMuscle")]
+    pub primary_muscle: Option<String>,
+    #[serde(rename = "secondaryMuscle")]
+    pub secondary_muscle: Option<String>,
+    /// JSON-encoded string arrays, matching the column format.
+    pub instructions: Option<String>,
+    pub tips: Option<String>,
+    pub faqs: Option<String>,
+    pub keywords: Option<String>,
+    #[serde(rename = "similarTo")]
+    pub similar_to: Option<String>,
+    pub tags: Option<String>,
+    #[serde(rename = "isCanonical", default = "default_true")]
+    pub is_canonical: bool,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
-    #[serde(rename = "deletedAt", default)]
-    pub deleted_at: Option<i64>,
 }
 
-#[derive(Deserialize)]
-pub struct ExperimentCheckinPush {
-    pub id: String,
-    #[serde(rename = "experimentId")]
-    pub experiment_id: String,
-    pub day: i64,
-    pub rating: i64,
-    pub note: Option<String>,
-    #[serde(rename = "createdAt")]
-    pub created_at: i64,
-    #[serde(rename = "deletedAt", default)]
-    pub deleted_at: Option<i64>,
+fn default_true() -> bool {
+    true
 }
 
-pub async fn push_experiments(
+pub async fn push_exercises(
     State(state): State<AppState>,
-    Json(payload): Json<ExperimentsPush>,
+    Json(payload): Json<ExercisesPush>,
 ) -> impl IntoResponse {
     let server_time = db::server_time_ms();
     let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
-    for e in payload.experiments {
+    for e in payload.exercises {
         tx.execute(
-            "INSERT INTO experiments (id, name, purpose, start_date, end_date, status, categories, reminder_enabled, reminder_time_minutes, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) ON CONFLICT(id) DO UPDATE SET name=excluded.name, purpose=excluded.purpose, start_date=excluded.start_date, end_date=excluded.end_date, status=excluded.status, categories=excluded.categories, reminder_enabled=excluded.reminder_enabled, reminder_time_minutes=excluded.reminder_time_minutes, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
-            rusqlite::params![e.id, e.name, e.purpose, e.start_date, e.end_date, e.status, e.categories, if e.reminder_enabled {1} else {0}, e.reminder_time_minutes, e.created_at, server_time, e.deleted_at],
-        ).unwrap();
-    }
-    // Check-ins reference experiments(id), so an orphan (experiment never
-    // pushed, e.g. deleted on the phone) is skipped instead of failing the push.
-    for c in payload.experiment_checkins {
-        let known: bool = tx.query_row("SELECT count(*) FROM experiments WHERE id=?1", rusqlite::params![c.experiment_id], |r| r.get::<_,i64>(0)).map(|n| n > 0).unwrap_or(false);
-        if !known {
-            tracing::warn!(id = %c.id, experiment_id = %c.experiment_id, "skipping check-in for unknown experiment");
-            continue;
-        }
-        tx.execute(
-            "INSERT INTO experiment_checkins (id, experiment_id, day, rating, note, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(id) DO UPDATE SET experiment_id=excluded.experiment_id, day=excluded.day, rating=excluded.rating, note=excluded.note, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
-            rusqlite::params![c.id, c.experiment_id, c.day, c.rating, c.note, c.created_at, server_time, c.deleted_at],
-        ).unwrap();
+            "INSERT INTO exercises (id, name, exercise_type, body_part, equipment, primary_muscle, secondary_muscle, instructions, tips, faqs, keywords, similar_to, tags, is_canonical, created_at, updated_at, deleted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, NULL)
+             ON CONFLICT(id) DO UPDATE SET deleted_at=NULL, updated_at=excluded.updated_at",
+            rusqlite::params![
+                e.id,
+                e.name,
+                e.exercise_type,
+                e.body_part,
+                e.equipment,
+                e.primary_muscle,
+                e.secondary_muscle,
+                e.instructions,
+                e.tips,
+                e.faqs,
+                e.keywords,
+                e.similar_to,
+                e.tags,
+                if e.is_canonical { 1 } else { 0 },
+                e.created_at,
+                server_time
+            ],
+        )
+        .unwrap();
     }
     for id in payload.deleted {
-        let _ = tx.execute("UPDATE experiments SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
+        let _ = tx.execute(
+            "UPDATE exercises SET deleted_at=?1, updated_at=?1 WHERE id=?2",
+            rusqlite::params![server_time, id],
+        );
     }
     tx.commit().unwrap();
     Json(SyncAck { server_time })

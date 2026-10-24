@@ -26,7 +26,7 @@ export function mount(root: HTMLElement): () => void {
           (tag) => `
           <div class="flex justify-between">
             <span class="text-sm" style="color:${tag.color ? `#${tag.color.toString(16).padStart(6, "0")}` : "#cbd5e1"}">${escapeHtml(tag.name)}</span>
-            <span class="text-xs text-ink-400">tasks:${tag.taskCount ?? 0} exp:${tag.experimentCount ?? 0} goals:${tag.goalCount ?? 0} notes:${tag.noteCount ?? 0}</span>
+            <span class="text-xs text-ink-400">tasks:${tag.taskCount ?? 0} goals:${tag.goalCount ?? 0} notes:${tag.noteCount ?? 0}</span>
           </div>`,
         )
         .join("") || `<div class="p-3 text-xs text-ink-400">No tags</div>`,
