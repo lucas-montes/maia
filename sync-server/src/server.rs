@@ -94,10 +94,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/tags", get(crate::handlers::pull::pull_tags).post(crate::handlers::push::push_tags))
         .route("/phone-logs", post(phone_logs))
         .route("/backup", post(crate::handlers::backup::post_backup)
-            // A backup is a whole database, well past axum's 2 MB default. This is
-            // the upload ceiling rather than an exact fit: rejecting a large but
-            // legitimate backup is worse than accepting a slightly larger one, and
-            // the request is bounded by the auth token in front of it.
+            // A compressed JSON backup of the whole dataset can exceed axum's
+            // 2 MB default. This is the upload ceiling rather than an exact
+            // fit: rejecting a large but legitimate backup is worse than
+            // accepting a slightly larger one, and the request is bounded by
+            // the auth token in front of it.
             .layer(DefaultBodyLimit::max(MAX_BACKUP_BYTES)))
         .route("/backup/latest", get(crate::handlers::backup::get_backup))
         .route("/media/:id", get(crate::handlers::media::get_media))

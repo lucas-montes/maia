@@ -1070,9 +1070,8 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 404);
 
-        // A payload that actually looks like a database, and is well past the 2 MB
-        // body cap axum applies by default.
-        let mut data = b"SQLite format 3\0".to_vec();
+        // A gzip payload well past the 2 MB body cap axum applies by default.
+        let mut data = b"\x1f\x8b".to_vec();
         data.extend(std::iter::repeat_n(b'x', 3 * 1024 * 1024));
 
         let resp = client
@@ -1096,7 +1095,7 @@ mod tests {
             resp.headers()
                 .get(reqwest::header::CONTENT_DISPOSITION)
                 .and_then(|v| v.to_str().ok()),
-            Some("attachment; filename=\"fitfat.sqlite\"")
+            Some("attachment; filename=\"fitfat-backup.json.gz\"")
         );
         let returned = resp.bytes().await.unwrap();
         assert_eq!(returned.len(), data.len(), "stored backup was truncated");
@@ -1108,7 +1107,7 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(leftovers, vec!["fitfat.sqlite".to_string()]);
+        assert_eq!(leftovers, vec!["fitfat-backup.json.gz".to_string()]);
 
         handle.abort();
         let _ = std::fs::remove_dir_all(&dir);

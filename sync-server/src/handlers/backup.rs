@@ -9,8 +9,8 @@ use axum::{
 
 use crate::server::AppState;
 
-/// Name the uploaded database is stored under.
-const BACKUP_FILE: &str = "fitfat.sqlite";
+/// Name the uploaded archive is stored under.
+const BACKUP_FILE: &str = "fitfat-backup.json.gz";
 
 fn backup_path(state: &AppState) -> PathBuf {
     state
@@ -22,11 +22,11 @@ fn backup_path(state: &AppState) -> PathBuf {
         .join(BACKUP_FILE)
 }
 
-/// Stores a database uploaded by the phone.
+/// Stores the compressed JSON backup uploaded by the phone.
 ///
 /// Writes to a sibling temporary file and renames it into place, because a
 /// partial write would otherwise leave a truncated file that `GET /backup/latest`
-/// happily serves as if it were a valid database.
+/// happily serves as if it were a complete archive.
 pub async fn post_backup(State(state): State<AppState>, body: axum::body::Bytes) -> Response {
     let path = backup_path(&state);
     let Some(parent) = path.parent() else {
@@ -61,7 +61,7 @@ pub async fn get_backup(State(state): State<AppState>) -> Response {
     match tokio::fs::read(&path).await {
         Ok(bytes) => Response::builder()
             .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/vnd.sqlite3")
+            .header(header::CONTENT_TYPE, "application/gzip")
             .header(
                 header::CONTENT_DISPOSITION,
                 format!("attachment; filename=\"{BACKUP_FILE}\""),
