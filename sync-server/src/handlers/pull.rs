@@ -417,16 +417,16 @@ pub async fn pull_foods(State(state): State<AppState>, Query(q): Query<SinceQuer
     // One query for every food that changed, then one for the composition of
     // exactly those. Ordering by ingredient name matches how clients present
     // the parts; there is no stored sort order to read.
-    let mut stmt = conn.prepare("SELECT id, name, created_at, archived_at FROM foods WHERE deleted_at IS NULL AND (?1 <= 0 OR updated_at > ?1) ORDER BY updated_at").unwrap();
-    let rows: Vec<(String, String, i64, Option<i64>)> = stmt
-        .query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+    let mut stmt = conn.prepare("SELECT id, name, created_at, archived_at, cooked_weight FROM foods WHERE deleted_at IS NULL AND (?1 <= 0 OR updated_at > ?1) ORDER BY updated_at").unwrap();
+    let rows: Vec<(String, String, i64, Option<i64>, Option<f64>)> = stmt
+        .query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
         .unwrap()
         .filter_map(|r| r.ok())
         .collect();
 
     let items: Vec<serde_json::Value> = rows
         .iter()
-        .map(|(id, name, created_at, archived_at)| {
+        .map(|(id, name, created_at, archived_at, cooked_weight)| {
             let mut comp_stmt = conn.prepare("SELECT fi.ingredient_id, fi.amount, i.name FROM food_ingredients fi JOIN ingredients i ON i.id = fi.ingredient_id WHERE fi.food_id = ?1 AND fi.deleted_at IS NULL ORDER BY i.name").unwrap();
             let components: Vec<serde_json::Value> = comp_stmt
                 .query_map([id], |r| Ok(serde_json::json!({"ingredientId": r.get::<_,String>(0)?, "amount": r.get::<_,f64>(1)?})))
@@ -438,6 +438,7 @@ pub async fn pull_foods(State(state): State<AppState>, Query(q): Query<SinceQuer
                 "name": name,
                 "createdAt": created_at,
                 "archivedAt": archived_at,
+                "cookedWeight": cooked_weight,
                 "components": components,
             })
         })

@@ -356,6 +356,7 @@ mod tests {
                 "name": "Granola",
                 "createdAt": 1000,
                 "archivedAt": serde_json::Value::Null,
+                "cookedWeight": 75.0,
                 "components": [
                     {"ingredientId": "i2", "amount": 80.0},
                     {"ingredientId": "i3", "amount": 20.0}
@@ -373,6 +374,10 @@ mod tests {
             assert_eq!(count, 1);
             let count_c: i64 = conn.query_row("SELECT count(*) FROM food_ingredients WHERE food_id='f1'", [], |r| r.get(0)).unwrap();
             assert_eq!(count_c, 2);
+            let cooked: Option<f64> = conn
+                .query_row("SELECT cooked_weight FROM foods WHERE id='f1'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(cooked, Some(75.0));
             // The same ingredient twice in one food is impossible by schema,
             // not merely rejected by the server.
             let dup: i64 = conn.query_row("SELECT count(*) FROM (SELECT ingredient_id FROM food_ingredients WHERE food_id='f1' GROUP BY ingredient_id HAVING count(*)>1)", [], |r| r.get(0)).unwrap();
@@ -380,7 +385,9 @@ mod tests {
         }
 
         // Replace semantics: pushing a shorter composition drops the missing
-        // part instead of accumulating a union of both versions.
+        // part instead of accumulating a union of both versions. This push
+        // omits cookedWeight (as an older client would), so the stored value
+        // must survive instead of being cleared.
         let trimmed = serde_json::json!({
             "items": [{
                 "id": "f1", "name": "Granola", "createdAt": 1000,
@@ -399,6 +406,10 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
             assert_eq!(rows, vec![("i2".to_string(), 150.0)]);
+            let cooked: Option<f64> = conn
+                .query_row("SELECT cooked_weight FROM foods WHERE id='f1'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(cooked, Some(75.0), "an omitted cookedWeight must not clear it");
         }
 
         // A part whose ingredient this server has never seen is skipped without
@@ -427,7 +438,7 @@ mod tests {
             let conn = pool.get().unwrap();
             conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i2','Oats raw',400,13,60,7,1000,1000)", []).unwrap();
             conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i3','Honey',300,0,80,0,1000,1000)", []).unwrap();
-            conn.execute("INSERT INTO foods (id, name, created_at, updated_at) VALUES ('f1','Granola',1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO foods (id, name, created_at, updated_at, cooked_weight) VALUES ('f1','Granola',1000,1000,75.0)", []).unwrap();
             conn.execute("INSERT INTO food_ingredients (food_id, ingredient_id, amount, updated_at) VALUES ('f1','i3',20,1000)", []).unwrap();
             conn.execute("INSERT INTO food_ingredients (food_id, ingredient_id, amount, updated_at) VALUES ('f1','i2',80,1000)", []).unwrap();
         }
@@ -444,6 +455,7 @@ mod tests {
         let items = body["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["name"], "Granola");
+        assert_eq!(items[0]["cookedWeight"], 75.0);
         // Components come back nested, ordered by ingredient name.
         let components = items[0]["components"].as_array().unwrap();
         assert_eq!(components.len(), 2);

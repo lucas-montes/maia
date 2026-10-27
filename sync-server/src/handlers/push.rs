@@ -310,6 +310,10 @@ pub struct FoodPush {
     pub created_at: i64,
     #[serde(rename = "archivedAt", default)]
     pub archived_at: Option<i64>,
+    /// Final weight after cooking. Absent from older clients, so the upsert
+    /// must not overwrite a stored value with NULL.
+    #[serde(rename = "cookedWeight", default)]
+    pub cooked_weight: Option<f64>,
     #[serde(default)]
     pub components: Vec<FoodComponentPush>,
 }
@@ -334,13 +338,14 @@ pub async fn push_foods(
 
     for food in payload.items {
         tx.execute(
-            "INSERT INTO foods (id, name, created_at, archived_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name, created_at=excluded.created_at, archived_at=excluded.archived_at, updated_at=excluded.updated_at, deleted_at=NULL",
+            "INSERT INTO foods (id, name, created_at, archived_at, updated_at, deleted_at, cooked_weight) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6) ON CONFLICT(id) DO UPDATE SET name=excluded.name, created_at=excluded.created_at, archived_at=excluded.archived_at, updated_at=excluded.updated_at, deleted_at=NULL, cooked_weight=COALESCE(excluded.cooked_weight, foods.cooked_weight)",
             rusqlite::params![
                 food.id,
                 food.name,
                 food.created_at,
                 food.archived_at,
-                server_time
+                server_time,
+                food.cooked_weight
             ],
         )
         .unwrap();

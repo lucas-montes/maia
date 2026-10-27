@@ -153,13 +153,18 @@ pub const MIGRATIONS: &[(i64, Step)] = &[
                 OR exercise_type NOT IN ('cardio', 'weightlifting');",
         ),
     ),
+    // A recipe's final weight after cooking. Cooking moves water in or out of
+    // the batch without changing its calories, so clients use this as the
+    // per-100g denominator. NULL means "use the raw component sum", which is
+    // exactly what every existing recipe already does.
+    (6, Step::Guarded(add_food_cooked_weight)),
 ];
 
 /// Highest version in `MIGRATIONS`.
 ///
 /// A database newer than this means the data is newer than the binary, which is
 /// what a Nix rollback looks like. `migrate` refuses rather than serving.
-pub const LATEST_VERSION: i64 = 5;
+pub const LATEST_VERSION: i64 = 6;
 
 /// The v1 schema, exactly as it shipped.
 ///
@@ -802,6 +807,19 @@ fn add_receipt_columns(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// v6: `foods.cooked_weight`, the recipe's final weight after cooking.
+///
+/// Guarded rather than plain SQL because the `CREATE TABLE IF NOT EXISTS foods`
+/// in v1 leaves an existing table untouched, and SQLite has no
+/// `ADD COLUMN IF NOT EXISTS`.
+fn add_food_cooked_weight(conn: &Connection) -> anyhow::Result<()> {
+    if column_exists(conn, "foods", "cooked_weight")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE foods ADD COLUMN cooked_weight REAL")?;
+    Ok(())
+}
+
 fn column_exists(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = stmt.query([])?;
@@ -932,6 +950,24 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
             .unwrap();
         conn
+    }
+
+    /// v6 adds the recipe's final weight after cooking, nullable so legacy
+    /// recipes keep resolving against their raw component sum.
+    #[test]
+    fn foods_gain_cooked_weight_column() {
+        let pool = init_memory().unwrap();
+        let conn = pool.get().unwrap();
+        assert!(column_exists(&conn, "foods", "cooked_weight").unwrap());
+        conn.execute(
+            "INSERT INTO foods (id, name, created_at, updated_at) VALUES ('f1','Granola',1,1)",
+            [],
+        )
+        .unwrap();
+        let value: Option<f64> = conn
+            .query_row("SELECT cooked_weight FROM foods WHERE id='f1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(value, None);
     }
 
     /// Fresh databases go straight to the current version.
