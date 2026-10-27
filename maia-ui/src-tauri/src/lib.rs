@@ -1090,6 +1090,16 @@ fn resolve_food_nutrition(
         return Ok(None);
     }
 
+    // Cooking changes the batch's mass, not its calories, so the final weight
+    // is the denominator. NULL (legacy recipes) means the raw sum.
+    let cooked_weight: Option<f64> = conn
+        .query_row(
+            "SELECT cooked_weight FROM foods WHERE id = ?1",
+            [food_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("cooked weight {e}"))?;
+
     let mut total_amount = 0.0;
     let (mut cal, mut prot, mut carb, mut fat) = (0.0, 0.0, 0.0, 0.0);
     let (mut sod, mut fib, mut sug) = (0.0, 0.0, 0.0);
@@ -1111,8 +1121,13 @@ fn resolve_food_nutrition(
     }
 
     // Each term is already an absolute amount (per-100g x amount), so dividing
-    // by the total weight lands directly on a per-100g figure.
-    let f = 1.0 / total_amount;
+    // by the denominator lands directly on a per-100g figure. A non-positive
+    // cooked weight is treated as unset, matching the phone's resolver.
+    let denominator = match cooked_weight {
+        Some(w) if w > 0.0 => w,
+        _ => total_amount,
+    };
+    let f = 1.0 / denominator;
     Ok(Some(serde_json::json!({
         "caloriesPer100g": cal * f,
         "proteinPer100g": prot * f,
@@ -1121,7 +1136,7 @@ fn resolve_food_nutrition(
         "sodiumPer100g": sod * f,
         "fiberPer100g": fib * f,
         "sugarPer100g": sug * f,
-        "totalAmount": total_amount,
+        "totalAmount": denominator,
     })))
 }
 
@@ -1129,17 +1144,17 @@ fn resolve_food_nutrition(
 #[tauri::command]
 fn list_foods(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
     let conn = match state.db.lock() { Ok(c)=>c, Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("lock {e}"))}};
-    let mut stmt = match conn.prepare("SELECT id, name, created_at, archived_at FROM foods WHERE deleted_at IS NULL ORDER BY name") {
+    let mut stmt = match conn.prepare("SELECT id, name, created_at, archived_at, cooked_weight FROM foods WHERE deleted_at IS NULL ORDER BY name") {
         Ok(s)=>s,
         Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))},
     };
-    let rows: Vec<(String, String, i64, Option<i64>)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+    let rows: Vec<(String, String, i64, Option<i64>, Option<f64>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
         .unwrap()
         .filter_map(|r| r.ok())
         .collect();
     let mut out = Vec::new();
-    for (id, name, created_at, archived_at) in rows {
+    for (id, name, created_at, archived_at, cooked_weight) in rows {
         // Parts come back ordered by ingredient name: there is no stored sort
         // order, because the order carries no meaning.
         let mut cs = match conn.prepare(
@@ -1162,7 +1177,8 @@ fn list_foods(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Va
         };
         out.push(serde_json::json!({
             "id": id, "name": name, "createdAt": created_at,
-            "archivedAt": archived_at, "components": components,
+            "archivedAt": archived_at, "cookedWeight": cooked_weight,
+            "components": components,
             "nutrition": nutrition,
         }));
     }
@@ -1179,6 +1195,7 @@ async fn create_food(
     state: tauri::State<'_, AppState>,
     name: String,
     components: Vec<serde_json::Value>,
+    cooked_weight: Option<f64>,
 ) -> Result<CommandResult<serde_json::Value>, String> {
     if let Err(e) = check_food_name(&name) {
         return Ok(CommandResult { success: false, data: None, error: Some(e) });
@@ -1186,6 +1203,10 @@ async fn create_food(
     if let Err(e) = check_components(&state, &components) {
         return Ok(CommandResult { success: false, data: None, error: Some(e) });
     }
+    let cooked_weight = match check_cooked_weight(cooked_weight) {
+        Ok(w) => w,
+        Err(e) => return Ok(CommandResult { success: false, data: None, error: Some(e) }),
+    };
     let id = uuid::Uuid::now_v7().to_string();
     let payload = serde_json::json!({
         "items": [{
@@ -1193,6 +1214,7 @@ async fn create_food(
             "name": name.trim(),
             "createdAt": now_ms(),
             "archivedAt": serde_json::Value::Null,
+            "cookedWeight": cooked_weight,
             "components": components,
         }],
         "deleted": [],
@@ -1206,6 +1228,7 @@ async fn update_food(
     id: String,
     name: String,
     components: Vec<serde_json::Value>,
+    cooked_weight: Option<f64>,
 ) -> Result<CommandResult<serde_json::Value>, String> {
     if let Err(e) = check_food_name(&name) {
         return Ok(CommandResult { success: false, data: None, error: Some(e) });
@@ -1213,6 +1236,10 @@ async fn update_food(
     if let Err(e) = check_components(&state, &components) {
         return Ok(CommandResult { success: false, data: None, error: Some(e) });
     }
+    let cooked_weight = match check_cooked_weight(cooked_weight) {
+        Ok(w) => w,
+        Err(e) => return Ok(CommandResult { success: false, data: None, error: Some(e) }),
+    };
     // The push replaces the whole row, so the fields the form does not carry --
     // when it was created, whether it is archived -- have to be read back first.
     let Some(mut food) = read_food_for_push(&state, &id) else {
@@ -1221,6 +1248,7 @@ async fn update_food(
     if let Some(obj) = food.as_object_mut() {
         obj.insert("name".into(), serde_json::json!(name.trim()));
         obj.insert("components".into(), serde_json::Value::Array(components));
+        obj.insert("cookedWeight".into(), serde_json::json!(cooked_weight));
     }
     Ok(push_ok("/foods", &serde_json::json!({ "items": [food], "deleted": [] }), serde_json::json!({ "id": id })).await)
 }
@@ -1261,6 +1289,18 @@ fn check_food_name(name: &str) -> Result<(), String> {
         return Err("Name is required".into());
     }
     Ok(())
+}
+
+/// Validates the recipe's final weight after cooking.
+///
+/// It is the per-100g denominator, so zero or negative would make the recipe
+/// unloggable. The desktop editor defaults an empty field to the raw total, so
+/// a missing value here means a caller bypassed that default.
+fn check_cooked_weight(cooked_weight: Option<f64>) -> Result<f64, String> {
+    match cooked_weight {
+        Some(w) if w > 0.0 => Ok(w),
+        _ => Err("Enter the final weight after cooking (greater than zero)".into()),
+    }
 }
 
 /// Validates a composition before it is sent.
@@ -1310,7 +1350,7 @@ fn check_components(
 fn read_food_for_push(state: &tauri::State<'_, AppState>, id: &str) -> Option<serde_json::Value> {
     let conn = state.db.lock().ok()?;
     let mut stmt = conn
-        .prepare("SELECT id, name, created_at, archived_at FROM foods WHERE id=?1 AND deleted_at IS NULL")
+        .prepare("SELECT id, name, created_at, archived_at, cooked_weight FROM foods WHERE id=?1 AND deleted_at IS NULL")
         .ok()?;
     let food = stmt.query_row(params![id], |r| {
         Ok(serde_json::json!({
@@ -1318,6 +1358,7 @@ fn read_food_for_push(state: &tauri::State<'_, AppState>, id: &str) -> Option<se
             "name": r.get::<_, String>(1)?,
             "createdAt": r.get::<_, i64>(2)?,
             "archivedAt": r.get::<_, Option<i64>>(3)?,
+            "cookedWeight": r.get::<_, Option<f64>>(4)?,
         }))
     });
     let food = food.ok()?;

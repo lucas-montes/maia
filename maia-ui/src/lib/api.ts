@@ -313,13 +313,14 @@ export const api = {
 
   listFoods: () => invoke<unknown>("list_foods"),
 
-  createFood: (args: { name: string; components: { ingredientId: string; amount: number }[] }) =>
+  createFood: (args: { name: string; components: { ingredientId: string; amount: number }[]; cookedWeight: number }) =>
     invoke<unknown>("create_food", args),
 
   updateFood: (args: {
     id: string;
     name: string;
     components: { ingredientId: string; amount: number }[];
+    cookedWeight: number;
   }) => invoke<unknown>("update_food", args),
 
   archiveFood: (id: string) => invoke<unknown>("archive_food", { id }),

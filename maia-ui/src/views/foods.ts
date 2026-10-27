@@ -32,12 +32,16 @@ export function mount(root: HTMLElement): () => void {
     const rows = f.items
       .map((it) => {
         const n = it.nutrition;
+        const cooked = it.cookedWeight != null;
         const macros = n
-          ? `<span class="chip">${Number(n.caloriesPer100g).toFixed(0)} kcal</span><span class="chip">P ${Number(n.proteinPer100g).toFixed(1)}</span><span class="chip">C ${Number(n.carbsPer100g).toFixed(1)}</span><span class="chip">F ${Number(n.fatPer100g).toFixed(1)}</span>`
+          ? `<span class="chip">${Number(n.caloriesPer100g).toFixed(0)} kcal</span><span class="chip">P ${Number(n.proteinPer100g).toFixed(1)}</span><span class="chip">C ${Number(n.carbsPer100g).toFixed(1)}</span><span class="chip">F ${Number(n.fatPer100g).toFixed(1)}</span>${cooked ? `<span class="chip">per 100 g cooked</span>` : ""}`
           : `<span class="badge badge-warn">ingredients missing — cannot calculate</span>`;
         const parts = (it.components || [])
           .map((cp: any) => `<span class="rounded-full border border-surface-700 bg-surface-800 px-2 py-1">${escapeHtml(cp.name)} <b class="text-ink-200">${cp.amount}g</b></span>`)
           .join("");
+        const cookedChip = cooked
+          ? `<span class="rounded-full border border-surface-700 bg-surface-800 px-2 py-1">cooked <b class="text-ink-200">${Number(it.cookedWeight).toFixed(0)}g</b></span>`
+          : "";
         const action = it.archivedAt
           ? `<button class="btn btn-ghost btn-xs" data-action="food-restore" data-id="${escapeHtml(it.id)}">Restore</button>`
           : `<button class="btn btn-ghost btn-xs text-err-400" data-action="food-archive" data-id="${escapeHtml(it.id)}">Archive</button>`;
@@ -49,7 +53,7 @@ export function mount(root: HTMLElement): () => void {
             </div>
             <div class="flex shrink-0 gap-2 self-start">${action}<button class="btn btn-ghost btn-xs" data-action="food-edit" data-id="${escapeHtml(it.id)}">Edit</button></div>
           </div>
-          <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-ink-400">${parts || `<span class="text-ink-500">No ingredients yet</span>`}</div>
+          <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-ink-400">${parts || `<span class="text-ink-500">No ingredients yet</span>`}${cookedChip}</div>
         </div>`;
       })
       .join("");
@@ -66,6 +70,13 @@ export function mount(root: HTMLElement): () => void {
    * nothing else; nutrition is derived server-side on save.
    */
   let editorKey = "";
+
+  /** Whether the user has taken over the final-weight field. While false, the
+      field follows the raw total as ingredients are added or reweighed. */
+  let cookedEdited = false;
+
+  const fmtWeight = (v: number): string =>
+    Number.isInteger(v) ? String(v) : String(Number(v.toFixed(2)));
 
   function nameOf(id: string): string {
     const e = ingredientsAtom.get().items.find((x: any) => x.id === id);
@@ -116,6 +127,7 @@ export function mount(root: HTMLElement): () => void {
     f: ReturnType<typeof foodsAtom.get>,
     editing: any,
   ): void {
+    const rawTotal = f.draft.reduce((sum, d) => sum + Number(d.amount || 0), 0);
     modalRoot.innerHTML = `
       <dialog class="modal modal-open" id="food-editor-modal">
         <div class="modal-box flex max-h-[90vh] max-w-2xl flex-col overflow-hidden">
@@ -123,7 +135,7 @@ export function mount(root: HTMLElement): () => void {
             <div>
               <h3 class="font-semibold text-ink-100">${editing ? "Edit" : "New"} Recipe</h3>
               <p class="mt-1 text-xs text-ink-500">
-                Nutrition per 100g is worked out from the amounts below · batch weighs <span data-slot="batch-total">${f.draft.reduce((sum, d) => sum + Number(d.amount || 0), 0).toFixed(0)}</span> g
+                Nutrition per 100 g is worked out from the final weight · raw total <span data-slot="raw-total">${fmtWeight(rawTotal)}</span> g
               </p>
             </div>
             <button class="btn btn-ghost btn-sm" data-action="food-close" aria-label="Close">✕</button>
@@ -136,6 +148,14 @@ export function mount(root: HTMLElement): () => void {
             <div>
               <div class="mb-3 text-xs font-semibold uppercase tracking-widest text-ink-400">Ingredients (<span data-slot="draft-count">${f.draft.length}</span>)</div>
               <div class="space-y-2" data-slot="draft-rows"></div>
+            </div>
+            <div>
+              <label class="field-label">Final weight after cooking</label>
+              <div class="flex items-center gap-2">
+                <input id="food-cooked-weight" type="number" step="any" min="0" value="${escapeHtml(f.editingCookedWeight)}" placeholder="e.g. 700" class="input input-bordered w-full" />
+                <span class="text-sm text-ink-400">g</span>
+              </div>
+              <p class="mt-1 text-xs text-ink-500">Raw total <span data-slot="raw-total">${fmtWeight(rawTotal)}</span> g. Cooking changes the weight, not the calories — per-100g uses this weight.</p>
             </div>
             <div>
               <div class="mb-3 text-xs font-semibold uppercase tracking-widest text-ink-400">Add an ingredient</div>
@@ -167,10 +187,12 @@ export function mount(root: HTMLElement): () => void {
     editing: any,
   ): void {
     const total = f.draft.reduce((sum, d) => sum + Number(d.amount || 0), 0);
-    const totalEl = modalRoot.querySelector("[data-slot='batch-total']");
-    if (totalEl) totalEl.textContent = total.toFixed(0);
+    const totalEls = modalRoot.querySelectorAll("[data-slot='raw-total']");
+    totalEls.forEach((el) => (el.textContent = fmtWeight(total)));
     const countEl = modalRoot.querySelector("[data-slot='draft-count']");
     if (countEl) countEl.textContent = String(f.draft.length);
+    const cookedEl = modalRoot.querySelector("#food-cooked-weight") as HTMLInputElement | null;
+    if (cookedEl && !cookedEdited) cookedEl.value = total > 0 ? fmtWeight(total) : "";
     if (editing) (modalRoot.querySelector("h3") as HTMLElement).textContent = "Edit Recipe";
     const sig = f.draft.map((d) => d.ingredientId).join("|");
     if (sig !== lastDraftSig) {
@@ -247,16 +269,27 @@ export function mount(root: HTMLElement): () => void {
       toast("Every amount must be greater than 0", "err");
       return;
     }
+    const rawTotal = f.draft.reduce((sum, d) => sum + Number(d.amount || 0), 0);
+    const cookedText = f.editingCookedWeight.trim();
+    // An untouched field means "use the raw total", which is the default the
+    // phone form also shows.
+    const cookedWeight = cookedText === "" ? rawTotal : Number.parseFloat(cookedText);
+    if (!Number.isFinite(cookedWeight) || cookedWeight <= 0) {
+      toast("Enter the final weight after cooking (greater than 0)", "err");
+      return;
+    }
     const components = f.draft.map((d) => ({ ingredientId: d.ingredientId, amount: d.amount }));
     const id = f.editingId;
-    const call = id ? api.updateFood({ id, name, components }) : api.createFood({ name, components });
+    const call = id
+      ? api.updateFood({ id, name, components, cookedWeight })
+      : api.createFood({ name, components, cookedWeight });
     call
       .then((res) => {
         if (isEnvelopeFailure(res)) {
           toast(`Could not save: ${(res as { error?: string }).error || "unknown error"}`, "err");
           return;
         }
-        foodsAtom.set({ ...foodsAtom.get(), editorOpen: false, editingId: null, editingName: "", draft: [] });
+        foodsAtom.set({ ...foodsAtom.get(), editorOpen: false, editingId: null, editingName: "", editingCookedWeight: "", draft: [] });
         void load();
       })
       .catch((e) => toast(`Could not save: ${e}`, "err"));
@@ -265,23 +298,29 @@ export function mount(root: HTMLElement): () => void {
   root.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
     if (target.closest("[data-action='food-new']")) {
-      foodsAtom.set({ ...foodsAtom.get(), editorOpen: true, editingId: null, editingName: "", draft: [], search: "" });
+      cookedEdited = false;
+      foodsAtom.set({ ...foodsAtom.get(), editorOpen: true, editingId: null, editingName: "", editingCookedWeight: "", draft: [], search: "" });
       return;
     }
     if (target.closest("[data-action='food-close']") || target.closest("[data-food-editor-backdrop]")) {
-      foodsAtom.set({ ...foodsAtom.get(), editorOpen: false, editingId: null, editingName: "", draft: [] });
+      cookedEdited = false;
+      foodsAtom.set({ ...foodsAtom.get(), editorOpen: false, editingId: null, editingName: "", editingCookedWeight: "", draft: [] });
       return;
     }
     const edit = target.closest<HTMLElement>("[data-action='food-edit']");
     if (edit?.dataset.id) {
       const f = foodsAtom.get().items.find((x) => x.id === edit.dataset.id);
       if (f) {
+        const components = (f.components || []).map((cp: any) => ({ ingredientId: cp.ingredientId, amount: Number(cp.amount) }));
+        const rawTotal = components.reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
+        cookedEdited = f.cookedWeight != null;
         foodsAtom.set({
           ...foodsAtom.get(),
           editorOpen: true,
           editingId: f.id,
           editingName: f.name,
-          draft: (f.components || []).map((cp: any) => ({ ingredientId: cp.ingredientId, amount: Number(cp.amount) })),
+          editingCookedWeight: fmtWeight(Number(f.cookedWeight ?? rawTotal)),
+          draft: components,
           search: "",
         });
       }
@@ -324,7 +363,8 @@ export function mount(root: HTMLElement): () => void {
     if (!editor) return;
 
     if (target.closest("[data-action='food-close']") || target.closest(".modal-backdrop")) {
-      foodsAtom.set({ ...foodsAtom.get(), editorOpen: false, editingId: null, editingName: "", draft: [] });
+      cookedEdited = false;
+      foodsAtom.set({ ...foodsAtom.get(), editorOpen: false, editingId: null, editingName: "", editingCookedWeight: "", draft: [] });
       return;
     }
     const addPart = target.closest<HTMLElement>("[data-action='food-add-part']");
@@ -357,6 +397,11 @@ export function mount(root: HTMLElement): () => void {
       foodsAtom.set({ ...foodsAtom.get(), editingName: (target as HTMLInputElement).value });
       return;
     }
+    if (target.id === "food-cooked-weight") {
+      cookedEdited = true;
+      foodsAtom.set({ ...foodsAtom.get(), editingCookedWeight: (target as HTMLInputElement).value });
+      return;
+    }
     const amount = target.closest<HTMLElement>("[data-action='food-amount']");
     if (amount?.dataset.id) {
       const parsed = Number.parseFloat((target as HTMLInputElement).value);
@@ -372,7 +417,8 @@ export function mount(root: HTMLElement): () => void {
   const onKey = (e: KeyboardEvent): void => {
     if (e.key !== "Escape") return;
     if (foodsAtom.get().editorOpen) {
-      foodsAtom.set({ ...foodsAtom.get(), editorOpen: false, editingId: null, editingName: "", draft: [] });
+      cookedEdited = false;
+      foodsAtom.set({ ...foodsAtom.get(), editorOpen: false, editingId: null, editingName: "", editingCookedWeight: "", draft: [] });
     }
   };
   document.addEventListener("keydown", onKey);

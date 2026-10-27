@@ -150,6 +150,7 @@ export const foodsAtom = atom<
     editorOpen: boolean;
     editingId: string | null;
     editingName: string;
+    editingCookedWeight: string;
     draft: { ingredientId: string; amount: number }[];
     search: string;
   }
@@ -158,6 +159,7 @@ export const foodsAtom = atom<
   editorOpen: false,
   editingId: null,
   editingName: "",
+  editingCookedWeight: "",
   draft: [],
   search: "",
 });
