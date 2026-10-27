@@ -135,13 +135,31 @@ pub const MIGRATIONS: &[(i64, Step)] = &[
              DROP TABLE IF EXISTS experiments;",
         ),
     ),
+    // Older seeds copied `body_part` (`Chest`, `Thighs`, …) into
+    // `exercise_type`. The phone only understands `cardio` and
+    // `weightlifting`, and rendered every other value as cardio. Normalize
+    // the stored value without touching `updated_at`: bumping it would make
+    // every phone re-pull the whole 3,800-row catalogue.
+    (
+        5,
+        Step::Sql(
+            "UPDATE exercises\n\
+             SET exercise_type = CASE\n\
+                 WHEN lower(coalesce(exercise_type, '')) = 'cardio'\n\
+                   OR lower(coalesce(body_part, '')) LIKE '%cardio%' THEN 'cardio'\n\
+                 ELSE 'weightlifting'\n\
+             END\n\
+             WHERE exercise_type IS NULL\n\
+                OR exercise_type NOT IN ('cardio', 'weightlifting');",
+        ),
+    ),
 ];
 
 /// Highest version in `MIGRATIONS`.
 ///
 /// A database newer than this means the data is newer than the binary, which is
 /// what a Nix rollback looks like. `migrate` refuses rather than serving.
-pub const LATEST_VERSION: i64 = 4;
+pub const LATEST_VERSION: i64 = 5;
 
 /// The v1 schema, exactly as it shipped.
 ///
@@ -933,6 +951,56 @@ mod tests {
             count >= 30,
             "expected the v1 schema to be created, saw {count} tables"
         );
+    }
+
+    /// v5 repairs legacy body-part exercise types without making phones
+    /// re-pull the catalogue.
+    #[test]
+    fn migration_v5_normalizes_exercise_types_without_bumping_updated_at() {
+        let conn = legacy_db();
+        super::migrate(&conn).unwrap();
+
+        let rows = [
+            ("e1", "Chest", "Chest", 1000i64),
+            ("e2", "Cardio", "Cardio", 2000),
+            ("e3", "Weightlifting", "Chest", 3000),
+            ("e4", "Yoga", "Hips", 4000),
+            ("e5", "Cardio", "Cardio", 5000),
+        ];
+        for (id, exercise_type, body_part, updated_at) in rows {
+            conn.execute(
+                "INSERT INTO exercises (id, name, exercise_type, body_part, created_at, updated_at)
+                 VALUES (?1, ?1, ?2, ?3, ?4, ?4)",
+                params![id, exercise_type, body_part, updated_at],
+            )
+            .unwrap();
+        }
+
+        // Re-run only v5 against the already-created schema.
+        super::set_user_version(&conn, 4).unwrap();
+        super::migrate(&conn).unwrap();
+
+        let expected = [
+            ("e1", "weightlifting", 1000i64),
+            ("e2", "cardio", 2000),
+            ("e3", "weightlifting", 3000),
+            ("e4", "weightlifting", 4000),
+            ("e5", "cardio", 5000),
+        ];
+        for (id, exercise_type, updated_at) in expected {
+            let (actual_type, actual_updated): (String, i64) = conn
+                .query_row(
+                    "SELECT exercise_type, updated_at FROM exercises WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(actual_type, exercise_type, "wrong type for {id}");
+            assert_eq!(
+                actual_updated, updated_at,
+                "v5 must not bump updated_at for {id}"
+            );
+        }
     }
 
     /// Running the runner again on an up-to-date database does nothing.

@@ -64,7 +64,7 @@ pub fn seed_exercises_to(
         let tips = v.get("tips").map(|x| x.to_string()).unwrap_or("[]".into());
         let faqs = v.get("faqs").and_then(|x| x.as_str()).map(|s| s.to_string());
         let keywords = v.get("keywords").map(|x| x.to_string());
-        let exercise_type = body_part.clone().unwrap_or_else(|| "strength".to_string());
+        let exercise_type = exercise_type_for_body_part(body_part.as_deref());
         let has_image = images_dir.join(format!("{stem}.png")).exists()
             || images_dir.join(format!("{stem}.jpg")).exists();
         let has_video = videos_dir.join(format!("{stem}.mp4")).exists();
@@ -104,4 +104,29 @@ pub fn seed_exercises_to(
     }
     tx.commit()?;
     Ok(count)
+}
+
+/// The phone only understands two exercise types. The catalogue's `body_part`
+/// is a muscle group (`Chest`, `Thighs`, …), not a type, so map it explicitly
+/// instead of storing the body part in the type column.
+fn exercise_type_for_body_part(body_part: Option<&str>) -> &'static str {
+    match body_part {
+        Some(value) if value.to_ascii_lowercase().contains("cardio") => "cardio",
+        _ => "weightlifting",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exercise_type_for_body_part;
+
+    #[test]
+    fn body_part_maps_to_a_phone_exercise_type() {
+        assert_eq!(exercise_type_for_body_part(Some("Cardio")), "cardio");
+        assert_eq!(exercise_type_for_body_part(Some("cardio")), "cardio");
+        assert_eq!(exercise_type_for_body_part(Some("Chest")), "weightlifting");
+        assert_eq!(exercise_type_for_body_part(Some("Hips")), "weightlifting");
+        assert_eq!(exercise_type_for_body_part(Some("Yoga")), "weightlifting");
+        assert_eq!(exercise_type_for_body_part(None), "weightlifting");
+    }
 }
