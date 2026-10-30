@@ -1,8 +1,20 @@
 {
   "nutriments_path": null,
   "receipts_path": null,
-  "bank_statements_path": null,
-  "investments_statements_path": null,
   "database": "maia.db",
+  "base_currency": "EUR",
+  "statements": {
+    "watch_dirs": [
+      { "path": "statements/inbox/credit_agricole", "source": "credit_agricole" },
+      { "path": "statements/inbox/firstrade", "source": "firstrade" }
+    ],
+    "feeds": {
+      "trading212": {
+        "enabled": false,
+        "environment": "live",
+        "lookback_days": 90
+      }
+    }
+  },
   "models_api": []
 }

@@ -25,6 +25,7 @@ const KNOWN: ViewId[] = [
   "tags",
   "accounts",
   "transactions",
+  "statements",
   "fxRates",
 ];
 

@@ -658,14 +658,28 @@ pub async fn push_fx_rates(
 
     // The primary key is the (code, base, date) triple rather than an id, so
     // both the upsert and the tombstone have to name all three.
+    //
+    // A manual rate wins over an automatic one. The phone may push a fetched
+    // rate for a day the user already corrected by hand; overwriting it would
+    // silently undo that correction. `MAX(manual)` also lets an explicit manual
+    // push upgrade an automatic row, which is the one direction that should
+    // change the flag.
     for rate in payload.rates {
         tx.execute(
             "INSERT INTO fx_rates (code, base_code, rate_date, rate_to_base, updated_at, manual, deleted_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
              ON CONFLICT(code, base_code, rate_date) DO UPDATE SET
-                rate_to_base=excluded.rate_to_base,
-                updated_at=excluded.updated_at,
-                manual=excluded.manual,
+                rate_to_base=CASE
+                    WHEN fx_rates.manual = 1 AND excluded.manual = 0
+                        THEN fx_rates.rate_to_base
+                    ELSE excluded.rate_to_base
+                END,
+                updated_at=CASE
+                    WHEN fx_rates.manual = 1 AND excluded.manual = 0
+                        THEN fx_rates.updated_at
+                    ELSE excluded.updated_at
+                END,
+                manual=MAX(fx_rates.manual, excluded.manual),
                 deleted_at=NULL",
             rusqlite::params![
                 rate.code,

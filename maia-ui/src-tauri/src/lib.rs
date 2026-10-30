@@ -898,6 +898,105 @@ async fn create_fx_rate(code: String, baseCode: String, rateDate: String, rateTo
     )
     .await
 }
+// --- Statements -----------------------------------------------------------
+//
+// Staging lives on the server: it parses files and provider feeds, and it is
+// the only process that may write the database. The desktop review screen is a
+// thin client over those endpoints, like the phone.
+
+fn json_result(result: Result<serde_json::Value, api::ApiError>) -> CommandResult<serde_json::Value> {
+    match result {
+        Ok(value) => CommandResult { success: true, data: Some(value), error: None },
+        Err(error) => CommandResult { success: false, data: None, error: Some(error.to_message()) },
+    }
+}
+
+/// Whitelists the list filters, so a value from the webview cannot turn into
+/// arbitrary query syntax. These are the only statuses and sources the server
+/// produces.
+fn statement_list_path(status: Option<&str>, source: Option<&str>) -> String {
+    let mut path = String::from("/statements");
+    let mut separator = '?';
+    if let Some(status) = status.filter(|value| {
+        matches!(*value, "staged" | "partial" | "imported" | "ignored" | "error")
+    }) {
+        path.push(separator);
+        path.push_str("status=");
+        path.push_str(status);
+        separator = '&';
+    }
+    if let Some(source) = source.filter(|value| {
+        matches!(*value, "credit_agricole" | "trading212" | "firstrade")
+    }) {
+        path.push(separator);
+        path.push_str("source=");
+        path.push_str(source);
+    }
+    path
+}
+
+#[tauri::command]
+async fn list_statements(status: Option<String>, source: Option<String>) -> CommandResult<serde_json::Value> {
+    let path = statement_list_path(status.as_deref(), source.as_deref());
+    json_result(api::get(&path).await)
+}
+
+#[tauri::command]
+async fn get_statement(id: String) -> CommandResult<serde_json::Value> {
+    json_result(api::get(&format!("/statements/{id}")).await)
+}
+
+#[tauri::command]
+async fn import_statement(
+    id: String,
+    lines: Vec<serde_json::Value>,
+    auto_link: Option<bool>,
+) -> CommandResult<serde_json::Value> {
+    let body = serde_json::json!({
+        "lines": lines,
+        "autoLink": auto_link.unwrap_or(true),
+    });
+    json_result(api::post(&format!("/statements/{id}/import"), &body).await)
+}
+
+#[tauri::command]
+async fn ignore_statement(id: String) -> CommandResult<serde_json::Value> {
+    json_result(api::post(&format!("/statements/{id}/ignore"), &serde_json::json!({})).await)
+}
+
+#[tauri::command]
+async fn delete_statement(id: String) -> CommandResult<serde_json::Value> {
+    json_result(api::delete(&format!("/statements/{id}")).await)
+}
+
+#[tauri::command]
+async fn scan_statements() -> CommandResult<serde_json::Value> {
+    json_result(api::post("/statements/scan", &serde_json::json!({})).await)
+}
+
+#[tauri::command]
+async fn list_statement_feeds() -> CommandResult<serde_json::Value> {
+    json_result(api::get("/statement-feeds").await)
+}
+
+#[tauri::command]
+async fn get_statement_feed_settings() -> CommandResult<serde_json::Value> {
+    json_result(api::get("/statement-feeds/settings").await)
+}
+
+/// Writes the Trading 212 credentials to the per-user overlay on the server.
+/// The command never reads them back: the form only ever learns whether a
+/// secret is set, so a screen share or a screenshot cannot leak it.
+#[tauri::command]
+async fn save_statement_feed_settings(settings: serde_json::Value) -> CommandResult<serde_json::Value> {
+    json_result(api::put("/statement-feeds/settings", &settings).await)
+}
+
+#[tauri::command]
+async fn sync_statement_feed(provider: String) -> CommandResult<serde_json::Value> {
+    json_result(api::post(&format!("/statement-feeds/{provider}/sync"), &serde_json::json!({})).await)
+}
+
 #[tauri::command]
 async fn update_ingredient(state: tauri::State<'_, AppState>, id: String, name: String, caloriesPer100g: f64, proteinPer100g: f64, carbsPer100g: f64, fatPer100g: f64) -> Result<CommandResult<serde_json::Value>, String> {
     // POST /ingredients replaces the whole row, so an edit has to start from
@@ -1870,6 +1969,30 @@ fn reject_deployment_keys(
     }
 }
 
+/// Merges [incoming] into [base] instead of replacing it.
+///
+/// The form only knows the keys it renders, but the same overlay holds the
+/// Trading 212 feed settings written by the statement endpoints. Replacing the
+/// file wholesale would silently erase them on the next Settings save, so only
+/// the keys the form actually sent are overwritten. Objects merge recursively
+/// for the same reason one level down: `receipts.archived_dir` must not take
+/// the rest of `receipts` with it.
+fn merge_json_object(
+    mut base: serde_json::Map<String, serde_json::Value>,
+    incoming: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    for (key, value) in incoming {
+        let merged = match (base.get(&key), &value) {
+            (Some(serde_json::Value::Object(existing)), serde_json::Value::Object(new)) => {
+                serde_json::Value::Object(merge_json_object(existing.clone(), new.clone()))
+            }
+            _ => value,
+        };
+        base.insert(key, merged);
+    }
+    base
+}
+
 /// Writes the desktop paths to the per-user overlay.
 ///
 /// Refuses deployment keys outright rather than silently dropping them: a form
@@ -1916,12 +2039,26 @@ fn save_config(json: String) -> ConfigResponse {
             };
         }
     }
-    if let Err(e) = fs::write(&path, serde_json::Value::Object(incoming).to_string()) {
+    let merged = merge_json_object(read_overlay(), incoming);
+    if let Err(e) = fs::write(&path, serde_json::Value::Object(merged).to_string()) {
         return ConfigResponse {
             success: false,
             data: None,
             error: Some(format!("Failed to write {}: {e}", path.display())),
         };
+    }
+    // The overlay can hold provider credentials written by the server, so keep
+    // it owner-only even though this path only writes desktop settings.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
+            return ConfigResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to secure {}: {e}", path.display())),
+            };
+        }
     }
     ConfigResponse {
         success: true,
@@ -1979,6 +2116,16 @@ pub fn run() {
             list_accounts,
             list_transactions,
             list_fx_rates,
+            list_statements,
+            get_statement,
+            import_statement,
+            ignore_statement,
+            delete_statement,
+            scan_statements,
+            list_statement_feeds,
+            get_statement_feed_settings,
+            save_statement_feed_settings,
+            sync_statement_feed,
             create_store,
             create_fx_rate,
             update_ingredient,
@@ -2015,7 +2162,12 @@ mod tests {
     /// working.
     #[test]
     fn every_invoked_command_is_registered() {
-        let frontend = include_str!("../../src/main.ts");
+        // Both halves of the frontend invoke commands: the shell warms two
+        // directly, and everything else goes through the typed API layer.
+        let frontend = concat!(
+            include_str!("../../src/main.ts"),
+            include_str!("../../src/lib/api.ts"),
+        );
         let backend = include_str!("lib.rs");
 
         let handler_block = backend
@@ -2034,9 +2186,26 @@ mod tests {
         let mut rest = frontend;
         while let Some(start) = rest.find("invoke") {
             rest = &rest[start + "invoke".len()..];
-            // Skip the optional generic argument, then read the string literal.
-            let after_generic = rest.find('<').and_then(|g| rest[g..].find('>').map(|e| g + e + 1)).unwrap_or(0);
-            let candidate = rest[after_generic..].trim_start();
+            let bytes = rest.as_bytes();
+            let mut idx = 0;
+            while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+                idx += 1;
+            }
+            // Skip a generic argument, balancing nested angle brackets:
+            // `invoke<Envelope<StatementDetail>>(...)` closes twice.
+            if idx < bytes.len() && bytes[idx] == b'<' {
+                let mut depth = 1usize;
+                idx += 1;
+                while idx < bytes.len() && depth > 0 {
+                    match bytes[idx] {
+                        b'<' => depth += 1,
+                        b'>' => depth -= 1,
+                        _ => {}
+                    }
+                    idx += 1;
+                }
+            }
+            let candidate = rest[idx..].trim_start();
             if let Some(args) = candidate.strip_prefix('(') {
                 if let Some(open) = args.find('"') {
                     let literal = &args[open + 1..];
@@ -2126,11 +2295,38 @@ mod tests {
         let incoming = keys_of(json!({
             "receipts_path": "/home/lucas/receipts",
             "nutriments_path": "/home/lucas/nutriments",
-            "bank_statements_path": "/home/lucas/bank",
-            "investments_statements_path": "/home/lucas/investments",
             "receipts": { "archived_dir": "/home/lucas/archive" },
         }));
         assert_eq!(reject_deployment_keys(&incoming), Ok(()));
+    }
+
+    #[test]
+    fn saving_desktop_paths_keeps_the_feed_settings() {
+        // The overlay is shared with the statement endpoints, which write
+        // `statements.feeds`. A Settings save must not erase what it does not
+        // render, or the next save would silently disable Trading 212.
+        let existing = json!({
+            "receipts_path": "/old",
+            "statements": { "feeds": { "trading212": { "enabled": true, "api_key": "secret" } } },
+            "receipts": { "archived_dir": "/old-archive", "other": "kept" },
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let incoming = json!({
+            "receipts_path": "/new",
+            "receipts": { "archived_dir": "/new-archive" },
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let merged = serde_json::Value::Object(merge_json_object(existing, incoming));
+        assert_eq!(merged["receipts_path"], "/new");
+        assert_eq!(merged["statements"]["feeds"]["trading212"]["enabled"], true);
+        assert_eq!(merged["statements"]["feeds"]["trading212"]["api_key"], "secret");
+        assert_eq!(merged["receipts"]["archived_dir"], "/new-archive");
+        assert_eq!(merged["receipts"]["other"], "kept");
     }
 
     #[test]

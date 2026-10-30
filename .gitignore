@@ -24,3 +24,13 @@ exercise_media
 /sync-server/testdata/*
 !/sync-server/testdata/.gitkeep
 !/sync-server/testdata/README.md
+
+# Statement drop folders: exports are personal documents. The inbox keeps its
+# layout in the checkout with `.gitkeep`; the server's stored copies (written
+# beside the database, under statements/<source>/) are runtime data.
+/statements/inbox/credit_agricole/*
+!/statements/inbox/credit_agricole/.gitkeep
+/statements/inbox/firstrade/*
+!/statements/inbox/firstrade/.gitkeep
+/statements/credit_agricole/
+/statements/firstrade/

@@ -9,6 +9,7 @@ pub mod openfoodfacts;
 pub mod receipt_ocr;
 pub mod seed;
 pub mod server;
+pub mod statements;
 
 pub use config::Config;
 pub use server::{create_router, start_server, AppState};
@@ -1874,6 +1875,590 @@ mod tests {
                 .unwrap();
             assert!(deleted.is_some());
         }
+        handle.abort();
+    }
+}
+
+/// Statement staging and import, exercised against a real in-memory database.
+///
+/// These skip HTTP: the store is where idempotency, duplicate detection,
+/// matching and FX resolution live, and testing it directly keeps failures
+/// pointed at one rule instead of at routing.
+#[cfg(test)]
+mod statement_tests {
+    use crate::db;
+    use crate::statements::{
+        SourceId, ToDatabaseRecord,
+        draft::{LineKind, SaveOutcome, StatementDraft, StatementLineDraft, SuggestedType},
+        store::{self, ImportLine, ImportRequest},
+    };
+
+    fn ms(year: i32, month: u32, day: u32) -> i64 {
+        chrono::NaiveDate::from_ymd_opt(year, month, day)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis()
+    }
+
+    fn line(description: &str, amount: f64, posted_at: i64, key: &str) -> StatementLineDraft {
+        StatementLineDraft {
+            source_ref: None,
+            posted_at,
+            description: description.to_string(),
+            amount,
+            currency_code: "EUR".to_string(),
+            balance_after: None,
+            category_hint: None,
+            line_kind: if amount < 0.0 {
+                LineKind::Debit
+            } else {
+                LineKind::Credit
+            },
+            suggested_type: Some(if amount < 0.0 {
+                SuggestedType::Expense
+            } else {
+                SuggestedType::Income
+            }),
+            suggested_category: None,
+            metadata: serde_json::Value::Null,
+            fingerprint: key.to_string(),
+            dedupe_key: key.to_string(),
+        }
+    }
+
+    fn draft(
+        source_key: &str,
+        hash: &str,
+        account_number: &str,
+        lines: Vec<StatementLineDraft>,
+    ) -> StatementDraft {
+        StatementDraft {
+            source: SourceId::CreditAgricole,
+            institution: "Crédit Agricole".to_string(),
+            account_name: format!("Account {account_number}"),
+            account_number: Some(account_number.to_string()),
+            currency_code: "EUR".to_string(),
+            period_start: None,
+            period_end: None,
+            opening_balance: None,
+            closing_balance: None,
+            source_path: None,
+            stored_path: None,
+            source_hash: hash.to_string(),
+            source_key: source_key.to_string(),
+            parsed: serde_json::Value::Null,
+            warnings: Vec::new(),
+            lines,
+        }
+    }
+
+    fn save(pool: &db::DbPool, drafts: Vec<StatementDraft>) -> Vec<SaveOutcome> {
+        let mut conn = pool.get().unwrap();
+        let tx = conn.transaction().unwrap();
+        let outcomes = drafts.save(&tx).unwrap();
+        tx.commit().unwrap();
+        outcomes
+    }
+
+    fn import(
+        pool: &db::DbPool,
+        statement_id: &str,
+        request: ImportRequest,
+    ) -> store::ImportOutcome {
+        let mut conn = pool.get().unwrap();
+        let tx = conn.transaction().unwrap();
+        let outcome = store::import_statement(&tx, statement_id, request, "EUR").unwrap();
+        tx.commit().unwrap();
+        outcome
+    }
+
+    fn empty_request() -> ImportRequest {
+        ImportRequest {
+            lines: Vec::<ImportLine>::new(),
+            account_id: None,
+            counterpart_account_id: None,
+            auto_link: None,
+        }
+    }
+
+    #[test]
+    fn restaging_the_same_bytes_is_a_no_op() {
+        let pool = db::init_memory().unwrap();
+        let statement = draft(
+            "credit_agricole:111:hash",
+            "hash",
+            "111",
+            vec![line("Coffee", -3.5, ms(2026, 10, 1), "coffee")],
+        );
+
+        let first = save(&pool, vec![statement.clone()]);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].inserted_lines, 1);
+        assert!(first[0].skipped_reason.is_none());
+
+        let second = save(&pool, vec![statement]);
+        assert_eq!(second[0].inserted_lines, 0);
+        assert_eq!(second[0].pending_lines, 1);
+        assert!(
+            second[0].skipped_reason.is_some(),
+            "the same hash must be recognised as already ingested"
+        );
+
+        let conn = pool.get().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM bank_statement_lines", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn restaging_a_deleted_statement_revives_it() {
+        let pool = db::init_memory().unwrap();
+        let statement = draft(
+            "credit_agricole:444:hash",
+            "hash",
+            "444",
+            vec![line("Coffee", -3.5, ms(2026, 10, 4), "revive")],
+        );
+        let first = save(&pool, vec![statement.clone()]);
+        let id = first[0].statement_id.clone();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "UPDATE bank_statements SET deleted_at=1 WHERE id=?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        }
+
+        // Dropping the same file again is the only way back from a mistaken
+        // delete, so it must revive the row instead of reporting "already
+        // ingested" for something the list no longer shows.
+        let again = save(&pool, vec![statement]);
+        assert_eq!(again[0].statement_id, id);
+        assert!(again[0].skipped_reason.is_none());
+        assert_eq!(again[0].inserted_lines, 1);
+
+        let conn = pool.get().unwrap();
+        let deleted: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at FROM bank_statements WHERE id=?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(deleted.is_none(), "the revived statement must be visible");
+    }
+
+    #[test]
+    fn a_line_seen_in_another_statement_is_stored_as_duplicate() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let a = draft(
+            "credit_agricole:111:hash-a",
+            "hash-a",
+            "111",
+            vec![line("Coffee", -3.5, day, "same-line")],
+        );
+        let b = draft(
+            "credit_agricole:222:hash-b",
+            "hash-b",
+            "222",
+            vec![line("Coffee", -3.5, day, "same-line")],
+        );
+
+        let outcomes = save(&pool, vec![a, b]);
+        assert_eq!(outcomes[1].duplicate_lines, 1);
+
+        let duplicate_line_id = {
+            let conn = pool.get().unwrap();
+            let (id, status, duplicate_of): (String, String, Option<String>) = conn
+                .query_row(
+                    "SELECT id, status, duplicate_of FROM bank_statement_lines
+                     WHERE statement_id=?1",
+                    rusqlite::params![outcomes[1].statement_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "duplicate");
+            assert!(duplicate_of.is_some());
+            id
+        };
+
+        // A duplicate is visible but not importable, even when selected by id.
+        let request = ImportRequest {
+            lines: vec![ImportLine {
+                id: duplicate_line_id,
+                action: store::ImportAction::Import,
+                type_: None,
+                category: None,
+                account_id: None,
+                counterpart_account_id: None,
+            }],
+            account_id: None,
+            counterpart_account_id: None,
+            auto_link: None,
+        };
+        let outcome = import(&pool, &outcomes[1].statement_id, request);
+        assert_eq!(outcome.created, 0);
+        assert_eq!(outcome.lines[0].status, "duplicate");
+    }
+
+    #[test]
+    fn high_confidence_pair_imports_as_one_transfer() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 16);
+        let debit = draft(
+            "credit_agricole:111:hash-out",
+            "hash-out",
+            "111",
+            vec![line(
+                "Virement émis VIR INST vers Trading 212 36873033",
+                -1000.0,
+                day,
+                "out",
+            )],
+        );
+        let credit = draft(
+            "credit_agricole:222:hash-in",
+            "hash-in",
+            "222",
+            vec![line(
+                "Virement en votre faveur DE MONSIEUR MONTES",
+                1000.0,
+                day,
+                "in",
+            )],
+        );
+
+        let outcomes = save(&pool, vec![debit, credit]);
+        {
+            let conn = pool.get().unwrap();
+            let (status, confidence): (String, f64) = conn
+                .query_row("SELECT status, confidence FROM transfer_matches", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap();
+            assert_eq!(status, "auto");
+            assert!(confidence >= 0.95, "confidence was {confidence}");
+        }
+
+        // Selecting only the debit side expands to its counterpart.
+        let outcome = import(&pool, &outcomes[0].statement_id, empty_request());
+        assert_eq!(outcome.created, 1, "{:?}", outcome.lines);
+        assert_eq!(outcome.lines.len(), 2);
+
+        let transaction_id = outcome.lines[0].transaction_id.clone().unwrap();
+        assert_eq!(
+            outcome.lines[1].transaction_id.as_deref(),
+            Some(transaction_id.as_str())
+        );
+
+        let conn = pool.get().unwrap();
+        let (type_, amount, from, to): (String, f64, String, String) = conn
+            .query_row(
+                "SELECT type, amount, account_id, to_account_id FROM transactions WHERE id=?1",
+                rusqlite::params![transaction_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(type_, "transfer");
+        assert_eq!(amount, 1000.0);
+        assert_ne!(from, to, "a transfer must have two distinct accounts");
+
+        let imported: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM bank_statement_lines
+                 WHERE status='imported' AND transaction_id=?1",
+                rusqlite::params![transaction_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(imported, 2);
+    }
+
+    /// Importing one side on its own must not later be "upgraded" into a pair:
+    /// the pair would be a second transaction for the same money and would
+    /// repoint the first line at it.
+    #[test]
+    fn a_pair_whose_other_side_is_already_imported_is_not_created() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 16);
+        let debit = draft(
+            "credit_agricole:111:hash-out",
+            "hash-out",
+            "111",
+            vec![line(
+                "Virement émis VIR INST vers Trading 212 36873033",
+                -1000.0,
+                day,
+                "out",
+            )],
+        );
+        let credit = draft(
+            "credit_agricole:222:hash-in",
+            "hash-in",
+            "222",
+            vec![line(
+                "Virement en votre faveur DE MONSIEUR MONTES",
+                1000.0,
+                day,
+                "in",
+            )],
+        );
+        let outcomes = save(&pool, vec![debit, credit]);
+
+        let debit_line_id: String = {
+            let conn = pool.get().unwrap();
+            conn.query_row(
+                "SELECT id FROM bank_statement_lines WHERE statement_id=?1",
+                rusqlite::params![outcomes[0].statement_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let request = ImportRequest {
+            lines: vec![ImportLine {
+                id: debit_line_id,
+                action: store::ImportAction::Import,
+                type_: None,
+                category: None,
+                account_id: None,
+                counterpart_account_id: None,
+            }],
+            account_id: None,
+            counterpart_account_id: None,
+            auto_link: Some(false),
+        };
+        let first = import(&pool, &outcomes[0].statement_id, request);
+        assert_eq!(first.created, 1, "{:?}", first.lines);
+        let first_transaction = first.lines[0].transaction_id.clone().unwrap();
+
+        // The other side is still pending, but its counterpart is already
+        // booked, so it imports alone instead of forming a transfer.
+        let second = import(&pool, &outcomes[1].statement_id, empty_request());
+        assert_eq!(second.created, 1, "{:?}", second.lines);
+        assert_ne!(
+            second.lines[0].transaction_id.as_deref(),
+            Some(first_transaction.as_str())
+        );
+
+        let conn = pool.get().unwrap();
+        let transactions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(transactions, 2, "one transaction per imported line");
+        let status: String = conn
+            .query_row("SELECT status FROM transfer_matches", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "dismissed");
+    }
+
+    /// The two sides of a CA transfer live in different account sections, so
+    /// the review screen only has one of them in its own line list. The detail
+    /// response has to carry the counterpart, or the transfer group would be
+    /// invisible exactly when it matters.
+    #[tokio::test]
+    async fn detail_includes_a_counterpart_from_another_statement() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 16);
+        let debit = draft(
+            "credit_agricole:111:hash-out",
+            "hash-out",
+            "111",
+            vec![line(
+                "Virement émis VIR INST vers Trading 212 36873033",
+                -1000.0,
+                day,
+                "out",
+            )],
+        );
+        let credit = draft(
+            "credit_agricole:222:hash-in",
+            "hash-in",
+            "222",
+            vec![line(
+                "Virement en votre faveur DE MONSIEUR MONTES",
+                1000.0,
+                day,
+                "in",
+            )],
+        );
+        let outcomes = save(&pool, vec![debit, credit]);
+
+        let (port, handle) = crate::server::start_test_server_with_db(pool).await;
+        let body: serde_json::Value = reqwest::Client::new()
+            .get(format!(
+                "http://127.0.0.1:{port}/statements/{}",
+                outcomes[0].statement_id
+            ))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let matches = body["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["status"], "auto");
+        assert!(
+            matches[0]["debit"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Trading 212"),
+            "the debit side is missing: {matches:?}"
+        );
+        assert!(
+            matches[0]["credit"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("MONTES"),
+            "the counterpart from the other statement is missing: {matches:?}"
+        );
+        handle.abort();
+    }
+
+    #[test]
+    fn a_tombstoned_transaction_is_never_resurrected() {
+        let pool = db::init_memory().unwrap();
+        let statement = draft(
+            "credit_agricole:333:hash",
+            "hash",
+            "333",
+            vec![line("Coffee", -3.5, ms(2026, 10, 2), "solo")],
+        );
+        let outcomes = save(&pool, vec![statement]);
+        let statement_id = outcomes[0].statement_id.clone();
+
+        let first = import(&pool, &statement_id, empty_request());
+        assert_eq!(first.created, 1);
+        let transaction_id = first.lines[0].transaction_id.clone().unwrap();
+
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "UPDATE transactions SET deleted_at=?1 WHERE id=?2",
+                rusqlite::params![ms(2026, 10, 3), transaction_id],
+            )
+            .unwrap();
+            // Put the line back in the state a user would see if they deleted
+            // the transaction and asked for the statement again.
+            conn.execute(
+                "UPDATE bank_statement_lines SET status='pending', transaction_id=NULL WHERE statement_id=?1",
+                rusqlite::params![statement_id],
+            )
+            .unwrap();
+        }
+
+        let second = import(&pool, &statement_id, empty_request());
+        assert_eq!(second.created, 0);
+        assert_eq!(second.errors, 1);
+        let error = second.lines[0].error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("deleted"),
+            "unexpected import error: {error}"
+        );
+
+        let conn = pool.get().unwrap();
+        let deleted: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at FROM transactions WHERE id=?1",
+                rusqlite::params![transaction_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(deleted.is_some(), "the tombstone must survive the import");
+    }
+
+    #[test]
+    fn import_uses_the_latest_fx_snapshot_on_or_before_the_line() {
+        let pool = db::init_memory().unwrap();
+        {
+            let conn = pool.get().unwrap();
+            for (date, rate) in [
+                ("2026-10-01", 0.90),
+                ("2026-10-05", 0.95),
+                ("2026-10-10", 0.99),
+            ] {
+                conn.execute(
+                    "INSERT INTO fx_rates (code, base_code, rate_date, rate_to_base, updated_at)
+                     VALUES ('USD', 'EUR', ?1, ?2, 1)",
+                    rusqlite::params![date, rate],
+                )
+                .unwrap();
+            }
+        }
+
+        let mut usd_line = line("Broker fee", -10.0, ms(2026, 10, 7), "usd-line");
+        usd_line.currency_code = "USD".to_string();
+        let mut statement = draft("firstrade:acct:hash", "hash", "acct", vec![usd_line]);
+        statement.source = SourceId::Firstrade;
+        statement.currency_code = "USD".to_string();
+
+        let outcomes = save(&pool, vec![statement]);
+        let outcome = import(&pool, &outcomes[0].statement_id, empty_request());
+        assert_eq!(outcome.created, 1, "{:?}", outcome.lines);
+
+        let conn = pool.get().unwrap();
+        let (rate, amount_base): (f64, f64) = conn
+            .query_row(
+                "SELECT rate_used, amount_base FROM transactions WHERE id=?1",
+                rusqlite::params![outcome.lines[0].transaction_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rate, 0.95, "must pick 2026-10-05, not a later snapshot");
+        assert!((amount_base - 9.5).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn pull_fx_rates_falls_back_to_the_previous_snapshot() {
+        let pool = db::init_memory().unwrap();
+        {
+            let conn = pool.get().unwrap();
+            for (code, date, rate) in [
+                ("USD", "2026-10-01", 0.90),
+                ("USD", "2026-10-05", 0.95),
+                ("USD", "2026-10-10", 0.99),
+                ("GBP", "2026-10-10", 1.20),
+            ] {
+                conn.execute(
+                    "INSERT INTO fx_rates (code, base_code, rate_date, rate_to_base, updated_at)
+                     VALUES (?1, 'EUR', ?2, ?3, 1)",
+                    rusqlite::params![code, date, rate],
+                )
+                .unwrap();
+            }
+        }
+
+        let (port, handle) = crate::server::start_test_server_with_db(pool).await;
+        let body: serde_json::Value = reqwest::Client::new()
+            .get(format!(
+                "http://127.0.0.1:{port}/fx-rates?base=EUR&date=2026-10-07&since=0"
+            ))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(
+            items.len(),
+            1,
+            "only USD has a snapshot on or before the date"
+        );
+        assert_eq!(items[0]["code"], "USD");
+        assert_eq!(items[0]["rateToBase"], 0.95);
+        assert_eq!(items[0]["date"], "2026-10-05");
         handle.abort();
     }
 }

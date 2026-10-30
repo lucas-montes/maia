@@ -8,6 +8,14 @@
   cfg = config.services.maia;
   inherit (lib) mkIf mkOption mkEnableOption types optionalAttrs;
 
+  # The overlay holds the Trading 212 credentials and statement settings the
+  # server writes on the user's behalf. It lives under the home directory, so it
+  # has to exist before the unit starts (ReadWritePaths= fails on a missing
+  # path) and the unit has to be granted write access to it explicitly, since
+  # ProtectHome= makes /home read-only.
+  userHome = (config.users.users.${cfg.user} or {}).home or null;
+  overlayDir = "${userHome}/.config/maia";
+
   # Everything the server needs, in one file. Rendered rather than assembled
   # from environment variables so that what the service reads is inspectable in
   # one place, and so the port the firewall opens and the port the server binds
@@ -27,6 +35,21 @@
     api_key = cfg.apiKey;
     model_api = cfg.modelApiKey;
     model_name = cfg.modelName;
+    # Statement imports resolve FX into this currency. The phone keeps its own
+    # display currency; this one is what the server stores alongside each draft.
+    base_currency = cfg.baseCurrency;
+    statements = {
+      # Left unset, the store lives at <dataDir>/statements, inside the
+      # StateDirectory systemd makes writable.
+      watch_dirs = map (entry: {
+        inherit (entry) path source;
+      }) cfg.statementWatchDirs;
+      feeds.trading212 = {
+        enabled = cfg.trading212.enable;
+        environment = cfg.trading212.environment;
+        lookback_days = cfg.trading212.lookbackDays;
+      };
+    };
   } // optionalAttrs (cfg.seedDir != null) {
     seed_dir = cfg.seedDir;
   };
@@ -124,6 +147,72 @@ in
       description = "Vision model id used for receipt OCR.";
     };
 
+    baseCurrency = mkOption {
+      type = types.strMatching "[A-Za-z]{3}";
+      default = "EUR";
+      description = ''
+        Currency statement imports resolve into. Stored on each draft
+        transaction as `amount_base`, using the latest FX snapshot on or before
+        the line's posting date. The phone keeps its own display currency; this
+        one is the server's bookkeeping currency.
+      '';
+    };
+
+    statementWatchDirs = mkOption {
+      type = types.listOf (types.submodule {
+        options = {
+          path = mkOption {
+            type = types.str;
+            description = ''
+              Absolute directory the server polls for statement files. A string
+              rather than `types.path` on purpose: a path value is copied into
+              the Nix store when the config is rendered, which would publish
+              personal bank exports to every local user.
+            '';
+          };
+          source = mkOption {
+            type = types.enum ["credit_agricole" "firstrade"];
+            description = ''
+              Parser to use for every file in this directory. The server does
+              not guess from the extension: one directory holds one source's
+              exports, which is what makes a file's structure unambiguous.
+            '';
+          };
+        };
+      });
+      default = [];
+      description = ''
+        Directories polled for CSV statements. New files are staged, not
+        imported: the review screen decides what becomes a draft transaction.
+        The service user must be able to read these paths.
+      '';
+    };
+
+    trading212 = {
+      enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Poll the Trading 212 history API. Credentials are deliberately not a
+          NixOS option: they live in the per-user overlay and are written by the
+          desktop Settings screen, so they never land in the world-readable
+          /etc/maia/config.json or in the Nix store.
+        '';
+      };
+
+      environment = mkOption {
+        type = types.enum ["live" "demo"];
+        default = "live";
+        description = "Which Trading 212 API to talk to.";
+      };
+
+      lookbackDays = mkOption {
+        type = types.addCheck types.int (days: days >= 1 && days <= 3650);
+        default = 90;
+        description = "How far back each sync fetches, in days.";
+      };
+    };
+
     openFirewall = mkOption {
       type = types.bool;
       default = true;
@@ -160,9 +249,14 @@ in
     # app unable to open the database whenever the service is not currently running --
     # and the two are separate processes. Owner and mode match StateDirectory so
     # systemd and tmpfiles do not disagree.
-    systemd.tmpfiles.rules = [
-      "d ${cfg.dataDir} 0755 ${cfg.user} users - - "
-    ];
+    #
+    # The overlay directory itself is created by the tmpfiles rule below, so
+    # ReadWritePaths= has a path to open when the unit starts.
+    systemd.tmpfiles.rules =
+      [
+        "d ${cfg.dataDir} 0755 ${cfg.user} users - - "
+      ]
+      ++ lib.optional (userHome != null) "d ${overlayDir} 0700 ${cfg.user} users - - ";
 
     systemd.services.maia = {
       description = "Maia sync server";
@@ -195,9 +289,13 @@ in
         StateDirectoryMode = "0755";
 
         # The exercise images live in a home directory, so /home has to be
-        # readable. Nothing under it is writable: ProtectSystem makes the whole
-        # hierarchy read-only apart from StateDirectory.
+        # readable. ProtectSystem makes the whole hierarchy read-only apart from
+        # StateDirectory and the paths below.
         ProtectHome = "read-only";
+        # Except the overlay, which the server writes when Settings saves the
+        # Trading 212 credentials. Without this the write fails with EROFS and
+        # the save looks successful until the next restart.
+        ReadWritePaths = lib.optional (userHome != null) overlayDir;
         ProtectSystem = "strict";
         ProtectKernelTunables = true;
         ProtectKernelModules = true;

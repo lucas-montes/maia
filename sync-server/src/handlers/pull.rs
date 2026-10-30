@@ -353,8 +353,24 @@ pub async fn pull_fx_rates(
     let since = q.since.unwrap_or(0);
     let server_time = db::server_time_ms();
     let conn = state.db.get().unwrap();
+    // Rates are daily snapshots, and a currency is often absent on weekends or
+    // holidays. Serve the latest snapshot at or before the requested day rather
+    // than nothing: a backdated transaction on a Sunday still needs the Friday
+    // rate. The row keeps its own `rate_date`, so the client caches it under the
+    // day it actually describes.
     let mut stmt = conn
-        .prepare("SELECT code, rate_to_base, rate_date, updated_at, manual FROM fx_rates WHERE base_code = ?1 AND rate_date = ?2 AND (?3 <= 0 OR updated_at > ?3) AND deleted_at IS NULL ORDER BY updated_at")
+        .prepare(
+            "SELECT code, rate_to_base, rate_date, updated_at, manual FROM (
+                 SELECT code, rate_to_base, rate_date, updated_at, manual,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY code ORDER BY rate_date DESC, updated_at DESC
+                        ) AS rank
+                 FROM fx_rates
+                 WHERE base_code = ?1 AND rate_date <= ?2 AND deleted_at IS NULL
+             )
+             WHERE rank = 1 AND (?3 <= 0 OR updated_at > ?3)
+             ORDER BY updated_at",
+        )
         .unwrap();
     let items = stmt
         .query_map(rusqlite::params![q.base, q.date, since], |row| {

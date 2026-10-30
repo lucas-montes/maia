@@ -19,6 +19,10 @@ const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 /// current file exactly.
 const MAX_BACKUP_BYTES: usize = 256 * 1024 * 1024;
 
+/// Ceiling for a statement upload. A PDF export with a year of history is a few
+/// hundred kilobytes; this is generous while still bounded.
+const MAX_STATEMENT_BYTES: usize = 32 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
@@ -27,6 +31,9 @@ pub struct AppState {
     /// Vision model for receipt OCR, `None` when no model key is configured.
     /// Handlers check this to report `503` instead of calling the model.
     pub ocr: Option<Arc<ai::Model>>,
+    /// Shared client for statement feeds. One pool of connections across syncs
+    /// rather than a new client per request.
+    pub http: reqwest::Client,
 }
 
 impl AppState {
@@ -34,11 +41,17 @@ impl AppState {
         let ocr = config
             .ocr_enabled()
             .then(|| Arc::new(ai::Model::with_model(config.model_api_key.clone(), config.model_name.clone())));
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .user_agent("maia-sync-server")
+            .build()
+            .unwrap_or_default();
         Self {
             config: Arc::new(config),
             db,
             logs: logs::new_buffer(200),
             ocr,
+            http,
         }
     }
 }
@@ -79,6 +92,37 @@ pub fn create_router(state: AppState) -> Router {
         .route("/body-metrics", get(crate::handlers::read::pull_body_metrics).post(crate::handlers::push::push_body_metrics))
         .route("/transactions", get(crate::handlers::pull::pull_transactions).post(crate::handlers::push::push_transactions))
         .route("/budget-accounts", get(crate::handlers::pull::pull_accounts).post(crate::handlers::push::push_budget_accounts))
+        .route("/statements", get(crate::handlers::statements::list_statements))
+        .route("/statements/scan", post(crate::handlers::statements::scan_statements))
+        .route(
+            "/statements/upload",
+            post(crate::handlers::statements::upload_statement)
+                .layer(DefaultBodyLimit::max(MAX_STATEMENT_BYTES)),
+        )
+        .route("/statements/import", post(crate::handlers::statements::import_statements))
+        .route(
+            "/statements/:id",
+            get(crate::handlers::statements::get_statement)
+                .delete(crate::handlers::statements::delete_statement),
+        )
+        .route(
+            "/statements/:id/import",
+            post(crate::handlers::statements::import_statement),
+        )
+        .route(
+            "/statements/:id/ignore",
+            post(crate::handlers::statements::ignore_statement),
+        )
+        .route("/statement-feeds", get(crate::handlers::statements::list_feeds))
+        .route(
+            "/statement-feeds/settings",
+            get(crate::handlers::statements::get_feed_settings)
+                .put(crate::handlers::statements::put_feed_settings),
+        )
+        .route(
+            "/statement-feeds/:provider/sync",
+            post(crate::handlers::statements::sync_feed),
+        )
         .route("/receipt-pictures", get(crate::handlers::pull::pull_receipts).post(crate::handlers::receipts::push_receipt_pictures))
         .route(
             "/receipt-pictures/upload",
@@ -253,6 +297,10 @@ where
     let listener = TcpListener::bind(&config.bind_addr).await?;
     let port = listener.local_addr()?.port();
     let state = AppState::new(config, db);
+    // Start the poller before the listener: a file dropped in while the service
+    // was down is picked up on the first tick either way, and spawning here
+    // keeps the watcher's lifetime tied to the server process.
+    crate::statements::watch::spawn(state.clone());
     let router = create_router(state);
     let handle = tokio::spawn(async move {
         // Logged rather than unwrapped: a bind failure surfaces here after the

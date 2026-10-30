@@ -19,6 +19,7 @@ import * as bodyMetrics from "./bodyMetrics";
 import * as tags from "./tags";
 import * as accounts from "./accounts";
 import * as transactions from "./transactions";
+import * as statements from "./statements";
 import * as fxRates from "./fxRates";
 import * as sync from "./sync";
 
@@ -41,6 +42,7 @@ export const routes: Record<ViewId, ViewModule> = {
   tags,
   accounts,
   transactions,
+  statements,
   fxRates,
   sync,
 };

@@ -46,6 +46,7 @@ export type ViewId =
   | "tags"
   | "accounts"
   | "transactions"
+  | "statements"
   | "fxRates";
 
 export const routeAtom = atom<ViewId>("dashboard");
@@ -177,6 +178,23 @@ export const accountsAtom = atom<ListState<any>>(emptyList<any>());
 export const transactionsAtom = atom<ListState<any> & { search: string }>({
   ...emptyList<any>(),
   search: "",
+});
+
+export const statementsAtom = atom<
+  ListState<any> & {
+    selectedId: string | null;
+    detail: any | null;
+    filter: string;
+    source: string;
+    selectedLines: string[];
+  }
+>({
+  ...emptyList<any>(),
+  selectedId: null,
+  detail: null,
+  filter: "",
+  source: "",
+  selectedLines: [],
 });
 
 export const fxRatesAtom = atom<ListState<any> & { base: string; date: string }>({

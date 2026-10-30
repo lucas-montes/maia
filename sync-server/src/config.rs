@@ -35,6 +35,38 @@ pub const CHECKOUT_CONFIG: &str = "maia.json";
 /// connection failure on the phone.
 pub const DEFAULT_PORT: u16 = 3030;
 
+/// A directory the server polls for statement files.
+#[derive(Clone, Debug)]
+pub struct WatchDir {
+    pub path: PathBuf,
+    /// `credit_agricole`, `firstrade`, …; parsed by the statements module.
+    pub source: String,
+}
+
+/// Trading 212 feed settings. Credentials live in the per-user overlay; the
+/// deployment file owns whether the feed runs and which environment it talks
+/// to.
+#[derive(Clone, Debug)]
+pub struct T212FeedConfig {
+    pub enabled: bool,
+    pub environment: String,
+    pub api_key: String,
+    pub api_secret: String,
+    pub lookback_days: i64,
+}
+
+impl Default for T212FeedConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            environment: "live".to_string(),
+            api_key: String::new(),
+            api_secret: String::new(),
+            lookback_days: 90,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub bind_addr: String,
@@ -66,6 +98,17 @@ pub struct Config {
     /// what performs that move, so it has to be a path both sides agree on
     /// without either guessing from its own working directory.
     pub archive_dir: Option<PathBuf>,
+    /// Currency statement imports resolve foreign amounts into. Stored on the
+    /// draft transaction alongside the original amount and rate.
+    pub base_currency: String,
+    /// Where the server keeps a copy of every statement input it parses.
+    ///
+    /// `None` means `<db_dir>/statements`, beside the database it describes.
+    pub statements_store_dir: Option<PathBuf>,
+    /// Directories polled for statement files, each tied to one parser.
+    pub watch_dirs: Vec<WatchDir>,
+    /// Trading 212 feed. Credentials in here come from the overlay only.
+    pub t212: T212FeedConfig,
 }
 
 impl Config {
@@ -80,6 +123,10 @@ impl Config {
             seed_dir: None,
             notes_dir: None,
             archive_dir: None,
+            base_currency: "EUR".to_string(),
+            statements_store_dir: None,
+            watch_dirs: Vec::new(),
+            t212: T212FeedConfig::default(),
         }
     }
 
@@ -132,6 +179,19 @@ impl Config {
     /// True when a model key was supplied, i.e. receipt OCR can run.
     pub fn ocr_enabled(&self) -> bool {
         !self.model_api_key.is_empty()
+    }
+
+    /// Directory the server stores raw statement copies under.
+    ///
+    /// Defaults to `<db_dir>/statements`, which keeps them beside the database
+    /// and inside the writable state directory rather than in the checkout.
+    pub fn statements_store_dir(&self) -> PathBuf {
+        self.statements_store_dir.clone().unwrap_or_else(|| {
+            self.db_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("statements")
+        })
     }
 
     /// Directory holding exercise images and videos for `GET /media/*`.
@@ -236,6 +296,87 @@ impl Config {
         // Deployment-owned, like the database path: the archive holds files the
         // server moves, so a per-user overlay must not be able to redirect it.
         cfg.archive_dir = get(&deployment, "archive_dir").map(PathBuf::from);
+
+        // Also deployment-owned: the currency drafts are stored in, the
+        // directory raw inputs are copied to, and the directories polled for
+        // new files are all things the service acts on.
+        cfg.base_currency = get(&deployment, "base_currency")
+            .map(|value| value.to_uppercase())
+            .unwrap_or_else(|| "EUR".to_string());
+        cfg.statements_store_dir = get(&deployment, "statements_store_dir").map(PathBuf::from);
+
+        let statements = deployment.get("statements").and_then(Value::as_object);
+        if let Some(dirs) = statements
+            .and_then(|statements| statements.get("watch_dirs"))
+            .and_then(Value::as_array)
+        {
+            for entry in dirs {
+                let path = entry
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let source = entry
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                match (path, source) {
+                    (Some(path), Some(source)) => cfg.watch_dirs.push(WatchDir {
+                        path: PathBuf::from(path),
+                        source: source.to_string(),
+                    }),
+                    // A half-specified entry would silently watch nothing, so
+                    // say so rather than dropping it without a trace.
+                    _ => tracing::warn!(
+                        ?entry,
+                        "ignoring incomplete statement watch directory"
+                    ),
+                }
+            }
+        }
+
+        // Feed behaviour merges from the overlay because the desktop Settings
+        // form owns it. Credentials come from the overlay only: the deployment
+        // file is readable by the service manager and the whole system.
+        let deployment_feed = statements
+            .and_then(|statements| statements.get("feeds"))
+            .and_then(Value::as_object)
+            .and_then(|feeds| feeds.get("trading212"))
+            .and_then(Value::as_object);
+        let overlay_feed = overlay
+            .get("statements")
+            .and_then(Value::as_object)
+            .and_then(|statements| statements.get("feeds"))
+            .and_then(Value::as_object)
+            .and_then(|feeds| feeds.get("trading212"))
+            .and_then(Value::as_object);
+        let feed_value = |key: &str| {
+            overlay_feed
+                .and_then(|feed| feed.get(key))
+                .or_else(|| deployment_feed.and_then(|feed| feed.get(key)))
+        };
+        if let Some(enabled) = feed_value("enabled").and_then(Value::as_bool) {
+            cfg.t212.enabled = enabled;
+        }
+        if let Some(environment) = feed_value("environment").and_then(Value::as_str) {
+            cfg.t212.environment = if environment == "demo" { "demo" } else { "live" }.to_string();
+        }
+        if let Some(days) = feed_value("lookback_days").and_then(Value::as_i64) {
+            cfg.t212.lookback_days = days.clamp(1, 3650);
+        }
+        if let Some(key) = overlay_feed
+            .and_then(|feed| feed.get("api_key"))
+            .and_then(Value::as_str)
+        {
+            cfg.t212.api_key = key.trim().to_string();
+        }
+        if let Some(secret) = overlay_feed
+            .and_then(|feed| feed.get("api_secret"))
+            .and_then(Value::as_str)
+        {
+            cfg.t212.api_secret = secret.trim().to_string();
+        }
         cfg
     }
 }
@@ -289,6 +430,10 @@ impl Default for Config {
             seed_dir: None,
             notes_dir: None,
             archive_dir: None,
+            base_currency: "EUR".to_string(),
+            statements_store_dir: None,
+            watch_dirs: Vec::new(),
+            t212: T212FeedConfig::default(),
         }
     }
 }
@@ -439,5 +584,102 @@ mod tests {
             obj(json!({ "archive_dir": "/tmp/hijacked" })),
         );
         assert_eq!(cfg.archive_dir(), PathBuf::from("/var/lib/maia/receipts_archive"));
+    }
+
+    #[test]
+    fn statements_settings_come_from_the_deployment_file() {
+        let cfg = Config::from_values(
+            obj(json!({
+                "base_currency": "usd",
+                "statements": {
+                    "watch_dirs": [
+                        { "path": "/srv/inbox/credit_agricole", "source": "credit_agricole" }
+                    ],
+                    "feeds": {
+                        "trading212": {
+                            "enabled": true,
+                            "environment": "demo",
+                            "lookback_days": 30
+                        }
+                    }
+                }
+            })),
+            serde_json::Map::new(),
+        );
+        assert_eq!(cfg.base_currency, "USD");
+        assert_eq!(cfg.watch_dirs.len(), 1);
+        assert_eq!(
+            cfg.watch_dirs[0].path,
+            PathBuf::from("/srv/inbox/credit_agricole")
+        );
+        assert_eq!(cfg.watch_dirs[0].source, "credit_agricole");
+        assert!(cfg.t212.enabled);
+        assert_eq!(cfg.t212.environment, "demo");
+        assert_eq!(cfg.t212.lookback_days, 30);
+    }
+
+    /// Credentials are per-user: the deployment file is read by the service
+    /// manager and must never be where an API secret lives.
+    #[test]
+    fn feed_credentials_are_read_from_the_overlay_only() {
+        let cfg = Config::from_values(
+            obj(json!({
+                "statements": {
+                    "feeds": {
+                        "trading212": { "enabled": true, "api_key": "from-deployment" }
+                    }
+                }
+            })),
+            obj(json!({
+                "statements": {
+                    "feeds": {
+                        "trading212": {
+                            "api_key": "  overlay-key  ",
+                            "api_secret": "overlay-secret"
+                        }
+                    }
+                }
+            })),
+        );
+        assert!(cfg.t212.enabled, "deployment still owns whether the feed runs");
+        assert_eq!(cfg.t212.api_key, "overlay-key");
+        assert_eq!(cfg.t212.api_secret, "overlay-secret");
+    }
+
+    #[test]
+    fn statements_store_dir_defaults_beside_the_database() {
+        let cfg = Config::new(PathBuf::from("/var/lib/maia/maia.db"), "k".into());
+        assert_eq!(
+            cfg.statements_store_dir(),
+            PathBuf::from("/var/lib/maia/statements")
+        );
+
+        let configured = Config::from_values(
+            obj(json!({ "statements_store_dir": "/srv/statements" })),
+            serde_json::Map::new(),
+        );
+        assert_eq!(configured.statements_store_dir(), PathBuf::from("/srv/statements"));
+    }
+
+    /// The overlay owns the feed form, but not the paths the service opens.
+    #[test]
+    fn overlay_cannot_redirect_statement_paths() {
+        let cfg = Config::from_values(
+            obj(json!({
+                "base_currency": "EUR",
+                "statements": {
+                    "watch_dirs": [{ "path": "/srv/inbox", "source": "credit_agricole" }]
+                }
+            })),
+            obj(json!({
+                "base_currency": "USD",
+                "statements": {
+                    "watch_dirs": [{ "path": "/tmp/hijacked", "source": "firstrade" }]
+                }
+            })),
+        );
+        assert_eq!(cfg.base_currency, "EUR");
+        assert_eq!(cfg.watch_dirs.len(), 1);
+        assert_eq!(cfg.watch_dirs[0].path, PathBuf::from("/srv/inbox"));
     }
 }

@@ -50,6 +50,111 @@ export interface Receipt {
   updatedAt: number;
 }
 
+/** A staged statement section or provider bucket, as `GET /statements` returns it. */
+export interface StatementSummary {
+  id: string;
+  source: string;
+  institution: string;
+  accountName: string;
+  accountNumber: string | null;
+  accountId: string | null;
+  resolvedAccountName: string | null;
+  currencyCode: string;
+  periodStart: string | null;
+  periodEnd: string | null;
+  openingBalance: number | null;
+  closingBalance: number | null;
+  status: string;
+  warnings: string[];
+  parseError: string | null;
+  createdAt: number;
+  updatedAt: number;
+  lineCount: number;
+  pendingCount: number;
+  importedCount: number;
+}
+
+export interface StatementLine {
+  id: string;
+  sourceRef: string | null;
+  postedAt: number;
+  description: string;
+  amount: number;
+  currencyCode: string;
+  balanceAfter: number | null;
+  categoryHint: string | null;
+  lineKind: string;
+  suggestedType: string | null;
+  suggestedCategory: string | null;
+  metadata: unknown;
+  status: string;
+  transactionId: string | null;
+  importError: string | null;
+  duplicateOf: string | null;
+}
+
+export interface TransferMatchLine {
+  id: string;
+  description: string;
+  amount: number;
+  currencyCode: string;
+  postedAt: number;
+  status: string;
+}
+
+export interface TransferMatch {
+  id: string;
+  debitLineId: string;
+  creditLineId: string;
+  transactionId: string | null;
+  confidence: number;
+  reason: string | null;
+  status: string;
+  /** The counterpart is included even when it belongs to another statement. */
+  debit: TransferMatchLine;
+  credit: TransferMatchLine;
+}
+
+export interface StatementDetail {
+  /** The detail endpoint omits the list-only counters; lines carry the counts. */
+  statement: Omit<StatementSummary, "lineCount" | "pendingCount" | "importedCount"> & {
+    sourcePath: string | null;
+    storedPath: string | null;
+    parsed: unknown;
+  };
+  lines: StatementLine[];
+  matches: TransferMatch[];
+}
+
+export interface StatementImportLine {
+  id: string;
+  action?: "import" | "skip";
+  type?: "expense" | "income" | "transfer";
+  category?: string | null;
+}
+
+export interface StatementFeedStatus {
+  provider: string;
+  enabled: boolean;
+  environment: string;
+  lookbackDays: number;
+  credentialsSet: boolean;
+  status: string;
+  lastSyncedAt: number | null;
+  lastAttemptAt: number | null;
+  lastError: string | null;
+}
+
+export interface StatementFeedSettings {
+  trading212: {
+    enabled: boolean;
+    environment: string;
+    lookbackDays: number;
+    apiKeySet: boolean;
+    apiSecretSet: boolean;
+  };
+}
+
 export interface SavedUrl {
   id: string;
   title: string | null;
@@ -346,6 +451,40 @@ export const api = {
 
   createFxRate: (args: { code: string; baseCode: string; rateDate: string; rateToBase: number }) =>
     invoke<unknown>("create_fx_rate", args),
+
+  // ---- Statements ----
+
+  listStatements: (args: { status?: string; source?: string } = {}) =>
+    invoke<Envelope<{ items: StatementSummary[] }>>("list_statements", args),
+
+  getStatement: (id: string) =>
+    invoke<Envelope<StatementDetail>>("get_statement", { id }),
+
+  importStatement: (args: {
+    id: string;
+    lines: StatementImportLine[];
+    autoLink?: boolean;
+  }) => invoke<Envelope<unknown>>("import_statement", args),
+
+  ignoreStatement: (id: string) =>
+    invoke<Envelope<unknown>>("ignore_statement", { id }),
+
+  deleteStatement: (id: string) =>
+    invoke<Envelope<unknown>>("delete_statement", { id }),
+
+  scanStatements: () => invoke<Envelope<unknown>>("scan_statements"),
+
+  listStatementFeeds: () =>
+    invoke<Envelope<{ items: StatementFeedStatus[] }>>("list_statement_feeds"),
+
+  getStatementFeedSettings: () =>
+    invoke<Envelope<StatementFeedSettings>>("get_statement_feed_settings"),
+
+  saveStatementFeedSettings: (settings: unknown) =>
+    invoke<Envelope<unknown>>("save_statement_feed_settings", { settings }),
+
+  syncStatementFeed: (provider: string) =>
+    invoke<Envelope<unknown>>("sync_statement_feed", { provider }),
 };
 
 /**

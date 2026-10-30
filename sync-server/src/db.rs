@@ -158,13 +158,18 @@ pub const MIGRATIONS: &[(i64, Step)] = &[
     // per-100g denominator. NULL means "use the raw component sum", which is
     // exactly what every existing recipe already does.
     (6, Step::Guarded(add_food_cooked_weight)),
+    // Bank/statement staging. One row per statement section (or per monthly
+    // brokerage feed bucket), with its lines staged separately so the user can
+    // review and import them explicitly. `accounts` gains the provider identity
+    // that lets a statement resolve to the same budget account across imports.
+    (7, Step::Guarded(add_statement_schema)),
 ];
 
 /// Highest version in `MIGRATIONS`.
 ///
 /// A database newer than this means the data is newer than the binary, which is
 /// what a Nix rollback looks like. `migrate` refuses rather than serving.
-pub const LATEST_VERSION: i64 = 6;
+pub const LATEST_VERSION: i64 = 7;
 
 /// The v1 schema, exactly as it shipped.
 ///
@@ -817,6 +822,121 @@ fn add_food_cooked_weight(conn: &Connection) -> anyhow::Result<()> {
         return Ok(());
     }
     conn.execute_batch("ALTER TABLE foods ADD COLUMN cooked_weight REAL")?;
+    Ok(())
+}
+
+/// v7: statement staging plus the provider identity on `accounts`.
+///
+/// The account columns are guarded because SQLite has no
+/// `ADD COLUMN IF NOT EXISTS`. They are server-only: `pull_accounts` selects an
+/// explicit column list and `push_budget_accounts` updates an explicit column
+/// list, so a phone never sees them and cannot clear them by editing the
+/// account.
+fn add_statement_schema(conn: &Connection) -> anyhow::Result<()> {
+    if !column_exists(conn, "accounts", "source")? {
+        conn.execute_batch("ALTER TABLE accounts ADD COLUMN source TEXT")?;
+    }
+    if !column_exists(conn, "accounts", "external_id")? {
+        conn.execute_batch("ALTER TABLE accounts ADD COLUMN external_id TEXT")?;
+    }
+    // Partial so ordinary hand-created accounts (both columns NULL) do not
+    // collide with each other. A tombstoned account keeps its identity, which is
+    // what makes a re-import refuse to resurrect it.
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_external
+             ON accounts(source, external_id)
+             WHERE source IS NOT NULL AND external_id IS NOT NULL;",
+    )?;
+
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS bank_statements (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            institution TEXT NOT NULL,
+            account_name TEXT NOT NULL,
+            account_number TEXT,
+            account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+            currency_code TEXT NOT NULL,
+            period_start TEXT,
+            period_end TEXT,
+            opening_balance REAL,
+            closing_balance REAL,
+            source_path TEXT,
+            stored_path TEXT,
+            source_hash TEXT NOT NULL,
+            source_key TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'staged',
+            parsed_json TEXT,
+            parse_error TEXT,
+            warnings TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            deleted_at INTEGER,
+            UNIQUE(source, source_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_bank_statements_status
+            ON bank_statements(status, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_bank_statements_account
+            ON bank_statements(account_id);
+
+        CREATE TABLE IF NOT EXISTS bank_statement_lines (
+            id TEXT PRIMARY KEY,
+            statement_id TEXT NOT NULL REFERENCES bank_statements(id) ON DELETE CASCADE,
+            source_ref TEXT,
+            posted_at INTEGER NOT NULL,
+            description TEXT NOT NULL,
+            amount REAL NOT NULL,
+            currency_code TEXT NOT NULL,
+            balance_after REAL,
+            category_hint TEXT,
+            line_kind TEXT NOT NULL,
+            suggested_type TEXT,
+            suggested_category TEXT,
+            metadata_json TEXT,
+            fingerprint TEXT NOT NULL,
+            dedupe_key TEXT NOT NULL,
+            duplicate_of TEXT REFERENCES bank_statement_lines(id) ON DELETE SET NULL,
+            transaction_id TEXT REFERENCES transactions(id) ON DELETE SET NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            import_error TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(statement_id, fingerprint)
+        );
+        CREATE INDEX IF NOT EXISTS idx_bank_statement_lines_statement
+            ON bank_statement_lines(statement_id, status);
+        CREATE INDEX IF NOT EXISTS idx_bank_statement_lines_dedupe
+            ON bank_statement_lines(dedupe_key);
+        CREATE INDEX IF NOT EXISTS idx_bank_statement_lines_txn
+            ON bank_statement_lines(transaction_id);
+
+        CREATE TABLE IF NOT EXISTS transfer_matches (
+            id TEXT PRIMARY KEY,
+            debit_line_id TEXT NOT NULL REFERENCES bank_statement_lines(id) ON DELETE CASCADE,
+            credit_line_id TEXT NOT NULL REFERENCES bank_statement_lines(id) ON DELETE CASCADE,
+            transaction_id TEXT REFERENCES transactions(id) ON DELETE SET NULL,
+            confidence REAL NOT NULL,
+            reason TEXT,
+            status TEXT NOT NULL DEFAULT 'suggested',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(debit_line_id, credit_line_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_transfer_matches_status
+            ON transfer_matches(status);
+
+        CREATE TABLE IF NOT EXISTS statement_feeds (
+            provider TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'idle',
+            last_synced_at INTEGER,
+            last_attempt_at INTEGER,
+            last_error TEXT,
+            cursor TEXT,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );
+        "#,
+    )?;
     Ok(())
 }
 

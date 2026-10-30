@@ -95,16 +95,59 @@ pub async fn post<B: Serialize, R: DeserializeOwned>(
     path: &str,
     body: &B,
 ) -> Result<R, ApiError> {
+    send(reqwest::Method::POST, path, Some(serde_json::to_value(body).map_err(|e| {
+        ApiError::Status {
+            code: 0,
+            message: format!("could not encode the request: {e}"),
+        }
+    })?))
+    .await
+}
+
+/// GETs [path] and decodes the JSON body.
+pub async fn get<R: DeserializeOwned>(path: &str) -> Result<R, ApiError> {
+    send(reqwest::Method::GET, path, None).await
+}
+
+/// PUTs [body] to [path] and decodes the JSON body.
+pub async fn put<B: Serialize, R: DeserializeOwned>(
+    path: &str,
+    body: &B,
+) -> Result<R, ApiError> {
+    send(
+        reqwest::Method::PUT,
+        path,
+        Some(serde_json::to_value(body).map_err(|e| ApiError::Status {
+            code: 0,
+            message: format!("could not encode the request: {e}"),
+        })?),
+    )
+    .await
+}
+
+/// DELETEs [path] and decodes the JSON body.
+pub async fn delete<R: DeserializeOwned>(path: &str) -> Result<R, ApiError> {
+    send(reqwest::Method::DELETE, path, None).await
+}
+
+/// The one place requests leave this process. Every verb shares the same auth,
+/// timeout, error flattening and decode step.
+async fn send<R: DeserializeOwned>(
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<R, ApiError> {
     let base = server_base();
     let url = format!("{base}{path}");
     let api_key = sync_server::Config::shared(None)
         .map(|c| c.api_key.clone())
         .unwrap_or_default();
 
-    let response = client()?
-        .post(&url)
-        .bearer_auth(api_key)
-        .json(body)
+    let mut request = client()?.request(method, &url).bearer_auth(api_key);
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request
         .send()
         .await
         .map_err(|e| ApiError::Unreachable(e.to_string()))?;
@@ -116,11 +159,9 @@ pub async fn post<B: Serialize, R: DeserializeOwned>(
         return Err(error_message(status.as_u16(), &text));
     }
 
-    serde_json::from_str(&text).map_err(|e| {
-        ApiError::Status {
-            code: status.as_u16(),
-            message: format!("could not read the response: {e}"),
-        }
+    serde_json::from_str(&text).map_err(|e| ApiError::Status {
+        code: status.as_u16(),
+        message: format!("could not read the response: {e}"),
     })
 }
 

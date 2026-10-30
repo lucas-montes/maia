@@ -8,3 +8,4 @@ pub mod push;
 pub mod read;
 pub mod receipt_ocr;
 pub mod receipts;
+pub mod statements;
