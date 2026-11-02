@@ -14,6 +14,7 @@ pub mod draft;
 pub mod firstrade;
 pub mod store;
 pub mod t212;
+pub mod t212_csv;
 pub mod watch;
 
 use std::{
@@ -75,6 +76,12 @@ impl SourceId {
 
     pub fn is_feed(self) -> bool {
         matches!(self, Self::Trading212)
+    }
+
+    /// Every known source, in dump-folder order. The lifecycle creates one
+    /// subdirectory per entry so the user always has somewhere to drop files.
+    pub fn all() -> [Self; 3] {
+        [Self::CreditAgricole, Self::Trading212, Self::Firstrade]
     }
 }
 
@@ -233,7 +240,6 @@ pub enum SourceSpec {
     File { source: SourceId, path: PathBuf },
     Feed { provider: SourceId },
 }
-
 /// Acquire, parse, persist. The whole pipeline for one source run.
 pub async fn run<P: Parser>(parser: &P, state: &AppState) -> anyhow::Result<Vec<SaveOutcome>> {
     let docs = parser.acquire().await?;
@@ -241,18 +247,47 @@ pub async fn run<P: Parser>(parser: &P, state: &AppState) -> anyhow::Result<Vec<
 }
 
 /// The second half of [`run`], for callers that already have the bytes (an
-/// HTTP upload) or that fetched them through a different path.
+/// HTTP upload) or that fetched them through a different path. A copy of the
+/// raw input is persisted under the statement store: the caller has no file of
+/// its own to keep.
 pub async fn run_documents<P: Parser>(
     parser: &P,
     docs: Vec<RawDocument>,
     state: &AppState,
+) -> anyhow::Result<Vec<SaveOutcome>> {
+    run_with(parser, docs, state, true).await
+}
+
+/// Like [`run_documents`], but skipping the raw-store copy.
+///
+/// Watched files keep their original: the dump lifecycle moves it into the
+/// parsed (or failed) tree, and the statement rows are repointed there
+/// afterwards. Persisting a second hash-named copy alongside would leave two
+/// copies of an export that the user can already see.
+async fn run_spooled<P: Parser>(
+    parser: &P,
+    docs: Vec<RawDocument>,
+    state: &AppState,
+) -> anyhow::Result<Vec<SaveOutcome>> {
+    run_with(parser, docs, state, false).await
+}
+
+async fn run_with<P: Parser>(
+    parser: &P,
+    docs: Vec<RawDocument>,
+    state: &AppState,
+    persist: bool,
 ) -> anyhow::Result<Vec<SaveOutcome>> {
     if docs.is_empty() {
         return Ok(Vec::new());
     }
     let source = parser.source();
     let source_hash = hash_documents(&docs);
-    let stored_path = persist_raw(state, source, &source_hash, &docs);
+    let stored_path = if persist {
+        persist_raw(state, source, &source_hash, &docs)
+    } else {
+        None
+    };
     let ctx = ParseContext {
         source_hash,
         stored_path,
@@ -433,15 +468,7 @@ pub fn stable_uuid(namespace: Uuid, key: &str) -> String {
 /// and there are only a handful of sources.
 pub async fn run_spec(spec: &SourceSpec, state: &AppState) -> anyhow::Result<Vec<SaveOutcome>> {
     match spec {
-        SourceSpec::File { source, path } => match source {
-            SourceId::CreditAgricole => {
-                run(&ca::CreditAgricoleSource::new(path.clone()), state).await
-            }
-            SourceId::Firstrade => run(&firstrade::FirstradeSource::new(path.clone()), state).await,
-            SourceId::Trading212 => {
-                anyhow::bail!("trading212 is an API feed; use SourceSpec::Feed")
-            }
-        },
+        SourceSpec::File { source, path } => run_file_source(*source, path, true, state).await,
         SourceSpec::Feed { provider } => match provider {
             SourceId::Trading212 => {
                 let source = t212::Trading212Source::from_config(&state.config, &state.http)?;
@@ -449,6 +476,49 @@ pub async fn run_spec(spec: &SourceSpec, state: &AppState) -> anyhow::Result<Vec
             }
             other => anyhow::bail!("{} is not an API feed", other.as_str()),
         },
+    }
+}
+
+/// Ingest one file for one source, as the dump folder does.
+///
+/// `persist` selects whether the raw store also receives a hash-named copy of
+/// the bytes. Dump-folder runs keep `false`: the original file itself is the
+/// stored document, and it is moved after the parse (see the watch module).
+/// Uploads keep `true`, because nothing else ever held the bytes.
+async fn run_file_source(
+    source: SourceId,
+    path: &Path,
+    persist: bool,
+    state: &AppState,
+) -> anyhow::Result<Vec<SaveOutcome>> {
+    match source {
+        SourceId::CreditAgricole => {
+            let parser = ca::CreditAgricoleSource::new(path.to_path_buf());
+            if persist {
+                run(&parser, state).await
+            } else {
+                let docs = parser.acquire().await?;
+                run_spooled(&parser, docs, state).await
+            }
+        }
+        SourceId::Firstrade => {
+            let parser = firstrade::FirstradeSource::new(path.to_path_buf());
+            if persist {
+                run(&parser, state).await
+            } else {
+                let docs = parser.acquire().await?;
+                run_spooled(&parser, docs, state).await
+            }
+        }
+        SourceId::Trading212 => {
+            let parser = t212_csv::Trading212CsvSource::new(path.to_path_buf());
+            if persist {
+                run(&parser, state).await
+            } else {
+                let docs = parser.acquire().await?;
+                run_spooled(&parser, docs, state).await
+            }
+        }
     }
 }
 
@@ -477,7 +547,12 @@ pub async fn run_upload(
             .await
         }
         SourceId::Trading212 => {
-            anyhow::bail!("Trading 212 is an API feed; sync it instead of uploading a file")
+            run_documents(
+                &t212_csv::Trading212CsvSource::new(PathBuf::from("upload")),
+                docs,
+                state,
+            )
+            .await
         }
     }
 }

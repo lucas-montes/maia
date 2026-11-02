@@ -25,12 +25,18 @@ exercise_media
 !/sync-server/testdata/.gitkeep
 !/sync-server/testdata/README.md
 
-# Statement drop folders: exports are personal documents. The inbox keeps its
-# layout in the checkout with `.gitkeep`; the server's stored copies (written
-# beside the database, under statements/<source>/) are runtime data.
-/statements/inbox/credit_agricole/*
-!/statements/inbox/credit_agricole/.gitkeep
-/statements/inbox/firstrade/*
-!/statements/inbox/firstrade/.gitkeep
+# Statement drop folders: exports are personal documents. The dump tree keeps
+# its layout in the checkout with `.gitkeep`; the parsed and failed trees hold
+# the moved originals (runtime data, as are the server's stored copies under
+# statements/<source>/).
+/statements/dump/credit_agricole/*
+!/statements/dump/credit_agricole/.gitkeep
+/statements/dump/trading212/*
+!/statements/dump/trading212/.gitkeep
+/statements/dump/firstrade/*
+!/statements/dump/firstrade/.gitkeep
+/statements/parsed/
+/statements/failed/
 /statements/credit_agricole/
 /statements/firstrade/
+/statements/trading212/

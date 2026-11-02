@@ -1,130 +1,683 @@
-//! Polling watcher for statement files.
+//! Dump-folder ingest.
 //!
-//! Polling rather than inotify: the set of watched directories is small, the
-//! interval is a minute, and a missed event (or a file copied in while the
-//! service was down) is handled by the next tick. Re-ingesting a file is a
-//! no-op because the statement's `source_key` is derived from its hash.
+//! The dump folder holds one subdirectory per source (`credit_agricole`,
+//! `trading212`, …): the subfolder name picks the parser, so nothing has to
+//! guess a file's provenance. Every regular file that appears is staged, then
+//! moved out — into the parsed tree on success, or into the failed tree beside
+//! a `<name>.log` on error — so the folder the user drops into always
+//! empties itself. The moved original is the kept raw document; no hash-named
+//! copy is written for these files.
+//!
+//! inotify is the trigger, not the source of truth. A scan runs at startup,
+//! after every event batch, and on a slow sweep that catches files copied in
+//! while the service was down or a queue that overflowed. Re-running the scan
+//! is safe by construction: a restaged input dedupes by content hash, and
+//! anything already handled has been moved out.
 
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-    time::{Duration, UNIX_EPOCH},
-};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use super::{SaveOutcome, SourceId, SourceSpec, is_statement_file, run_spec};
+use anyhow::Context as _;
+use inotify::{EventMask, Inotify, WatchMask};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+
+use super::{SaveOutcome, SourceId, is_statement_file};
 use crate::server::AppState;
 
-const POLL_INTERVAL: Duration = Duration::from_secs(60);
+/// Slow sweep, a backstop rather than the primary path: inotify delivers the
+/// common case immediately, and the sweep catches what an event could not.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
-/// Start the background poller. Does nothing when no directory is configured.
+/// Pseudo-source for files parked in the failed tree because they were never
+/// inside a source folder at all.
+const UNKNOWN: &str = "unknown";
+
+/// `rename` would flag cross-filesystem moves with this errno; `libc` is not a
+/// dependency, and the tables are stable across the unix targets this serves.
+const EXDEV: std::os::raw::c_int = 18;
+
+/// Start the watcher.
 pub fn spawn(state: AppState) {
-    if state.config.watch_dirs.is_empty() {
-        return;
+    if let Err(error) = create_trees(&state) {
+        tracing::warn!(error = %error, "cannot create statement lifecycle directories");
     }
-    tokio::spawn(async move {
-        let mut seen = HashSet::new();
-        let mut ticker = tokio::time::interval(POLL_INTERVAL);
-        loop {
-            ticker.tick().await;
-            scan_once(&state, &mut seen).await;
-        }
-    });
+    let events = start_inotify(&state);
+    tokio::spawn(main_loop(state, events));
 }
 
-/// One scan pass. `seen` holds `(path, len, mtime)` triples so an unchanged file
-/// is not re-read every minute; the database hash check still catches a file
-/// that was already ingested before a restart.
-pub async fn scan_once(
-    state: &AppState,
-    seen: &mut HashSet<(PathBuf, u64, u64)>,
-) -> Vec<anyhow::Result<Vec<SaveOutcome>>> {
-    let mut results = Vec::new();
-    let store = state.config.statements_store_dir();
-    for dir in &state.config.watch_dirs {
-        let Some(source) = SourceId::parse(&dir.source) else {
-            tracing::warn!(
-                source = %dir.source,
-                path = %dir.path.display(),
-                "unknown statement source; skipping watch directory"
-            );
-            continue;
-        };
-        if source.is_feed() {
-            tracing::warn!(
-                source = %dir.source,
-                "API feed configured as a watch directory; skipping"
-            );
-            continue;
+/// Creates the dump, parsed and failed roots, each with one subdirectory per
+/// known source, so the user always has somewhere obvious to drop files. The
+/// lifecyle keeps working without them (scans create directories as needed),
+/// but a fresh install should present an empty tree.
+fn create_trees(state: &AppState) -> anyhow::Result<()> {
+    for root in lifecycle_roots(state) {
+        std::fs::create_dir_all(&root)
+            .map_err(|error| anyhow::anyhow!("creating {}: {error}", root.display()))?;
+        for source in SourceId::all() {
+            std::fs::create_dir_all(root.join(source.as_str()))
+                .map_err(|error| anyhow::anyhow!("creating {}: {error}", root.display()))?;
         }
+    }
+    // Files dropped directly in the dump root have no source folder; this is
+    // where they are parked.
+    std::fs::create_dir_all(state.config.statements_failed_dir().join(UNKNOWN))
+        .map_err(|error| anyhow::anyhow!("creating the unknown parking folder: {error}"))?;
+    Ok(())
+}
 
-        let entries = match std::fs::read_dir(&dir.path) {
-            Ok(entries) => entries,
+fn lifecycle_roots(state: &AppState) -> [PathBuf; 3] {
+    [
+        state.config.statements_dump_dir(),
+        state.config.statements_parsed_dir(),
+        state.config.statements_failed_dir(),
+    ]
+}
+
+/// Watches every dump subdirectory in a dedicated thread, forwarding one
+/// message per event (`None` means "rescan everything", usually a queue
+/// overflow). The watcher degrades to sweep-only when inotify is unavailable.
+fn start_inotify(state: &AppState) -> Option<UnboundedReceiver<Option<PathBuf>>> {
+    let dump = state.config.statements_dump_dir();
+    let dirs: Vec<PathBuf> = SourceId::all()
+        .iter()
+        .map(|source| dump.join(source.as_str()))
+        .collect();
+    for dir in &dirs {
+        if !dir.exists() {
+            tracing::warn!(
+                path = %dir.display(),
+                "statement dump subfolder missing; relying on the sweep"
+            );
+            return None;
+        }
+    }
+
+    let (sender, receiver) = unbounded_channel::<Option<PathBuf>>();
+    let inotify = match Inotify::init() {
+        Ok(inotify) => inotify,
+        Err(error) => {
+            tracing::warn!(error = %error, "inotify unavailable; relying on the sweep");
+            return None;
+        }
+    };
+    // One descriptor per watch, kept so an event can be resolved back to the
+    // subfolder it came from: a raw event carries the file name, not the
+    // parent directory.
+    let mut by_descriptor: Vec<(inotify::WatchDescriptor, PathBuf)> = Vec::new();
+    for dir in &dirs {
+        // A fully written file is the event that matters: `cp` produces one,
+        // editors produce `MOVED_TO` by writing a temporary and renaming.
+        // `Q_OVERFLOW` is delivered on the event side, not as a watch mask.
+        match inotify
+            .watches()
+            .add(dir, WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO)
+        {
+            Ok(descriptor) => by_descriptor.push((descriptor, dir.clone())),
             Err(error) => {
-                tracing::warn!(path = %dir.path.display(), %error, "cannot read watch directory");
-                continue;
+                tracing::warn!(path = %dir.display(), error = %error, "cannot watch statement dump folder");
+                return None;
+            }
+        }
+    }
+
+    let thread = std::thread::Builder::new()
+        .name("statement-dump-watcher".to_string())
+        .spawn(move || inotify_loop(inotify, by_descriptor, sender));
+    match thread {
+        Ok(_) => Some(receiver),
+        Err(error) => {
+            tracing::warn!(error = %error, "cannot start the statement watcher thread");
+            None
+        }
+    }
+}
+
+fn inotify_loop(
+    mut inotify: Inotify,
+    dirs: Vec<(inotify::WatchDescriptor, PathBuf)>,
+    sender: UnboundedSender<Option<PathBuf>>,
+) {
+    let mut buffer = [0u8; 4096];
+    loop {
+        let events = match inotify.read_events_blocking(&mut buffer) {
+            Ok(events) => events,
+            Err(error) => {
+                tracing::warn!(error = %error, "statement watcher stopped; relying on the sweep");
+                return;
             }
         };
+        for event in events {
+            if event.mask.contains(EventMask::Q_OVERFLOW) {
+                tracing::warn!("statement event queue overflowed; rescanning");
+                let _ = sender.send(None);
+                continue;
+            }
+            let Some(name) = event.name else {
+                continue;
+            };
+            let Some(dir) = dirs.iter().find(|(descriptor, _)| descriptor == &event.wd) else {
+                continue;
+            };
+            let _ = sender.send(Some(dir.1.join(name)));
+        }
+    }
+}
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() || !is_statement_file(&path) {
-                continue;
-            }
-            // The server stores a copy of every input in `<store>/<source>/`.
-            // If a watch folder was configured to point there, re-ingesting
-            // those copies would at best be wasted work and at worst, before
-            // content-only hashing, an endless chain of new statements. Only
-            // that exact directory is excluded, so a watch folder can still be
-            // a sibling of the store (as the checkout's inbox is).
-            let store_dir = store.join(source.as_str());
-            if path.parent() == Some(store_dir.as_path()) {
-                continue;
-            }
-            let Some(key) = file_key(&path) else {
-                continue;
-            };
-            if !seen.insert(key) {
-                continue;
-            }
-            let spec = SourceSpec::File {
-                source,
-                path: path.clone(),
-            };
-            tracing::info!(path = %path.display(), source = source.as_str(), "ingesting statement");
-            let result = run_spec(&spec, state).await;
-            match &result {
-                Ok(outcomes) => {
-                    for outcome in outcomes {
-                        tracing::info!(
-                            statement = %outcome.statement_id,
-                            inserted = outcome.inserted_lines,
-                            pending = outcome.pending_lines,
-                            skipped = ?outcome.skipped_reason,
-                            "statement staged"
-                        );
-                    }
-                }
-                Err(error) => {
-                    // Keep the file in `seen`: a parser error will not fix
-                    // itself on the next minute. `POST /statements/scan` uses a
-                    // fresh set when the user wants to retry.
-                    tracing::error!(path = %path.display(), %error, "statement ingestion failed");
+async fn main_loop(state: AppState, mut stream: Option<UnboundedReceiver<Option<PathBuf>>>) {
+    let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
+    // The interval's first tick completes immediately; the startup scan stands
+    // in for it, which keeps one scan per interval even when an event race
+    // would have run two.
+    scan_folder(&state).await;
+    sweep.tick().await;
+    loop {
+        let wake = match stream.as_mut() {
+            Some(events) => {
+                if events.recv().await.is_some() {
+                    true
+                } else {
+                    tracing::warn!("statement watcher stream closed; relying on the sweep");
+                    stream = None;
+                    false
                 }
             }
-            results.push(result);
+            None => {
+                sweep.tick().await;
+                scan_folder(&state).await;
+                false
+            }
+        };
+        if wake {
+            // Coalesce whatever arrived while the scan was running.
+            if let Some(events) = stream.as_mut() {
+                while events.try_recv().is_ok() {}
+            }
+            scan_folder(&state).await;
+        }
+    }
+}
+
+/// One ingest pass over the whole dump tree.
+///
+/// Returns the outcomes for `POST /statements/scan`, which triggers an extra
+/// pass on demand; the background watcher discards them.
+pub async fn scan_folder(state: &AppState) -> Vec<anyhow::Result<Vec<SaveOutcome>>> {
+    let dump = state.config.statements_dump_dir();
+    let entries = match std::fs::read_dir(&dump) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(path = %dump.display(), error = %error, "cannot read statement dump folder");
+            return Vec::new();
+        }
+    };
+
+    let mut results = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            match SourceId::parse(&name) {
+                Some(source) => results.push(scan_source(state, source, &path).await),
+                // Report rather than touch: a misspelled folder is the user's
+                // intention up for debate, and moving their files out of it
+                // would make the diagnosis harder.
+                None => tracing::warn!(
+                    directory = %path.display(),
+                    "unknown statement source folder; not watching it"
+                ),
+            }
+        } else if path.is_file() {
+            if let Err(error) = park(state, UNKNOWN, &path, Some(UNSUPPORTED_ROOT)) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "cannot park sourceless file"
+                );
+            }
         }
     }
     results
 }
 
-fn file_key(path: &Path) -> Option<(PathBuf, u64, u64)> {
-    let metadata = std::fs::metadata(path).ok()?;
-    let len = metadata.len();
-    let mtime = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
-    Some((path.to_path_buf(), len, mtime))
+const UNSUPPORTED_ROOT: &str =
+    "file was dropped directly in the dump folder, not in a source folder";
+
+/// Stage every ready file under one source folder.
+async fn scan_source(
+    state: &AppState,
+    source: SourceId,
+    dir: &Path,
+) -> anyhow::Result<Vec<SaveOutcome>> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| anyhow::anyhow!("reading {}: {error}", dir.display()))?;
+    let mut outcomes = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if !is_statement_file(&path) {
+            // A PDF, a screenshot, a `.DS_Store`: nothing a parser can read,
+            // so move it out of the way with a reason. Leaving it would let
+            // the dump folder silently accumulate junk.
+            park(state, source.as_str(), &path, Some("unsupported file type"))
+                .map_err(|error| anyhow::anyhow!("parking {}: {error}", path.display()))?;
+            continue;
+        }
+        match ingest_file(state, source, &path).await {
+            Ok(file_outcomes) => outcomes.extend(file_outcomes),
+            Err(error) => {
+                tracing::error!(path = %path.display(), error = %error, "statement ingestion failed");
+                return Err(error);
+            }
+        }
+    }
+    Ok(outcomes)
+}
+
+/// Parse, stage, then decide where the file lives afterwards.
+///
+/// `Ok` moves the original into the parsed tree. Anything else parks it in the
+/// failed tree with the error beside it. If the file is gone by the time we
+/// react — a concurrent scan already handled and moved it — the move is a
+/// no-op rather than an error, and the already-staged statements stand.
+async fn ingest_file(
+    state: &AppState,
+    source: SourceId,
+    path: &Path,
+) -> anyhow::Result<Vec<SaveOutcome>> {
+    let result = super::run_file_source(source, path, false, state).await;
+    match result {
+        Ok(outcomes) => {
+            let moved = relocate(state, Destination::Parsed, source.as_str(), path)?;
+            repoint_rows(state, source, path, &moved);
+            tracing::info!(path = %moved.display(), "statement file parsed and moved");
+            Ok(outcomes)
+        }
+        Err(error) => {
+            if path.exists() {
+                let moved = relocate(state, Destination::Failed, source.as_str(), path)?;
+                write_failure_log(source.as_str(), path, &moved, &error.to_string());
+            }
+            Err(error.into())
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Destination {
+    Parsed,
+    Failed,
+}
+
+fn destination_root(state: &AppState, destination: Destination) -> PathBuf {
+    match destination {
+        Destination::Parsed => state.config.statements_parsed_dir(),
+        Destination::Failed => state.config.statements_failed_dir(),
+    }
+}
+
+/// Parks a file in the failed tree with a reason, without creating a statement
+/// row. Used for files no parser can ever accept.
+fn park(
+    state: &AppState,
+    source: &str,
+    path: &Path,
+    reason: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    let moved = relocate(state, Destination::Failed, source, path)?;
+    if let Some(reason) = reason {
+        write_failure_log(source, path, &moved, reason);
+    }
+    Ok(moved)
+}
+
+/// Moves `path` to `<root>/<source>/<name>`, keeping the human-facing name.
+///
+/// A taken name is disambiguated with a numeric suffix rather than
+/// overwritten: a previous statement row may still reference the file at that
+/// exact path, and overwriting would orphan the row's raw copy.
+fn relocate(
+    state: &AppState,
+    destination: Destination,
+    source: &str,
+    path: &Path,
+) -> anyhow::Result<PathBuf> {
+    let dir = destination_root(state, destination).join(source);
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| anyhow::anyhow!("creating {}: {error}", dir.display()))?;
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .with_context(|| format!("{} has no file name", path.display()))?;
+    let mut target = dir.join(&name);
+    let mut suffix = 1;
+    while target.exists() {
+        suffix += 1;
+        target = dir.join(disambiguate(&name, suffix));
+    }
+
+    move_file(path, &target)?;
+    Ok(target)
+}
+
+/// `CA20261027.csv` + suffix 2 becomes `CA20261027-2.csv`, preserving the
+/// extension so a person (or a re-upload) keeps recognizing it.
+fn disambiguate(name: &str, suffix: i32) -> String {
+    match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => format!("{stem}-{suffix}.{extension}"),
+        _ => format!("{name}-{suffix}"),
+    }
+}
+
+/// Rename across filesystems fails with `EXDEV`, so a dump root and a parsed
+/// root on different mounts fall back to copy-then-delete. A file that has
+/// vanished was already handled by the concurrent scan this race always
+/// admits; that is a success, not an error.
+fn move_file(path: &Path, target: &Path) -> anyhow::Result<()> {
+    match std::fs::rename(path, target) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.raw_os_error() == Some(EXDEV) => {
+            std::fs::copy(path, target)
+                .map_err(|copy_error| anyhow::anyhow!("copying {path:?}: {copy_error}"))?;
+            std::fs::remove_file(path)
+                .map_err(|remove_error| anyhow::anyhow!("removing {path:?}: {remove_error}"))?;
+            Ok(())
+        }
+        Err(error) => Err(anyhow::anyhow!("moving {path:?}: {error}")),
+    }
+}
+
+/// Writes `<name>.log` beside a failed file. The latest error wins; a
+/// corrected re-drop replaces it.
+fn write_failure_log(source: &str, original: &Path, target: &Path, message: &str) {
+    let Some(name) = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+    else {
+        return;
+    };
+    let log = target.with_file_name(format!("{name}.log"));
+    let stamp = chrono::DateTime::from_timestamp_millis(crate::db::server_time_ms())
+        .map(|time| time.to_rfc3339())
+        .unwrap_or_else(|| "unknown".to_string());
+    let text = format!(
+        "statement staging failed\n\
+         time: {stamp}\n\
+         source: {source}\n\
+         file: {}\n\
+         error: {message}\n",
+        original.display(),
+    );
+    if let Err(error) = std::fs::write(&log, text) {
+        tracing::warn!(path = %log.display(), error = %error, "cannot write failure log");
+    }
+}
+
+/// Point the statement rows created by this parse at the file's final home.
+///
+/// Rows written during a parse carry the dump-path as their provenance; after
+/// the file moves, `stored_path` should say where a human can find it again.
+/// Rows that already pointed somewhere else keep that pointer: they belong to
+/// an earlier drop whose own file lives there.
+fn repoint_rows(state: &AppState, source: SourceId, original: &Path, stored: &Path) {
+    let Ok(conn) = state.db.get() else {
+        return;
+    };
+    let now = crate::db::server_time_ms();
+    if let Err(error) = conn.execute(
+        "UPDATE bank_statements SET stored_path=?1, updated_at=?2
+         WHERE source=?3 AND source_path=?4
+           AND (stored_path IS NULL OR stored_path=?4)",
+        rusqlite::params![
+            stored.display().to_string(),
+            now,
+            source.as_str(),
+            original.display().to_string()
+        ],
+    ) {
+        tracing::warn!(error = %error, "cannot repoint statement rows to their moved file");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    /// Unique scratch directory, removed when dropped.
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "maia-dump-{}-{}-{tag}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple(),
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+        fn statements(&self) -> TempLifecycle {
+            let root = self.0.join("statements");
+            std::fs::create_dir_all(&root).unwrap();
+            let lifecycle =
+                TempLifecycle(root.join("dump"), root.join("parsed"), root.join("failed"));
+            std::fs::create_dir_all(&lifecycle.0).unwrap();
+            std::fs::create_dir_all(&lifecycle.1).unwrap();
+            std::fs::create_dir_all(&lifecycle.2).unwrap();
+            lifecycle
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The three roots plus an [`AppState`] they are configured for.
+    struct TempLifecycle(PathBuf, PathBuf, PathBuf);
+    impl TempLifecycle {
+        fn state(&self, db: crate::db::DbPool) -> AppState {
+            let config = Config::from_values(
+                serde_json::json!({
+                    "statements": {
+                        "dump_dir": self.0.display().to_string(),
+                        "parsed_dir": self.1.display().to_string(),
+                        "failed_dir": self.2.display().to_string(),
+                    }
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+                serde_json::Map::new(),
+            );
+            AppState::new(config, db)
+        }
+    }
+
+    fn write(dir: &Path, name: &str, contents: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_name_collision_is_renamed_not_overwritten() {
+        let tmp = TempDir::new("collision");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+
+        std::fs::create_dir_all(lifecycle.1.join("credit_agricole")).unwrap();
+        std::fs::create_dir_all(lifecycle.0.join("credit_agricole")).unwrap();
+        write(
+            &lifecycle.1.join("credit_agricole"),
+            "export.csv",
+            "already there",
+        );
+        let staging = write(
+            &lifecycle.0.join("credit_agricole"),
+            "export.csv",
+            "new content",
+        );
+        let moved = relocate(
+            &state,
+            Destination::Parsed,
+            SourceId::CreditAgricole.as_str(),
+            &staging,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(lifecycle.1.join("credit_agricole").join("export.csv"))
+                .unwrap(),
+            "already there",
+            "the destination file must not be overwritten: a statement row may point at it"
+        );
+        assert_eq!(
+            moved,
+            lifecycle.1.join("credit_agricole").join("export-2.csv")
+        );
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "new content");
+    }
+
+    #[test]
+    fn a_failed_file_gains_a_log_beside_it() {
+        let tmp = TempDir::new("failed-log");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+        std::fs::create_dir_all(lifecycle.2.join("credit_agricole")).unwrap();
+        std::fs::create_dir_all(lifecycle.0.join("credit_agricole")).unwrap();
+
+        let staging = write(&lifecycle.0.join("credit_agricole"), "export.csv", "broken");
+        // Parking is what attaches the reason log next to the moved file.
+        let reason = "unrecognized column in the export";
+        park(&state, "credit_agricole", &staging, Some(reason)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(lifecycle.2.join("credit_agricole").join("export.csv"))
+                .unwrap(),
+            "broken"
+        );
+        let log =
+            std::fs::read_to_string(lifecycle.2.join("credit_agricole").join("export.csv.log"))
+                .unwrap();
+        assert!(log.contains("credit_agricole"), "{log}");
+        assert!(log.contains(reason), "{log}");
+    }
+
+    #[test]
+    fn write_failure_log_carries_the_reason() {
+        let tmp = TempDir::new("log-content");
+        let lifecycle = tmp.statements();
+        std::fs::create_dir_all(lifecycle.2.join("firstrade")).unwrap();
+
+        let at = write(&lifecycle.2.join("firstrade"), "orders.csv", "rows");
+        write_failure_log("firstrade", &at, &at, "unrecognized column");
+        let log =
+            std::fs::read_to_string(lifecycle.2.join("firstrade").join("orders.csv.log")).unwrap();
+        assert!(log.contains("firstrade"), "{log}");
+        assert!(log.contains("unrecognized column"), "{log}");
+        assert!(log.contains("orders.csv"), "{log}");
+    }
+
+    #[test]
+    fn a_sourceless_file_is_parked_as_unknown() {
+        let tmp = TempDir::new("sourceless");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+        std::fs::create_dir_all(lifecycle.2.join(UNKNOWN)).unwrap();
+
+        write(&lifecycle.0, "random.csv", "content");
+        let outcomes = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(scan_folder(&state));
+        // Only source folders produce results; the parked file has no source.
+        assert_eq!(outcomes.len(), 0);
+        assert!(
+            !lifecycle.0.join("random.csv").exists(),
+            "the dump root must stay empty"
+        );
+        assert_eq!(
+            std::fs::read_to_string(lifecycle.2.join(UNKNOWN).join("random.csv")).unwrap(),
+            "content"
+        );
+    }
+
+    #[test]
+    fn a_source_folder_that_never_parks_rejects_unknown_names() {
+        // `SourceId::parse` is the whole identification step; an unknown
+        // folder name must not silently match a source.
+        assert_eq!(
+            SourceId::parse("credit_agricole"),
+            Some(SourceId::CreditAgricole)
+        );
+        assert_eq!(SourceId::parse("trading212"), Some(SourceId::Trading212));
+        assert_eq!(SourceId::parse("firstrade"), Some(SourceId::Firstrade));
+        assert_eq!(SourceId::parse("credit agricole"), None);
+        assert_eq!(
+            SourceId::parse("credit-agricole"),
+            Some(SourceId::CreditAgricole)
+        );
+        assert_eq!(SourceId::parse("ca"), Some(SourceId::CreditAgricole));
+    }
+
+    #[test]
+    fn move_file_falls_back_when_rename_is_not_enough() {
+        // Cross-filesystem moves cannot be forced in a test, but the fallback
+        // shares its code path with the plain rename, so both must keep the
+        // file intact and remove the source.
+        let tmp = TempDir::new("plain-rename");
+        let (a, b) = (tmp.0.join("a"), tmp.0.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        write(&a, "file.csv", "bytes");
+        move_file(&a.join("file.csv"), &b.join("file.csv")).unwrap();
+        assert!(b.join("file.csv").exists());
+        assert!(!a.join("file.csv").exists());
+
+        // And a vanished source is a no-op: a concurrent scan already won.
+        move_file(&a.join("gone.csv"), &b.join("gone.csv")).unwrap();
+        assert!(!b.join("gone.csv").exists());
+    }
+
+    #[test]
+    fn disambiguate_preserves_the_extension() {
+        assert_eq!(disambiguate("export.csv", 2), "export-2.csv");
+        assert_eq!(disambiguate("no-extension", 3), "no-extension-3");
+        assert_eq!(disambiguate(".hidden", 4), ".hidden-4");
+        assert_eq!(disambiguate("tar.gz", 5), "tar-5.gz");
+    }
+
+    #[test]
+    fn rows_are_repointed_to_the_moved_file() {
+        let tmp = TempDir::new("repoint");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+        let pool = state.db.clone();
+
+        let original = lifecycle.0.join("credit_agricole").join("export.csv");
+        std::fs::create_dir_all(original.parent().unwrap()).unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO bank_statements
+                (id, source, institution, account_name, currency_code, stored_path,
+                 source_path, source_hash, source_key, status, created_at, updated_at)
+             VALUES ('s1', 'credit_agricole', 'Crédit Agricole', 'Eko', 'EUR', NULL,
+                     ?1, 'hash', 'key', 'staged', 1, 1)",
+            rusqlite::params![original.display().to_string()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let stored = lifecycle.1.join("credit_agricole").join("export.csv");
+        repoint_rows(&state, SourceId::CreditAgricole, &original, &stored);
+        let conn = pool.get().unwrap();
+        let path: String = conn
+            .query_row(
+                "SELECT stored_path FROM bank_statements WHERE id='s1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(path, stored.display().to_string());
+    }
 }

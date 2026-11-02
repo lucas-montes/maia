@@ -39,11 +39,13 @@
     # display currency; this one is what the server stores alongside each draft.
     base_currency = cfg.baseCurrency;
     statements = {
-      # Left unset, the store lives at <dataDir>/statements, inside the
-      # StateDirectory systemd makes writable.
-      watch_dirs = map (entry: {
-        inherit (entry) path source;
-      }) cfg.statementWatchDirs;
+      # Lifecycle dirs for dropped statements. The settings are deployment-
+      # owned (the server moves files around inside them), and unset only when
+      # the deployment has no home directory to hang them on -- the server then
+      # falls back to the XDG default under the user's own data dir.
+      dump_dir = mkIf (cfg.statementsRoot != null) "${cfg.statementsRoot}/dump";
+      parsed_dir = mkIf (cfg.statementsRoot != null) "${cfg.statementsRoot}/parsed";
+      failed_dir = mkIf (cfg.statementsRoot != null) "${cfg.statementsRoot}/failed";
       feeds.trading212 = {
         enabled = cfg.trading212.enable;
         environment = cfg.trading212.environment;
@@ -158,33 +160,23 @@ in
       '';
     };
 
-    statementWatchDirs = mkOption {
-      type = types.listOf (types.submodule {
-        options = {
-          path = mkOption {
-            type = types.str;
-            description = ''
-              Absolute directory the server polls for statement files. A string
-              rather than `types.path` on purpose: a path value is copied into
-              the Nix store when the config is rendered, which would publish
-              personal bank exports to every local user.
-            '';
-          };
-          source = mkOption {
-            type = types.enum ["credit_agricole" "firstrade"];
-            description = ''
-              Parser to use for every file in this directory. The server does
-              not guess from the extension: one directory holds one source's
-              exports, which is what makes a file's structure unambiguous.
-            '';
-          };
-        };
-      });
-      default = [];
+    statementsRoot = mkOption {
+      type = types.nullOr types.str;
+      # A string rather than `types.path` on purpose: a path value is copied
+      # into the Nix store when the config is rendered, which would publish
+      # personal bank exports to every local user.
+      default =
+        if userHome != null
+        then "${userHome}/.local/share/maia/statements"
+        else null;
       description = ''
-        Directories polled for CSV statements. New files are staged, not
-        imported: the review screen decides what becomes a draft transaction.
-        The service user must be able to read these paths.
+        Root of the statement dump lifecycle: files are dropped into
+        `<root>/dump/<source>/`, staged automatically by the server, and moved
+        to `<root>/parsed/<source>/` when parsed -- or to
+        `<root>/failed/<source>/` with a reason beside them when not. Defaults
+        to the service user's XDG data directory; set it to keep the files
+        somewhere specific. Each root and subdirectory is created by the module
+        and granted to the service.
       '';
     };
 
@@ -253,9 +245,19 @@ in
     # The overlay directory itself is created by the tmpfiles rule below, so
     # ReadWritePaths= has a path to open when the unit starts.
     systemd.tmpfiles.rules =
+      let
+        statementRoots =
+          lib.optionals (cfg.statementsRoot != null) [
+            "d ${cfg.statementsRoot} 0750 ${cfg.user} users - -"
+            "d ${cfg.statementsRoot}/dump 0750 ${cfg.user} users - -"
+            "d ${cfg.statementsRoot}/parsed 0750 ${cfg.user} users - -"
+            "d ${cfg.statementsRoot}/failed 0750 ${cfg.user} users - -"
+          ];
+      in
       [
         "d ${cfg.dataDir} 0755 ${cfg.user} users - - "
       ]
+      ++ statementRoots
       ++ lib.optional (userHome != null) "d ${overlayDir} 0700 ${cfg.user} users - - ";
 
     systemd.services.maia = {
@@ -293,9 +295,17 @@ in
         # StateDirectory and the paths below.
         ProtectHome = "read-only";
         # Except the overlay, which the server writes when Settings saves the
-        # Trading 212 credentials. Without this the write fails with EROFS and
-        # the save looks successful until the next restart.
-        ReadWritePaths = lib.optional (userHome != null) overlayDir;
+        # Trading 212 credentials, and the statement lifecycle roots, which the
+        # server empties and fills as files are staged. Without both the write
+        # fails with EROFS and the save looks successful until the next restart.
+        ReadWritePaths =
+          lib.optional (userHome != null) overlayDir
+          ++ lib.optionals (cfg.statementsRoot != null) [
+            "${cfg.statementsRoot}"
+            "${cfg.statementsRoot}/dump"
+            "${cfg.statementsRoot}/parsed"
+            "${cfg.statementsRoot}/failed"
+          ];
         ProtectSystem = "strict";
         ProtectKernelTunables = true;
         ProtectKernelModules = true;

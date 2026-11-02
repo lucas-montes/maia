@@ -104,9 +104,20 @@ pub struct Config {
     /// Where the server keeps a copy of every statement input it parses.
     ///
     /// `None` means `<db_dir>/statements`, beside the database it describes.
+    /// Watched files do not land here — their original moves to the parsed
+    /// tree — but feed documents (which have no filename to honor) still do.
     pub statements_store_dir: Option<PathBuf>,
-    /// Directories polled for statement files, each tied to one parser.
-    pub watch_dirs: Vec<WatchDir>,
+    /// Root of the statement lifecycle. Files are dropped into
+    /// `<dump>/<source>/`, the subfolder name picks the parser, and after a
+    /// parse the file moves to `<parsed>/<source>/` — or to
+    /// `<failed>/<source>/` beside a `<name>.log` when it errored.
+    ///
+    /// All three default under the user's XDG data directory, and the
+    /// deployment file may set them explicitly so the Nix module can create
+    /// and grant them.
+    pub statements_dump_dir: Option<PathBuf>,
+    pub statements_parsed_dir: Option<PathBuf>,
+    pub statements_failed_dir: Option<PathBuf>,
     /// Trading 212 feed. Credentials in here come from the overlay only.
     pub t212: T212FeedConfig,
 }
@@ -125,7 +136,9 @@ impl Config {
             archive_dir: None,
             base_currency: "EUR".to_string(),
             statements_store_dir: None,
-            watch_dirs: Vec::new(),
+            statements_dump_dir: None,
+            statements_parsed_dir: None,
+            statements_failed_dir: None,
             t212: T212FeedConfig::default(),
         }
     }
@@ -194,6 +207,53 @@ impl Config {
         })
     }
 
+    /// The user's XDG data directory, for the statement lifecycle default.
+    ///
+    /// An absolute `XDG_DATA_HOME` is honored; a relative one is not
+    /// meaningful, exactly as in [`overlay_config_path`].
+    pub fn xdg_data_home() -> PathBuf {
+        let base = std::env::var("XDG_DATA_HOME")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| match std::env::var("HOME") {
+                Ok(home) if !home.is_empty() => PathBuf::from(home).join(".local/share"),
+                _ => PathBuf::from(".local/share"),
+            });
+        base
+    }
+
+    /// Statement lifecycle roots. All three default as siblings beneath
+    /// `<XDG data home>/maia/statements`, so the personal exports live in the
+    /// user's own data directory rather than in the deployment's state
+    /// directory.
+    pub fn statements_dump_dir(&self) -> PathBuf {
+        self.statements_dump_dir
+            .clone()
+            .unwrap_or_else(|| Self::xdg_data_home().join("maia/statements/dump"))
+    }
+
+    /// Defaults beside the dump root: `<dump>/../parsed`. This keeps the
+    /// lifecycle in one tree even when only the dump folder is configured.
+    pub fn statements_parsed_dir(&self) -> PathBuf {
+        self.statements_parsed_dir.clone().unwrap_or_else(|| {
+            self.statements_dump_dir()
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("parsed")
+        })
+    }
+
+    /// Defaults beside the dump root: `<dump>/../failed`.
+    pub fn statements_failed_dir(&self) -> PathBuf {
+        self.statements_failed_dir.clone().unwrap_or_else(|| {
+            self.statements_dump_dir()
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("failed")
+        })
+    }
+
     /// Directory holding exercise images and videos for `GET /media/*`.
     ///
     /// Defaults to `<db_dir>/exercise_media`.
@@ -256,7 +316,10 @@ impl Config {
     ///
     /// Split out from [`Config::load`] so the precedence rules can be tested
     /// without touching the filesystem.
-    pub fn from_values(deployment: serde_json::Map<String, Value>, overlay: serde_json::Map<String, Value>) -> Self {
+    pub fn from_values(
+        deployment: serde_json::Map<String, Value>,
+        overlay: serde_json::Map<String, Value>,
+    ) -> Self {
         let get = |map: &serde_json::Map<String, Value>, key: &str| -> Option<String> {
             map.get(key)
                 .and_then(Value::as_str)
@@ -279,10 +342,7 @@ impl Config {
             cfg = cfg.with_bind_addr(addr);
         }
         if let Some(name) = get(&deployment, "model_name") {
-            cfg = cfg.with_model(
-                get(&deployment, "model_api").unwrap_or_default(),
-                name,
-            );
+            cfg = cfg.with_model(get(&deployment, "model_api").unwrap_or_default(), name);
         } else if let Some(key) = get(&deployment, "model_api") {
             let name = cfg.model_name.clone();
             cfg = cfg.with_model(key, name);
@@ -306,35 +366,20 @@ impl Config {
         cfg.statements_store_dir = get(&deployment, "statements_store_dir").map(PathBuf::from);
 
         let statements = deployment.get("statements").and_then(Value::as_object);
-        if let Some(dirs) = statements
-            .and_then(|statements| statements.get("watch_dirs"))
-            .and_then(Value::as_array)
-        {
-            for entry in dirs {
-                let path = entry
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty());
-                let source = entry
-                    .get("source")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty());
-                match (path, source) {
-                    (Some(path), Some(source)) => cfg.watch_dirs.push(WatchDir {
-                        path: PathBuf::from(path),
-                        source: source.to_string(),
-                    }),
-                    // A half-specified entry would silently watch nothing, so
-                    // say so rather than dropping it without a trace.
-                    _ => tracing::warn!(
-                        ?entry,
-                        "ignoring incomplete statement watch directory"
-                    ),
-                }
-            }
-        }
+        // The lifecycle roots are deployment-owned for the same reason as the
+        // store and the archive: the service reads, moves and grants access to
+        // these paths, so a per-user overlay must not redirect them.
+        let statement_path = |key: &str| -> Option<PathBuf> {
+            statements
+                .and_then(|statements| statements.get(key))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        };
+        cfg.statements_dump_dir = statement_path("dump_dir");
+        cfg.statements_parsed_dir = statement_path("parsed_dir");
+        cfg.statements_failed_dir = statement_path("failed_dir");
 
         // Feed behaviour merges from the overlay because the desktop Settings
         // form owns it. Credentials come from the overlay only: the deployment
@@ -360,7 +405,12 @@ impl Config {
             cfg.t212.enabled = enabled;
         }
         if let Some(environment) = feed_value("environment").and_then(Value::as_str) {
-            cfg.t212.environment = if environment == "demo" { "demo" } else { "live" }.to_string();
+            cfg.t212.environment = if environment == "demo" {
+                "demo"
+            } else {
+                "live"
+            }
+            .to_string();
         }
         if let Some(days) = feed_value("lookback_days").and_then(Value::as_i64) {
             cfg.t212.lookback_days = days.clamp(1, 3650);
@@ -432,7 +482,9 @@ impl Default for Config {
             archive_dir: None,
             base_currency: "EUR".to_string(),
             statements_store_dir: None,
-            watch_dirs: Vec::new(),
+            statements_dump_dir: None,
+            statements_parsed_dir: None,
+            statements_failed_dir: None,
             t212: T212FeedConfig::default(),
         }
     }
@@ -569,7 +621,10 @@ mod tests {
     #[test]
     fn archive_dir_defaults_beside_the_database() {
         let cfg = Config::new(PathBuf::from("/var/lib/maia/maia.db"), "k".into());
-        assert_eq!(cfg.archive_dir(), PathBuf::from("/var/lib/maia/receipts_archive"));
+        assert_eq!(
+            cfg.archive_dir(),
+            PathBuf::from("/var/lib/maia/receipts_archive")
+        );
 
         let configured = cfg.with_archive_dir(Some(PathBuf::from("/srv/archive")));
         assert_eq!(configured.archive_dir(), PathBuf::from("/srv/archive"));
@@ -583,7 +638,10 @@ mod tests {
             obj(json!({ "archive_dir": "/var/lib/maia/receipts_archive" })),
             obj(json!({ "archive_dir": "/tmp/hijacked" })),
         );
-        assert_eq!(cfg.archive_dir(), PathBuf::from("/var/lib/maia/receipts_archive"));
+        assert_eq!(
+            cfg.archive_dir(),
+            PathBuf::from("/var/lib/maia/receipts_archive")
+        );
     }
 
     #[test]
@@ -592,9 +650,9 @@ mod tests {
             obj(json!({
                 "base_currency": "usd",
                 "statements": {
-                    "watch_dirs": [
-                        { "path": "/srv/inbox/credit_agricole", "source": "credit_agricole" }
-                    ],
+                    "dump_dir": "/mnt/statements/dump",
+                    "parsed_dir": "/mnt/statements/parsed",
+                    "failed_dir": "/mnt/statements/failed",
                     "feeds": {
                         "trading212": {
                             "enabled": true,
@@ -607,15 +665,48 @@ mod tests {
             serde_json::Map::new(),
         );
         assert_eq!(cfg.base_currency, "USD");
-        assert_eq!(cfg.watch_dirs.len(), 1);
         assert_eq!(
-            cfg.watch_dirs[0].path,
-            PathBuf::from("/srv/inbox/credit_agricole")
+            cfg.statements_dump_dir(),
+            PathBuf::from("/mnt/statements/dump")
         );
-        assert_eq!(cfg.watch_dirs[0].source, "credit_agricole");
+        assert_eq!(
+            cfg.statements_parsed_dir(),
+            PathBuf::from("/mnt/statements/parsed")
+        );
+        assert_eq!(
+            cfg.statements_failed_dir(),
+            PathBuf::from("/mnt/statements/failed")
+        );
         assert!(cfg.t212.enabled);
         assert_eq!(cfg.t212.environment, "demo");
         assert_eq!(cfg.t212.lookback_days, 30);
+    }
+
+    /// The parsed and failed trees default as siblings of the dump root, so a
+    /// configured dump folder keeps the whole lifecycle in one place.
+    #[test]
+    fn statement_lifecycle_dirs_default_beside_the_dump_root() {
+        // Both sides of each comparison resolve the XDG base the same way, so
+        // the assertion holds whatever the test host has exported.
+        let root = Config::xdg_data_home().join("maia/statements");
+        let cfg = Config::from_values(serde_json::Map::new(), serde_json::Map::new());
+        assert_eq!(cfg.statements_dump_dir(), root.join("dump"));
+        assert_eq!(cfg.statements_parsed_dir(), root.join("parsed"));
+        assert_eq!(cfg.statements_failed_dir(), root.join("failed"));
+
+        // Only the dump folder configured: the siblings derive from it.
+        let cfg = Config::from_values(
+            obj(json!({ "statements": { "dump_dir": "/mnt/statements/dump" } })),
+            serde_json::Map::new(),
+        );
+        assert_eq!(
+            cfg.statements_parsed_dir(),
+            PathBuf::from("/mnt/statements/parsed")
+        );
+        assert_eq!(
+            cfg.statements_failed_dir(),
+            PathBuf::from("/mnt/statements/failed")
+        );
     }
 
     /// Credentials are per-user: the deployment file is read by the service
@@ -641,7 +732,10 @@ mod tests {
                 }
             })),
         );
-        assert!(cfg.t212.enabled, "deployment still owns whether the feed runs");
+        assert!(
+            cfg.t212.enabled,
+            "deployment still owns whether the feed runs"
+        );
         assert_eq!(cfg.t212.api_key, "overlay-key");
         assert_eq!(cfg.t212.api_secret, "overlay-secret");
     }
@@ -658,7 +752,10 @@ mod tests {
             obj(json!({ "statements_store_dir": "/srv/statements" })),
             serde_json::Map::new(),
         );
-        assert_eq!(configured.statements_store_dir(), PathBuf::from("/srv/statements"));
+        assert_eq!(
+            configured.statements_store_dir(),
+            PathBuf::from("/srv/statements")
+        );
     }
 
     /// The overlay owns the feed form, but not the paths the service opens.
@@ -668,18 +765,20 @@ mod tests {
             obj(json!({
                 "base_currency": "EUR",
                 "statements": {
-                    "watch_dirs": [{ "path": "/srv/inbox", "source": "credit_agricole" }]
+                    "dump_dir": "/srv/statements/dump"
                 }
             })),
             obj(json!({
                 "base_currency": "USD",
                 "statements": {
-                    "watch_dirs": [{ "path": "/tmp/hijacked", "source": "firstrade" }]
+                    "dump_dir": "/tmp/hijacked"
                 }
             })),
         );
         assert_eq!(cfg.base_currency, "EUR");
-        assert_eq!(cfg.watch_dirs.len(), 1);
-        assert_eq!(cfg.watch_dirs[0].path, PathBuf::from("/srv/inbox"));
+        assert_eq!(
+            cfg.statements_dump_dir(),
+            PathBuf::from("/srv/statements/dump")
+        );
     }
 }

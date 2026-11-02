@@ -1,7 +1,5 @@
 //! HTTP surface for statement staging, import and feeds.
 
-use std::collections::HashSet;
-
 use axum::{
     Json,
     extract::{Multipart, Path, Query, State},
@@ -367,8 +365,7 @@ pub async fn delete_statement(
 // ---------------------------------------------------------------------------
 
 pub async fn scan_statements(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let mut seen = HashSet::new();
-    let results = statements::watch::scan_once(&state, &mut seen).await;
+    let results = statements::watch::scan_folder(&state).await;
     let items = results
         .into_iter()
         .map(|result| match result {

@@ -17,7 +17,7 @@ use super::{
 };
 use crate::config::Config;
 
-const PROVIDER: &str = "trading212";
+pub(crate) const PROVIDER: &str = "trading212";
 const MAX_PAGES: usize = 40;
 const MAX_RATE_LIMIT_WAIT_SECS: u64 = 60;
 
@@ -593,7 +593,7 @@ fn suggested_category(type_: &str, kind: LineKind) -> Option<String> {
     }
 }
 
-fn line_fingerprint(
+pub(crate) fn line_fingerprint(
     provider: &str,
     account: &str,
     source_ref: Option<&str>,
@@ -617,13 +617,13 @@ fn line_fingerprint(
     }
 }
 
-fn month_key(ms: i64) -> String {
+pub(crate) fn month_key(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|dt| dt.format("%Y-%m").to_string())
         .unwrap_or_else(|| "1970-01".to_string())
 }
 
-fn month_bounds(month: &str) -> (String, String) {
+pub(crate) fn month_bounds(month: &str) -> (String, String) {
     let mut parts = month.split('-');
     let year = parts
         .next()

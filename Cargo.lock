@@ -4693,6 +4693,7 @@ dependencies = [
  "csv",
  "encoding_rs",
  "hex",
+ "inotify",
  "r2d2",
  "r2d2_sqlite",
  "reqwest 0.12.22",

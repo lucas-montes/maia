@@ -13,6 +13,12 @@ const CONFIG_FIELD_DEFS: { key: string; label: string; placeholder: string; mana
   { key: "nutriments_path", label: "Nutriments Path", placeholder: "" },
   { key: "model_api", label: "Model API Key", placeholder: "", managed: true },
   { key: "receipts.archived_dir", label: "Receipts Archive Directory", placeholder: "receipts_archive" },
+  // Statement lifecycle folders: the service alone moves files through them,
+  // so they are deployment-owned and shown read-only. Dropping a file in the
+  // dump folder stages it; results land in the parsed or failed folder.
+  { key: "statements.dump_dir", label: "Statements Dump Directory (managed)", placeholder: "~/.local/share/maia/statements/dump", managed: true },
+  { key: "statements.parsed_dir", label: "Statements Parsed Directory (managed)", placeholder: "~/.local/share/maia/statements/parsed", managed: true },
+  { key: "statements.failed_dir", label: "Statements Failed Directory (managed)", placeholder: "~/.local/share/maia/statements/failed", managed: true },
 ];
 
 function extractConfigFields(jsonStr: string): Record<string, string> {

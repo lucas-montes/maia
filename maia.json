@@ -4,10 +4,9 @@
   "database": "maia.db",
   "base_currency": "EUR",
   "statements": {
-    "watch_dirs": [
-      { "path": "statements/inbox/credit_agricole", "source": "credit_agricole" },
-      { "path": "statements/inbox/firstrade", "source": "firstrade" }
-    ],
+    "dump_dir": "statements/dump",
+    "parsed_dir": "statements/parsed",
+    "failed_dir": "statements/failed",
     "feeds": {
       "trading212": {
         "enabled": false,
