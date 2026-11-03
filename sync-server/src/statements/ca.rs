@@ -529,17 +529,12 @@ mod tests {
 
     /// A small Windows-1252 export with three account sections, committed
     /// under `fixtures/statements/ca.csv` so every machine runs the parser
-    /// against the same bytes. `MAIA_CA_FIXTURE` can point at a real export
-    /// instead when the environment has one.
+    /// against the same bytes.
     fn fixture() -> Option<Vec<u8>> {
-        let default = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/statements/ca.csv");
-        let path = std::env::var("MAIA_CA_FIXTURE").unwrap_or_else(|_| default.to_string());
-        match std::fs::read(&path) {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/statements/ca.csv");
+        match std::fs::read(path) {
             Ok(bytes) => Some(bytes),
-            Err(_) => {
-                eprintln!("skipping CA parser test: the fixture {path} is missing");
-                None
-            }
+            Err(error) => panic!("the fixture {path} should be committed: {error}"),
         }
     }
 

@@ -511,15 +511,14 @@ mod tests {
 
     /// A small synthetic export committed in the repository, using the real
     /// Firstrade column set (`Transaction` rather than the API-style `Action`
-    /// the inline sample uses). `MAIA_FIRSTRADE_FIXTURE` can point elsewhere.
+    /// the inline sample uses).
     #[test]
     fn parses_the_committed_fixture() {
-        let default = concat!(
+        let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/fixtures/statements/firstrade.csv"
         );
-        let path = std::env::var("MAIA_FIRSTRADE_FIXTURE").unwrap_or_else(|_| default.to_string());
-        let bytes = std::fs::read(&path)
+        let bytes = std::fs::read(path)
             .unwrap_or_else(|error| panic!("the fixture {path} should be committed: {error}"));
         let doc = RawDocument::file(DocumentKind::Csv, bytes, PathBuf::from(&path));
         let statements = FirstradeSource::new(PathBuf::from(&path))

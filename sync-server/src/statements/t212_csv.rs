@@ -608,13 +608,11 @@ mod tests {
     }
 
     /// A small synthetic export committed in the repository, with one row of
-    /// each action and three months. `MAIA_T212_FIXTURE` can point at a real
-    /// export instead when the environment has one.
+    /// each action and three months.
     #[test]
     fn parses_the_committed_fixture() {
-        let default = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/statements/t212.csv");
-        let path = std::env::var("MAIA_T212_FIXTURE").unwrap_or_else(|_| default.to_string());
-        let bytes = std::fs::read(&path)
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/statements/t212.csv");
+        let bytes = std::fs::read(path)
             .unwrap_or_else(|error| panic!("the fixture {path} should be committed: {error}"));
         let doc = RawDocument::file(DocumentKind::Csv, bytes, PathBuf::from(&path));
         let source = Trading212CsvSource::new(PathBuf::from(&path));
