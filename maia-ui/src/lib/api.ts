@@ -474,6 +474,13 @@ export const api = {
 
   scanStatements: () => invoke<Envelope<unknown>>("scan_statements"),
 
+  /** Drops picked statement files into the dump folder of one source. The
+   *  server's watcher stages them; nothing is parsed here. */
+  addStatementFiles: (
+    source: string,
+    files: { name: string; data: string }[],
+  ) => invoke<Envelope<string[]>>("add_statement_files", { source, files }),
+
   listStatementFeeds: () =>
     invoke<Envelope<{ items: StatementFeedStatus[] }>>("list_statement_feeds"),
 

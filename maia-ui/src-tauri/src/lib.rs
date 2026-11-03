@@ -1371,6 +1371,11 @@ async fn create_fx_rate(
 // Staging lives on the server: it parses files and provider feeds, and it is
 // the only process that may write the database. The desktop review screen is a
 // thin client over those endpoints, like the phone.
+//
+// The one exception below is the drop form: the webview's file input cannot
+// hand over absolute paths (like every web sandbox), so the picked bytes
+// travel through the command and land in the server's dump folder, where the
+// watcher takes over. Nothing here parses or imports anything.
 
 fn json_result(
     result: Result<serde_json::Value, api::ApiError>,
@@ -1487,6 +1492,108 @@ async fn sync_statement_feed(provider: String) -> CommandResult<serde_json::Valu
         )
         .await,
     )
+}
+
+/// One file the drop form picked, with its content (base64).
+#[derive(serde::Deserialize)]
+struct StatementDrop {
+    name: String,
+    /// Base64 of the file contents, as `FileReader.readAsDataURL` produced it.
+    data: String,
+}
+
+/// `export.csv` + suffix 2 becomes `export-2.csv`, keeping the extension
+/// recognizable. Mirrors the server's own rule for handled files.
+fn disambiguate_dump_name(name: &str, suffix: usize) -> String {
+    match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => format!("{stem}-{suffix}.{extension}"),
+        _ => format!("{name}-{suffix}"),
+    }
+}
+
+/// Writes one dropped file into `<dump_dir>/<source>/<name>`.
+///
+/// Only the final path component of the picked name writes: a name carrying
+/// directories would otherwise escape the dump tree. A name already taken
+/// gets a numeric suffix rather than an overwrite -- the server may be about
+/// to move that exact file out from under us.
+///
+/// Returns where the file landed, so the banner can show the real path.
+fn place_statement_file(
+    dump_root: &std::path::Path,
+    source: sync_server::statements::SourceId,
+    raw_name: &str,
+    bytes: &[u8],
+) -> Result<std::path::PathBuf, String> {
+    let name = raw_name.rsplit(['/', '\\']).next().unwrap_or("").trim();
+    if name.is_empty() || name == "." || name == ".." {
+        return Err(format!("{raw_name:?} has no usable file name"));
+    }
+    if !name.contains('.') {
+        return Err(format!(
+            "{name} has no extension; statement files are CSV exports"
+        ));
+    }
+
+    let dir = dump_root.join(source.as_str());
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("creating {}: {error}", dir.display()))?;
+    let mut target = dir.join(name);
+    let mut suffix = 1;
+    while target.exists() {
+        suffix += 1;
+        target = dir.join(disambiguate_dump_name(name, suffix));
+    }
+    std::fs::write(&target, bytes)
+        .map_err(|error| format!("writing {}: {error}", target.display()))?;
+    Ok(target)
+}
+
+/// Drops picked statement files into the dump folder for one source.
+///
+/// The server's watcher (inotify, with a slow sweep as backstop) picks them up
+/// from here; this command deliberately stops at placing the bytes. It neither
+/// triggers a scan nor touches the database.
+#[tauri::command]
+fn add_statement_files(source: String, files: Vec<StatementDrop>) -> CommandResult<Vec<String>> {
+    let Some(source_id) = sync_server::statements::SourceId::parse(&source) else {
+        return CommandResult {
+            success: false,
+            data: None,
+            error: Some(format!("unknown statement source: {source}")),
+        };
+    };
+    use base64::Engine as _;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let dump_root = sync_config().statements_dump_dir();
+    let mut placed = Vec::new();
+    for file in files {
+        let bytes = match engine.decode(file.data.as_bytes()) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return CommandResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("decoding {}: {error}", file.name)),
+                };
+            }
+        };
+        match place_statement_file(&dump_root, source_id, &file.name, &bytes) {
+            Ok(path) => placed.push(path.display().to_string()),
+            Err(error) => {
+                return CommandResult {
+                    success: false,
+                    data: None,
+                    error: Some(error),
+                };
+            }
+        }
+    }
+    CommandResult {
+        success: true,
+        data: Some(placed),
+        error: None,
+    }
 }
 
 #[tauri::command]
@@ -2939,6 +3046,7 @@ pub fn run() {
             import_statement,
             ignore_statement,
             delete_statement,
+            add_statement_files,
             scan_statements,
             list_statement_feeds,
             get_statement_feed_settings,
@@ -3186,6 +3294,25 @@ mod tests {
         );
     }
 
+    /// Unique scratch directory, removed on drop.
+    struct Scratch(std::path::PathBuf);
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "maia-drop-{tag}-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple(),
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// Helper so the loop above reads as an assertion rather than a panic.
     trait UnwrapErrOrElse<T, E> {
         fn unwrap_err_or_else(self, f: impl FnOnce() -> E) -> E;
@@ -3198,5 +3325,101 @@ mod tests {
                 Err(e) => e,
             }
         }
+    }
+
+    use sync_server::statements::SourceId;
+
+    #[test]
+    fn a_dropped_file_lands_in_the_source_folder() {
+        let scratch = Scratch::new("basic");
+        let placed =
+            place_statement_file(&scratch.0, SourceId::CreditAgricole, "export.csv", b"rows")
+                .unwrap();
+        assert_eq!(placed, scratch.0.join("credit_agricole").join("export.csv"));
+        assert_eq!(std::fs::read(&placed).unwrap(), b"rows");
+    }
+
+    #[test]
+    fn a_taken_name_is_suffixed_not_overwritten() {
+        let scratch = Scratch::new("collision");
+        let first =
+            place_statement_file(&scratch.0, SourceId::Trading212, "export.csv", b"one").unwrap();
+        let second =
+            place_statement_file(&scratch.0, SourceId::Trading212, "export.csv", b"two").unwrap();
+        assert_eq!(second, scratch.0.join("trading212").join("export-2.csv"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"one");
+        assert_eq!(std::fs::read(&second).unwrap(), b"two");
+
+        let third =
+            place_statement_file(&scratch.0, SourceId::Trading212, "export.csv", b"three").unwrap();
+        assert_eq!(third, scratch.0.join("trading212").join("export-3.csv"));
+    }
+
+    #[test]
+    fn a_name_carrying_directories_cannot_escape_the_dump_tree() {
+        // Only the final path component is written, so a picked name carrying
+        // directories collapses into the source folder instead of escaping.
+        let scratch = Scratch::new("traversal");
+        let outside = scratch.0.join("outside.csv");
+        std::fs::write(&outside, b"bait").unwrap();
+
+        for raw in [
+            "../outside.csv",
+            "..\\outside.csv",
+            "/some/where/outside.csv",
+        ] {
+            let placed = place_statement_file(&scratch.0, SourceId::Firstrade, raw, b"payload")
+                .unwrap_or_else(|_| panic!("{raw:?} should have been placed inside"));
+            let source_dir = scratch.0.join("firstrade");
+            assert_eq!(
+                placed.parent(),
+                Some(source_dir.as_path()),
+                "{raw:?} must stay inside the source folder (got {placed:?})"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"bait",
+            "the bait file was untouched"
+        );
+
+        let placed = place_statement_file(
+            &scratch.0,
+            SourceId::Firstrade,
+            "/some/where/orders.csv",
+            b"orders",
+        )
+        .unwrap();
+        assert_eq!(placed, scratch.0.join("firstrade").join("orders.csv"));
+    }
+
+    #[test]
+    fn a_extensionless_or_dot_only_name_is_refused() {
+        let scratch = Scratch::new("extension");
+        for bad in ["no-extension", "", ".", "..", "   "] {
+            let err = place_statement_file(&scratch.0, SourceId::Firstrade, bad, b"x")
+                .unwrap_err_or_else(|| panic!("{bad:?} should have been refused"));
+            assert!(!err.is_empty());
+        }
+        assert!(
+            !scratch.0.join("firstrade").exists(),
+            "every name was refused; nothing should have been written"
+        );
+    }
+
+    #[test]
+    fn a_file_the_server_parked_does_not_confuse_the_suffix_counter() {
+        // The server writes `<name>.log` beside failed files; an existing log
+        // must not make the next drop of the same name collide with it.
+        let scratch = Scratch::new("log-beside");
+        let dir = scratch.0.join("credit_agricole");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("export.csv.log"), "old failure").unwrap();
+
+        let placed =
+            place_statement_file(&scratch.0, SourceId::CreditAgricole, "export.csv", b"new")
+                .unwrap();
+        assert_eq!(placed, dir.join("export.csv"), "export.csv itself was free");
+        assert_eq!(std::fs::read(&placed).unwrap(), b"new");
     }
 }

@@ -63,7 +63,7 @@ function statementTitle(s: Pick<StatementSummary, "institution" | "accountName">
 
 function listHtml(items: StatementSummary[], selectedId: string | null): string {
   if (items.length === 0) {
-    return `<div class="p-4 text-center text-sm text-ink-500">No statements staged yet. Drop a file in a watched directory, upload from the phone, or sync Trading 212.</div>`;
+    return `<div class="p-4 text-center text-sm text-ink-500">No statements staged yet. Use Add statement above to drop CSV exports in, upload from the phone, or sync Trading 212.</div>`;
   }
   const rows = items
     .map((s) => {
@@ -305,6 +305,76 @@ export function mount(root: HTMLElement): () => void {
 
   const selectedSet = (): Set<string> => new Set(statementsAtom.get().selectedLines);
 
+  /** Files picked in the drop form, kept here rather than in the atom: they
+   *  are transient UI state and re-renders must not lose them. */
+  let pickedFiles: File[] = [];
+
+  /** Reads one picked file as base64, stripping the data-URL prefix. */
+  const readAsBase64 = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = String(reader.result ?? "");
+        const comma = result.indexOf(",");
+        resolve(comma >= 0 ? result.slice(comma + 1) : result);
+      };
+      reader.onerror = () => reject(new Error(`could not read ${file.name}`));
+      reader.readAsDataURL(file);
+    });
+
+  /** Re-applies the drop form's transient state after a re-render, since
+   *  `setHtml` rebuilds it from markup that knows nothing about the picks. */
+  const syncDropForm = (): void => {
+    const details = content.querySelector<HTMLDetailsElement>("details[data-slot='drop-form']");
+    const label = content.querySelector<HTMLElement>("[data-drop-selected]");
+    const add = content.querySelector<HTMLButtonElement>("[data-action='drop-statement-files']");
+    if (!label || !add) return;
+    if (pickedFiles.length === 0) {
+      label.textContent = "No files chosen";
+      add.disabled = true;
+      return;
+    }
+    label.textContent =
+      pickedFiles.length === 1 ? pickedFiles[0].name : `${pickedFiles.length} files chosen`;
+    add.disabled = false;
+    if (details) details.open = true;
+  };
+
+  const dropStatementFiles = async (): Promise<void> => {
+    const source = content.querySelector<HTMLSelectElement>("[data-drop-source]")?.value ?? "";
+    const files = pickedFiles;
+    if (files.length === 0 || !source) return;
+    statementsAtom.set({ ...statementsAtom.get(), status: "saving", message: "" });
+    rerender();
+    try {
+      const drops = await Promise.all(
+        files.map(async (file) => ({ name: file.name, data: await readAsBase64(file) })),
+      );
+      const res = await api.addStatementFiles(source, drops);
+      if (!res.success) throw new Error(res.error ?? "Could not place the files");
+      const placed = res.data ?? [];
+      // The dropdown's live value wins over the atom: the render that opened
+      // the form may be older than a change the user just made.
+      localStorage.setItem("maia.statements.lastDropSource", source);
+      const dir = placed[0]?.replace(/[/\\][^/\\]*$/, "") ?? "the dump folder";
+      pickedFiles = [];
+      statementsAtom.set({
+        ...statementsAtom.get(),
+        lastDropSource: source,
+        status: "saved",
+        message: `${placed.length} file(s) placed in ${dir}. The watcher stages them automatically.`,
+      });
+      rerender();
+    } catch (e) {
+      statementsAtom.set({
+        ...statementsAtom.get(),
+        status: "error",
+        message: `Adding statements failed: ${e}`,
+      });
+      rerender();
+    }
+  };
+
   const render = (): void => {
     const state = statementsAtom.get();
     if (state.selectedId && state.detail) {
@@ -336,9 +406,23 @@ export function mount(root: HTMLElement): () => void {
               <option value="trading212" ${state.source === "trading212" ? "selected" : ""}>Trading 212</option>
               <option value="firstrade" ${state.source === "firstrade" ? "selected" : ""}>Firstrade</option>
             </select>
-            <button class="btn btn-ghost btn-sm" type="button" data-action="scan">Scan watch folders</button>
+            <button class="btn btn-ghost btn-sm" type="button" data-action="scan">Scan dump folders</button>
             <button class="btn btn-ghost btn-sm" type="button" data-action="refresh">Refresh</button>
           </div>
+          <details class="rounded-lg border border-base-300 bg-base-200/40" data-slot="drop-form">
+            <summary class="cursor-pointer px-3 py-2 text-sm font-medium text-ink-200 select-none">Add statement…</summary>
+            <div class="flex flex-wrap items-center gap-2 border-t border-base-300 px-3 py-2">
+              <select class="select select-sm select-bordered" data-drop-source>
+                <option value="credit_agricole"${state.lastDropSource === "credit_agricole" ? " selected" : ""}>Crédit Agricole</option>
+                <option value="trading212"${state.lastDropSource === "trading212" ? " selected" : ""}>Trading 212</option>
+                <option value="firstrade"${state.lastDropSource === "firstrade" ? " selected" : ""}>Firstrade</option>
+              </select>
+              <input type="file" class="hidden" data-drop-input accept=".csv,.txt" multiple />
+              <button class="btn btn-ghost btn-sm" type="button" data-action="choose-statement-files">Choose files…</button>
+              <span class="text-sm text-ink-500" data-drop-selected>No files chosen</span>
+              <button class="btn btn-primary btn-sm" type="button" data-action="drop-statement-files" disabled>Add</button>
+            </div>
+          </details>
           <div class="text-sm text-ink-400">${state.items.length} statement${state.items.length !== 1 ? "s" : ""}</div>
           ${listHtml(state.items as StatementSummary[], state.selectedId)}
           <div>${backToDashboard()}</div>
@@ -371,6 +455,7 @@ export function mount(root: HTMLElement): () => void {
       });
     }
     render();
+    syncDropForm();
   };
 
   const loadFeeds = async (): Promise<void> => {
@@ -544,6 +629,12 @@ export function mount(root: HTMLElement): () => void {
 
   root.addEventListener("change", (event) => {
     const target = event.target as HTMLElement;
+    if (target.matches("[data-drop-input]")) {
+      const input = target as HTMLInputElement;
+      pickedFiles = [...(input.files ?? [])];
+      syncDropForm();
+      return;
+    }
     if (target.matches("[data-filter='status']")) {
       statementsAtom.set({
         ...statementsAtom.get(),
@@ -618,6 +709,12 @@ export function mount(root: HTMLElement): () => void {
       case "scan":
         void scan();
         return;
+      case "choose-statement-files":
+        content.querySelector<HTMLInputElement>("[data-drop-input]")?.click();
+        return;
+      case "drop-statement-files":
+        void dropStatementFiles();
+        return;
       case "sync-feed":
         void syncFeed();
         return;
@@ -657,9 +754,14 @@ export function mount(root: HTMLElement): () => void {
     }
   });
 
+  const rerender = (): void => {
+    render();
+    syncDropForm();
+  };
+
   render();
   void loadList();
   void loadFeeds();
-  const unsubscribe = statementsAtom.subscribe(render);
+  const unsubscribe = statementsAtom.subscribe(rerender);
   return () => unsubscribe();
 }

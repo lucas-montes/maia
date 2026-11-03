@@ -187,6 +187,8 @@ export const statementsAtom = atom<
     filter: string;
     source: string;
     selectedLines: string[];
+    /** Last source the drop form placed files under, so the dropdown stays on it. */
+    lastDropSource: string;
   }
 >({
   ...emptyList<any>(),
@@ -195,6 +197,7 @@ export const statementsAtom = atom<
   filter: "",
   source: "",
   selectedLines: [],
+  lastDropSource: localStorage.getItem("maia.statements.lastDropSource") ?? "credit_agricole",
 });
 
 export const fxRatesAtom = atom<ListState<any> & { base: string; date: string }>({
