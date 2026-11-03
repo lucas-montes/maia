@@ -9,7 +9,7 @@ import { panelClose, panelOpen, statusBanner } from "./shared";
 /** FxRates — add a manual rate and refresh the list for a base/date. */
 export function mount(root: HTMLElement): () => void {
   root.innerHTML = `
-    ${panelOpen("FxRates", "Add new • refresh • no edit")}
+    ${panelOpen("FxRates", "Add new • refresh • no edit", "panel-fit")}
       <div data-slot="status"></div>
       <div class="flex flex-wrap gap-2">
         <input id="fx-base" value="${escapeHtml(fxRatesAtom.get().base)}" placeholder="Base" class="input input-bordered w-20" />

@@ -163,8 +163,22 @@
   /* ---- Panels/cards (template: `card bg-base-200` floating on the
      bg-base-100 content pane) ---- */
 
+  /* Default: the panel sizes to its content. In .app-main-scroll (a scrolling
+     flex column) a content-sized panel simply grows past the viewport and the
+     page scrolls — cards can never overflow their container. */
   .panel {
-    @apply flex min-h-0 flex-1 flex-col rounded-box border border-base-300 bg-base-200;
+    @apply flex flex-col rounded-box border border-base-300 bg-base-200;
+  }
+
+  /* Viewport-fit variant for panels whose content scrolls internally (their
+     children use `min-h-0 flex-1 overflow-auto`). Bounds the panel to the main
+     pane and lets .panel-content flex so the nested scroll surfaces get a real
+     height to scroll within. */
+  .panel-fit {
+    @apply min-h-0 flex-1;
+  }
+  .panel-fit .panel-content {
+    @apply min-h-0 flex-1;
   }
 
   .panel-header {
@@ -180,7 +194,7 @@
   }
 
   .panel-content {
-    @apply flex min-h-0 flex-1 flex-col px-5 pb-5 pt-2;
+    @apply flex flex-col px-5 pb-5 pt-2;
   }
 
   /* Rows in a divided list: aligned, evenly padded, gap-safe (list items keep

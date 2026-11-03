@@ -9,7 +9,7 @@ import { panelClose, panelOpen, statusBanner } from "./shared";
 /** Body Metrics — weight/height chart plus the raw list. */
 export function mount(root: HTMLElement): () => void {
   root.innerHTML = `
-    ${panelOpen("Body Metrics", "Weight and height over time")}
+    ${panelOpen("Body Metrics", "Weight and height over time", "panel-fit")}
       <div data-slot="status"></div>
       <div class="rounded border border-surface-800 bg-base-100 p-3">
         <canvas data-slot="chart" height="120"></canvas>

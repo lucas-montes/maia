@@ -310,7 +310,7 @@ export function mount(root: HTMLElement): () => void {
     if (state.selectedId && state.detail) {
       setHtml(
         content,
-        `${panelOpen("Statement Review", state.detail.statement.institution)}
+        `${panelOpen("Statement Review", state.detail.statement.institution, "panel-fit")}
           ${statusBanner(state)}
           ${detailHtml(state.detail as StatementDetail, selectedSet())}
         ${panelClose}`,
@@ -318,7 +318,7 @@ export function mount(root: HTMLElement): () => void {
     } else {
       setHtml(
         content,
-        `${panelOpen("Statements", "Review staged bank and broker statements before importing")}
+        `${panelOpen("Statements", "Review staged bank and broker statements before importing", "panel-fit")}
           ${statusBanner(state)}
           ${feedCard(feeds)}
           <div class="flex flex-wrap items-center gap-2">

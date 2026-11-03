@@ -94,7 +94,7 @@ export function mount(root: HTMLElement): () => void {
     setHtml(
       content,
       `
-      ${panelOpen(`Exercises — ${s.items.length}`, "Catalog from data/ parsed • editable • lazy media")}
+      ${panelOpen(`Exercises — ${s.items.length}`, "Catalog from data/ parsed • editable • lazy media", "panel-fit")}
         <div class="flex flex-wrap gap-2">
           <input id="ex-search" placeholder="Search name/body/equipment" value="${escapeHtml(s.search)}" class="input input-bordered min-w-[200px] flex-1" />
           <select id="ex-bodypart" class="select select-bordered">
@@ -113,7 +113,7 @@ export function mount(root: HTMLElement): () => void {
           <button class="btn btn-secondary btn-sm" data-action="ex-apply">Apply</button>
         </div>
         <div class="text-xs text-ink-500">maia.db • ${s.items.length} total • ${s.filtered.length || s.items.length} filtered • lazy media</div>
-        <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div class="grid grid-cols-1 gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-2 lg:grid-rows-[minmax(0,1fr)]">
           <div class="min-h-0 flex-1 divide-y divide-surface-800 overflow-auto rounded border border-surface-800">
             ${list.map((e) => `
               <button class="flex w-full gap-3 p-3 text-left hover:bg-surface-800 ${s.selectedId === e.id ? "bg-surface-700/50" : ""}" data-action="ex-select" data-id="${escapeHtml(e.id)}">

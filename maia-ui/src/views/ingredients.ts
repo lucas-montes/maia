@@ -15,7 +15,7 @@ const numOrNull = (v: string): number | null => {
 /** Ingredients — searchable list, add modal, and inline rename. */
 export function mount(root: HTMLElement): () => void {
   root.innerHTML = `
-    ${panelOpen("Ingredients", "Manage foods • search, edit, and build meals")}
+    ${panelOpen("Ingredients", "Manage foods • search, edit, and build meals", "panel-fit")}
       <div class="flex items-start justify-between gap-4">
         <div></div>
         <button class="btn btn-success btn-sm shrink-0" data-action="ing-open-modal">+ Add Ingredient</button>

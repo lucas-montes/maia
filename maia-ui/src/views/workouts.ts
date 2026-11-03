@@ -75,7 +75,7 @@ export function mount(root: HTMLElement): () => void {
       setHtml(
         content,
         `
-        ${panelOpen(s.detail?.name || "Workout", "Read-only — managed on mobile")}
+        ${panelOpen(s.detail?.name || "Workout", "Read-only — managed on mobile", "panel-fit")}
           ${statusBanner(s)}
           <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
             ${s.detailStatus === "error" ? `<div class="text-sm text-err-400">${escapeHtml(s.detailMessage || "Couldn't load workout.")}</div>` : ""}
@@ -88,7 +88,7 @@ export function mount(root: HTMLElement): () => void {
       setHtml(
         content,
         `
-        ${panelOpen("Workouts", "From maia.db workouts • per-tab sync")}
+        ${panelOpen("Workouts", "From maia.db workouts • per-tab sync", "panel-fit")}
           ${statusBanner(s)}
           <div class="mb-2 text-xs text-ink-500" data-slot="count">${w.length} workouts</div>
           <div class="min-h-0 flex-1 space-y-2 overflow-auto" data-slot="list">

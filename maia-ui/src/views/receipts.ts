@@ -133,7 +133,7 @@ export function mount(root: HTMLElement): () => void {
       setHtml(
         content,
         `
-        ${panelOpen("Receipt Details", r ? `ID: ${r.id}` : "")}
+        ${panelOpen("Receipt Details", r ? `ID: ${r.id}` : "", "panel-fit")}
           ${statusBanner(s)}
           ${r ? detailHtml(r) : `<div class="flex h-full items-center justify-center text-sm text-ink-500">Receipt not found</div>`}
         ${panelClose}`,
@@ -143,7 +143,7 @@ export function mount(root: HTMLElement): () => void {
       setHtml(
         content,
         `
-        ${panelOpen("Receipts", "Track and manage your expenses")}
+        ${panelOpen("Receipts", "Track and manage your expenses", "panel-fit")}
           ${statusBanner(s)}
           <div class="flex items-center justify-between">
             <span class="text-sm text-ink-400">${s.items.length} receipt${s.items.length !== 1 ? "s" : ""}</span>

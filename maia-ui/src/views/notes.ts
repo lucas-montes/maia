@@ -33,7 +33,7 @@ export function mount(root: HTMLElement): () => void {
       setHtml(
         content,
         `
-        ${panelOpen("Edit Note", meta?.path ? `File: ${meta.path}` : "")}
+        ${panelOpen("Edit Note", meta?.path ? `File: ${meta.path}` : "", "panel-fit")}
           ${statusBanner(s)}
           <div class="rounded border border-surface-700 bg-base-100 px-3 py-2 text-sm font-medium text-ink-100">${escapeHtml(s.editTitle)}</div>
           <pre class="min-h-0 w-full flex-1 overflow-auto whitespace-pre-wrap rounded border border-surface-700 bg-base-100 p-3 font-mono text-sm text-ink-100">${escapeHtml(s.editContent)}</pre>
@@ -48,7 +48,7 @@ export function mount(root: HTMLElement): () => void {
       setHtml(
         content,
         `
-        ${panelOpen("Notes", "Read-only — managed on mobile")}
+        ${panelOpen("Notes", "Read-only — managed on mobile", "panel-fit")}
           ${statusBanner(s)}
           <div class="flex items-center justify-between">
             <span class="text-sm text-ink-400">${s.items.length} note${s.items.length !== 1 ? "s" : ""} • read-only</span>

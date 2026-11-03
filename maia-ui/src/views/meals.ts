@@ -20,7 +20,7 @@ function mealTitle(meal: any): string {
 /** Meals — read-only list with a macro summary per meal. */
 export function mount(root: HTMLElement): () => void {
   root.innerHTML = `
-    ${panelOpen("Meals", "Auto-calc all macros (cal/prot/carb/fat + sodium/fiber/sugar)")}
+    ${panelOpen("Meals", "Auto-calc all macros (cal/prot/carb/fat + sodium/fiber/sugar)", "panel-fit")}
       <div data-slot="status"></div>
       <div class="min-h-0 flex-1 space-y-2 overflow-auto" data-slot="list"></div>
     ${panelClose}

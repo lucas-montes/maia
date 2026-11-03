@@ -14,7 +14,7 @@ import { panelClose, panelOpen, statusBanner } from "./shared";
  */
 export function mount(root: HTMLElement): () => void {
   root.innerHTML = `
-    ${panelOpen("Recipes", "Foods built from ingredients · nutrition is calculated from the composition")}
+    ${panelOpen("Recipes", "Foods built from ingredients · nutrition is calculated from the composition", "panel-fit")}
       <div class="flex items-start justify-between gap-4">
         <div></div>
         <button class="btn btn-success btn-sm shrink-0" data-action="food-new">+ New Recipe</button>

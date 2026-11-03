@@ -9,7 +9,7 @@ import { panelClose, panelOpen, statusBanner } from "./shared";
     re-renders on keystrokes; the input keeps focus. */
 export function mount(root: HTMLElement): () => void {
   root.innerHTML = `
-    ${panelOpen("Transactions", "Expenses and income")}
+    ${panelOpen("Transactions", "Expenses and income", "panel-fit")}
       <div data-slot="status"></div>
       <div class="flex gap-2">
         <input id="tr-search" placeholder="Search transactions" class="input input-bordered flex-1" />

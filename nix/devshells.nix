@@ -24,6 +24,7 @@
     buildInputs = [
       rust
       sce
+      pkgs.sqlitebrowser
       pkgs.openssl
       pkgs.pnpm
       pkgs.nodejs

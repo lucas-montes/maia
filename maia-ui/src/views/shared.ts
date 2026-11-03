@@ -13,8 +13,8 @@ export function statusBanner(state: { status: string; message: string }): string
   return "";
 }
 
-export function panelOpen(title: string, subtitle = ""): string {
-  return `<section class="panel">
+export function panelOpen(title: string, subtitle = "", panelClass = ""): string {
+  return `<section class="panel ${panelClass}">
     <div class="panel-header">
       <h2 class="panel-title">${escapeHtml(title)}</h2>
       ${subtitle ? `<p class="panel-subtitle">${escapeHtml(subtitle)}</p>` : ""}
