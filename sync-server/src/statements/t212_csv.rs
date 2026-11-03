@@ -607,30 +607,75 @@ mod tests {
         assert!(error.to_string().contains("no statement rows"));
     }
 
-    /// A real export should keep parsing; the fixture is optional so the test
-    /// still runs on machines that do not mount the old disk.
+    /// A small synthetic export committed in the repository, with one row of
+    /// each action and three months. `MAIA_T212_FIXTURE` can point at a real
+    /// export instead when the environment has one.
     #[test]
-    fn parses_the_real_export_fixture() {
-        let fixture = std::env::var("MAIA_T212_FIXTURE").unwrap_or_else(|_| {
-            "/mnt/old/home/lucas/Documents/expenses/from_2026-02-03_to_2026-09-04_MTc4ODUxODI2NjA5NQ.csv"
-                .to_string()
-        });
-        let Ok(bytes) = std::fs::read(&fixture) else {
-            eprintln!("fixture {fixture} not present; skipping");
-            return;
-        };
-        let doc = RawDocument::file(DocumentKind::Csv, bytes, PathBuf::from(&fixture));
-        let source = Trading212CsvSource::new(PathBuf::from(&fixture));
+    fn parses_the_committed_fixture() {
+        let default = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/statements/t212.csv");
+        let path = std::env::var("MAIA_T212_FIXTURE").unwrap_or_else(|_| default.to_string());
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("the fixture {path} should be committed: {error}"));
+        let doc = RawDocument::file(DocumentKind::Csv, bytes, PathBuf::from(&path));
+        let source = Trading212CsvSource::new(PathBuf::from(&path));
         let statements = source.parse(&[doc], &ctx()).unwrap();
+
         let total_lines: usize = statements.iter().map(|s| s.lines.len()).sum();
-        assert_eq!(total_lines, 379, "every data row stages");
-        let months: Vec<&str> = statements.iter().map(|s| s.month.as_str()).collect();
-        assert!(months.contains(&"2026-02"), "months: {months:?}");
-        assert!(months.contains(&"2026-09"), "months: {months:?}");
-        // The full month span is present; no warnings for a well-formed file.
+        assert_eq!(total_lines, 10, "every data row stages");
+        assert_eq!(statements.len(), 3, "one statement per month");
         assert!(
             statements.iter().all(|s| s.warnings.is_empty()),
-            "unexpected warnings"
+            "unexpected warnings: {:?}",
+            statements
+                .iter()
+                .flat_map(|s| &s.warnings)
+                .collect::<Vec<_>>()
         );
+
+        let deposit = statements
+            .iter()
+            .flat_map(|s| &s.lines)
+            .find(|l| l.amount == 750.00)
+            .unwrap();
+        assert_eq!(deposit.line_kind, LineKind::TransferIn);
+        assert_eq!(deposit.suggested_type, Some(SuggestedType::Transfer));
+        assert_eq!(
+            deposit.source_ref.as_deref(),
+            Some("019d0000-0000-7101-8000-000000000001")
+        );
+
+        let trade = statements
+            .iter()
+            .flat_map(|s| &s.lines)
+            .find(|l| l.line_kind == LineKind::Trade)
+            .unwrap();
+        assert_eq!(trade.amount, 0.0);
+        assert_eq!(trade.description, "Buy 1.500000 TECH");
+        assert_eq!(
+            trade.metadata.get("ticker"),
+            Some(&serde_json::json!("TECH"))
+        );
+
+        let debit = statements
+            .iter()
+            .flat_map(|s| &s.lines)
+            .find(|l| l.amount == -12.34)
+            .unwrap();
+        assert_eq!(debit.description, "Epicerie Du Centre");
+        assert_eq!(
+            debit.metadata.get("merchant_category"),
+            Some(&serde_json::json!("RETAIL_STORES"))
+        );
+
+        // Months differ, source keys follow the schema.
+        let mut months: Vec<&str> = statements.iter().map(|s| s.month.as_str()).collect();
+        months.sort_unstable();
+        assert_eq!(months, ["2026-08", "2026-09", "2026-10"]);
+        for statement in &statements {
+            assert_eq!(
+                Vec::from([statement.clone()]).into_drafts()[0].source_key,
+                format!("trading212:csv:csv:{}", statement.month)
+            );
+        }
     }
 }

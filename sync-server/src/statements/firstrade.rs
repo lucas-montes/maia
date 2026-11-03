@@ -314,7 +314,11 @@ impl Columns {
         // Require at least an amount or an action column; a random text line
         // should not be mistaken for the header.
         let amount = find("amount").or_else(|| find("net amount"));
-        let action = find("action").or_else(|| find("type"));
+        // The real export heads its column `Transaction`, the API-shaped
+        // export `Action`; both are the line's kind.
+        let action = find("action")
+            .or_else(|| find("transaction"))
+            .or_else(|| find("type"));
         if amount.is_none() && action.is_none() {
             return None;
         }
@@ -503,5 +507,73 @@ mod tests {
     fn parses_parenthesised_negative_amounts() {
         assert_eq!(parse_number("(1,234.56)"), Some(-1234.56));
         assert_eq!(parse_number("$1,000.00"), Some(1000.0));
+    }
+
+    /// A small synthetic export committed in the repository, using the real
+    /// Firstrade column set (`Transaction` rather than the API-style `Action`
+    /// the inline sample uses). `MAIA_FIRSTRADE_FIXTURE` can point elsewhere.
+    #[test]
+    fn parses_the_committed_fixture() {
+        let default = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/statements/firstrade.csv"
+        );
+        let path = std::env::var("MAIA_FIRSTRADE_FIXTURE").unwrap_or_else(|_| default.to_string());
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("the fixture {path} should be committed: {error}"));
+        let doc = RawDocument::file(DocumentKind::Csv, bytes, PathBuf::from(&path));
+        let statements = FirstradeSource::new(PathBuf::from(&path))
+            .parse(&[doc], &ctx())
+            .unwrap();
+
+        let total_lines: usize = statements.iter().map(|s| s.lines.len()).sum();
+        assert_eq!(total_lines, 10, "every data row stages");
+        assert_eq!(statements.len(), 5, "one statement per month");
+        assert!(
+            statements.iter().all(|s| s.warnings.is_empty()),
+            "unexpected warnings: {:?}",
+            statements
+                .iter()
+                .flat_map(|s| &s.warnings)
+                .collect::<Vec<_>>()
+        );
+
+        let buy = statements
+            .iter()
+            .flat_map(|s| &s.lines)
+            .find(|l| l.line_kind == LineKind::Trade)
+            .unwrap();
+        assert_eq!(buy.amount, 0.0, "a firstrade trade is informational only");
+        assert_eq!(buy.metadata.get("symbol"), Some(&serde_json::json!("TECV")));
+
+        let deposit = statements
+            .iter()
+            .flat_map(|s| &s.lines)
+            .find(|l| l.description.contains("ACH DEPOSIT"))
+            .unwrap();
+        assert_eq!(deposit.line_kind, LineKind::TransferIn);
+        assert_eq!(deposit.amount, 500.0);
+
+        let dividend = statements
+            .iter()
+            .flat_map(|s| &s.lines)
+            .find(|l| l.line_kind == LineKind::Dividend)
+            .unwrap();
+        assert_eq!(dividend.amount, 28.05);
+        assert_eq!(dividend.suggested_type, Some(SuggestedType::Income));
+
+        let interest = statements
+            .iter()
+            .flat_map(|s| &s.lines)
+            .find(|l| l.line_kind == LineKind::Interest)
+            .unwrap();
+        assert_eq!(interest.currency_code, "USD");
+
+        let mut months: Vec<&str> = statements.iter().map(|s| s.month.as_str()).collect();
+        months.sort_unstable();
+        assert_eq!(
+            months,
+            ["2026-06", "2026-07", "2026-08", "2026-09", "2026-10"]
+        );
     }
 }

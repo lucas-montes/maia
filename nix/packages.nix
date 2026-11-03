@@ -10,7 +10,16 @@
   # Only cargo-relevant files, so `target`, the 19 GB of media/data churn and
   # `context/tmp` never reach the store, and a dependency fingerprint never
   # depends on an unrelated working-tree file.
-  src = craneLib.cleanCargoSource ../.;
+  #
+  # The statement fixtures are the exception: the CSV parser tests parse them,
+  # so they must survive this filter — and depending on them is exactly what a
+  # parser test should do.
+  src = lib.cleanSourceWith {
+    src = ../.;
+    filter =
+      path: type:
+      lib.hasInfix "/fixtures/statements/" path || craneLib.filterCargoSources path type;
+  };
 
   # utoipa-swagger-ui's build script fetches the Swagger UI bundle from GitHub
   # (`curl` when the `reqwest` feature is off), which neither works in the Nix

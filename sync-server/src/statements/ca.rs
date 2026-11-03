@@ -527,19 +527,17 @@ fn in_period(date: NaiveDate, start: Option<NaiveDate>, end: Option<NaiveDate>) 
 mod tests {
     use super::*;
 
-    /// The real export is personal, so it is not committed. These tests run
-    /// when the file is present -- locally, or wherever `MAIA_CA_FIXTURE`
-    /// points -- and skip otherwise. The Nix sandbox has no home directory and
-    /// must still build.
+    /// A small Windows-1252 export with three account sections, committed
+    /// under `fixtures/statements/ca.csv` so every machine runs the parser
+    /// against the same bytes. `MAIA_CA_FIXTURE` can point at a real export
+    /// instead when the environment has one.
     fn fixture() -> Option<Vec<u8>> {
-        let path = std::env::var("MAIA_CA_FIXTURE")
-            .unwrap_or_else(|_| "/home/lucas/Downloads/CA20261027_184837.csv".to_string());
+        let default = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/statements/ca.csv");
+        let path = std::env::var("MAIA_CA_FIXTURE").unwrap_or_else(|_| default.to_string());
         match std::fs::read(&path) {
             Ok(bytes) => Some(bytes),
             Err(_) => {
-                eprintln!(
-                    "skipping CA parser test: set MAIA_CA_FIXTURE to a Crédit Agricole CSV export"
-                );
+                eprintln!("skipping CA parser test: the fixture {path} is missing");
                 None
             }
         }
@@ -556,33 +554,37 @@ mod tests {
             .map(|s| (s.account_number.clone().unwrap(), s))
             .collect();
 
-        let eko = by_number.get("84890097587").unwrap();
+        let eko = by_number.get("11112222333").unwrap();
         assert_eq!(eko.account_name, "Eko by CA");
-        assert_eq!(eko.movements.len(), 82);
-        assert_eq!(eko.closing_balance, Some(188.76));
+        assert_eq!(eko.movements.len(), 9);
+        assert_eq!(eko.closing_balance, Some(950.40));
         assert_eq!(
             eko.period_start,
             Some(NaiveDate::from_ymd_opt(2025, 10, 1).unwrap())
         );
         assert_eq!(
             eko.period_end,
-            Some(NaiveDate::from_ymd_opt(2026, 10, 27).unwrap())
+            Some(NaiveDate::from_ymd_opt(2026, 10, 30).unwrap())
         );
+        // Opening is derived, not present in the export.
+        let eko_sum: f64 = eko.movements.iter().map(|m| m.amount).sum();
+        assert_eq!(eko.opening_balance, Some(950.40 - eko_sum));
 
-        let livret = by_number.get("84890102343").unwrap();
+        let livret = by_number.get("22223333444").unwrap();
         assert_eq!(livret.account_name, "Livret A");
-        assert_eq!(livret.movements.len(), 12);
-        assert_eq!(livret.closing_balance, Some(8501.21));
+        assert_eq!(livret.movements.len(), 3);
+        assert_eq!(livret.closing_balance, Some(2500.00));
 
-        let ldd = by_number.get("84891165314").unwrap();
+        let ldd = by_number.get("33334444555").unwrap();
         assert_eq!(ldd.account_name, "LDD Solidaire");
-        assert_eq!(ldd.movements.len(), 4);
-        assert_eq!(ldd.closing_balance, Some(10000.08));
+        assert_eq!(ldd.movements.len(), 2);
+        assert_eq!(ldd.closing_balance, Some(10000.50));
 
         assert_eq!(
             sections.iter().map(|s| s.movements.len()).sum::<usize>(),
-            98
+            14
         );
+        assert!(sections.iter().all(|s| s.warnings.is_empty()));
     }
 
     #[test]
@@ -591,20 +593,29 @@ mod tests {
         let sections = parse_csv(&bytes).unwrap();
         let eko = sections
             .iter()
-            .find(|s| s.account_number.as_deref() == Some("84890097587"))
+            .find(|s| s.account_number.as_deref() == Some("11112222333"))
             .unwrap();
 
         let t212 = eko
             .movements
             .iter()
-            .find(|m| m.description.contains("Trading 212"))
+            .find(|m| m.amount == -1000.0 && m.description.contains("Trading 212"))
             .unwrap();
         assert_eq!(t212.amount, -1000.0);
-        assert_eq!(t212.reference.as_deref(), Some("36873033"));
+        assert_eq!(t212.reference.as_deref(), Some("13724688"));
         assert_eq!(
             t212.description,
-            "Virement émis VIR INST vers Trading 212 Market 36873033"
+            "Virement émis VIR INST vers Trading 212 Market 13724688"
         );
+
+        // Thousands separators and the `€` survive in the balance line but are
+        // stripped from amounts. The reference is the last 6-10 digit run.
+        let incoming = eko
+            .movements
+            .iter()
+            .find(|m| m.reference.as_deref() == Some("26091012"))
+            .unwrap();
+        assert_eq!(incoming.amount, 1022.95);
     }
 
     #[test]
@@ -613,7 +624,7 @@ mod tests {
         let sections = parse_csv(&bytes).unwrap();
         let eko = sections
             .iter()
-            .find(|s| s.account_number.as_deref() == Some("84890097587"))
+            .find(|s| s.account_number.as_deref() == Some("11112222333"))
             .unwrap();
 
         let transfer = eko
@@ -639,6 +650,21 @@ mod tests {
             classify(&interest.description, interest.amount).0,
             LineKind::Interest
         );
+
+        // A card refund is a credit, not a transfer.
+        let refund = eko
+            .movements
+            .iter()
+            .find(|m| m.description.starts_with("Avoir"))
+            .unwrap();
+        assert_eq!(
+            classify(&refund.description, refund.amount),
+            (
+                LineKind::Credit,
+                SuggestedType::Income,
+                Some("Refund".to_string())
+            )
+        );
     }
 
     #[test]
@@ -658,17 +684,17 @@ mod tests {
 
         let eko = drafts
             .iter()
-            .find(|d| d.account_number.as_deref() == Some("84890097587"))
+            .find(|d| d.account_number.as_deref() == Some("11112222333"))
             .unwrap();
-        assert_eq!(eko.lines.len(), 82);
-        assert_eq!(eko.source_key, "credit_agricole:84890097587:abc");
+        assert_eq!(eko.lines.len(), 9);
+        assert_eq!(eko.source_key, "credit_agricole:11112222333:abc");
 
         let first = &eko.lines[0];
         let second = &eko.lines[1];
         assert_ne!(first.dedupe_key, second.dedupe_key);
         assert_eq!(
             first.dedupe_key,
-            sha256_hex(&["credit_agricole", "84890097587", &first.fingerprint])
+            sha256_hex(&["credit_agricole", "11112222333", &first.fingerprint])
         );
     }
 }
