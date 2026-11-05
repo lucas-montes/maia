@@ -55,7 +55,7 @@
         };
 
         packages = {
-          inherit (packages) sync-server maia-desktop frontend;
+          inherit (packages) sync-server maia-desktop frontend chrome-ext;
         };
 
         apps = {

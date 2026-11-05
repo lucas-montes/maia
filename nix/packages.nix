@@ -166,6 +166,21 @@
   # environment. This is what the module installs.
   maia-desktop = tauri.wrappedApp;
 
+  # ---------------------------------------------------------------------
+  # Chrome/Brave extension
+  # ---------------------------------------------------------------------
+
+  # A plain copy, not a build: chrome_ext/ is static JS/HTML/JSON, nothing to
+  # compile. The point of packaging it at all is a stable, named output a
+  # home-manager config can point `home.file` at, rather than a checkout
+  # path: Brave's "Load unpacked" only needs picking once, ever, when the
+  # directory it points at keeps being refreshed by Nix instead of changing
+  # path on every rebuild.
+  chrome-ext = pkgs.runCommand "maia-chrome-ext" {} ''
+    mkdir -p $out
+    cp -r ${../chrome_ext}/. $out/
+  '';
+
   passthru = {
     inherit frontend;
     inherit (tauri) app cargoArtifacts tauriConfig;
@@ -174,6 +189,7 @@ in {
   inherit
     sync-server
     maia-desktop
+    chrome-ext
     ;
 }
 // passthru
