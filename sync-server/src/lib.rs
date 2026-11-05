@@ -4,6 +4,7 @@ pub mod db;
 pub mod error;
 pub mod handlers;
 pub mod logs;
+pub mod notes_mirror;
 pub mod openapi;
 pub mod openfoodfacts;
 pub mod receipt_ocr;
@@ -2460,5 +2461,199 @@ mod statement_tests {
         assert_eq!(items[0]["rateToBase"], 0.95);
         assert_eq!(items[0]["date"], "2026-10-05");
         handle.abort();
+    }
+
+    /// A file-backed db, unlike `start_test_server`'s `:memory:` default:
+    /// note audio bytes live at `<db_dir>/note_audio/<id>.mp3`, so the test
+    /// needs a real directory for that path to resolve into.
+    async fn start_notes_test_server() -> (u16, tokio::task::JoinHandle<()>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("maia-test-notes-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = crate::config::Config::new(dir.join("maia.db"), "test-key".to_string())
+            .with_bind_addr("0.0.0.0:0");
+        let pool = crate::db::init_db(&config.db_path).unwrap();
+        let (port, handle) = crate::server::start_test_server_with_config(config, pool).await;
+        (port, handle, dir)
+    }
+
+    /// Same as [start_notes_test_server], but with the markdown mirror
+    /// configured against [notes_dir] — the push handler only reconciles
+    /// the mirror when `notes_dir` is set.
+    async fn start_notes_test_server_with_mirror(
+        notes_dir: &std::path::Path,
+    ) -> (u16, tokio::task::JoinHandle<()>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("maia-test-notes-mirror-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = crate::config::Config::new(dir.join("maia.db"), "test-key".to_string())
+            .with_bind_addr("0.0.0.0:0");
+        config.notes_dir = Some(notes_dir.to_path_buf());
+        let pool = crate::db::init_db(&config.db_path).unwrap();
+        let (port, handle) = crate::server::start_test_server_with_config(config, pool).await;
+        (port, handle, dir)
+    }
+
+    #[tokio::test]
+    async fn pushing_a_note_writes_its_markdown_file_immediately_and_delete_removes_it() {
+        let notes_root = std::env::temp_dir().join(format!("maia-test-notes-mirror-dir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&notes_root).unwrap();
+        let (port, handle, db_dir) = start_notes_test_server_with_mirror(&notes_root).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+
+        let resp = client
+            .post(format!("{base}/notes"))
+            .header("Authorization", "Bearer test-key")
+            .json(&serde_json::json!({
+                "notes": [{
+                    "id": "note-mirror-1",
+                    "title": "Pushed From Phone",
+                    "body": "hello\n",
+                    "updatedAt": 1000,
+                    "createdAt": 1000,
+                }],
+                "noteTags": [],
+                "noteAudio": [],
+                "deleted": [],
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // No watcher sweep or debounce wait needed: the push handler itself
+        // reconciles the mirror synchronously before responding.
+        let files: Vec<_> = std::fs::read_dir(&notes_root).unwrap().filter_map(|e| e.ok()).collect();
+        assert_eq!(files.len(), 1, "note must be mirrored to disk immediately after the push");
+        let content = std::fs::read_to_string(files[0].path()).unwrap();
+        assert!(content.contains("id: note-mirror-1"));
+        assert!(content.contains("hello"));
+
+        // Deleting from the phone removes the file — and it must not come back.
+        let resp = client
+            .post(format!("{base}/notes"))
+            .header("Authorization", "Bearer test-key")
+            .json(&serde_json::json!({
+                "notes": [],
+                "noteTags": [],
+                "noteAudio": [],
+                "deleted": ["note-mirror-1"],
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            std::fs::read_dir(&notes_root).unwrap().count(),
+            0,
+            "delete must remove the file, not recreate it"
+        );
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&db_dir);
+        let _ = std::fs::remove_dir_all(&notes_root);
+    }
+
+    #[tokio::test]
+    async fn pull_notes_includes_note_audio_and_the_clip_is_served_byte_for_byte() {
+        let (port, handle, dir) = start_notes_test_server().await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+
+        let resp = client
+            .post(format!("{base}/notes"))
+            .header("Authorization", "Bearer test-key")
+            .json(&serde_json::json!({
+                "notes": [{
+                    "id": "note-1",
+                    "title": "Grocery List",
+                    "body": "milk\neggs\n",
+                    "updatedAt": 1000,
+                    "createdAt": 1000,
+                }],
+                "noteTags": [],
+                "noteAudio": [],
+                "deleted": [],
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let clip_bytes = b"\x49\x44\x33fake-mp3-bytes";
+        let form = reqwest::multipart::Form::new()
+            .text(
+                "noteAudio",
+                serde_json::json!({
+                    "id": "clip-1",
+                    "noteId": "note-1",
+                    "audioPath": "ignored-by-the-server",
+                    "durationMs": 4200,
+                    "position": 0,
+                    "createdAt": 1500,
+                })
+                .to_string(),
+            )
+            .part(
+                "audio",
+                reqwest::multipart::Part::bytes(clip_bytes.to_vec())
+                    .file_name("clip-1.mp3")
+                    .mime_str("audio/mpeg")
+                    .unwrap(),
+            );
+        let resp = client
+            .post(format!("{base}/notes"))
+            .header("Authorization", "Bearer test-key")
+            .multipart(form)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let pulled: serde_json::Value = client
+            .get(format!("{base}/notes?since=0"))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let note_audio = pulled["noteAudio"].as_array().unwrap();
+        assert_eq!(note_audio.len(), 1);
+        assert_eq!(note_audio[0]["id"], "clip-1");
+        assert_eq!(note_audio[0]["noteId"], "note-1");
+        assert_eq!(note_audio[0]["durationMs"], 4200);
+        assert!(note_audio[0].get("audioPath").is_none(), "bytes stay server-side");
+
+        // The clip is served back byte-for-byte.
+        let resp = client
+            .get(format!("{base}/notes/audio/clip-1"))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()["content-type"].to_str().unwrap(), "audio/mpeg");
+        assert_eq!(resp.bytes().await.unwrap().as_ref(), clip_bytes);
+
+        // A missing/wrong id 404s rather than erroring.
+        let resp = client
+            .get(format!("{base}/notes/audio/no-such-clip"))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+
+        // No Bearer key, no bytes.
+        let resp = client
+            .get(format!("{base}/notes/audio/clip-1"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -402,7 +402,7 @@ pub struct PullTemplatesResponse {
 #[derive(Serialize)]
 pub struct PullFoodsResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, pub deleted: Vec<String> }
         #[derive(Serialize)]
-pub struct PullNotesResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, #[serde(rename = "noteTags")] pub note_tags: Vec<serde_json::Value>, pub deleted: Vec<String> }
+pub struct PullNotesResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, #[serde(rename = "noteTags")] pub note_tags: Vec<serde_json::Value>, #[serde(rename = "noteAudio")] pub note_audio: Vec<serde_json::Value>, pub deleted: Vec<String> }
 #[derive(Serialize)]
 pub struct PullTasksResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, #[serde(rename = "taskTags")] pub task_tags: Vec<serde_json::Value>, pub deleted: Vec<String> }
 #[derive(Serialize)]
@@ -541,13 +541,17 @@ pub async fn pull_notes(State(state): State<AppState>, Query(q): Query<SinceQuer
     let mut stmt = conn.prepare("SELECT id, title, body, updated_at, created_at FROM notes WHERE deleted_at IS NULL AND (?1 <= 0 OR updated_at > ?1) ORDER BY updated_at").unwrap();
     let items: Vec<serde_json::Value> = stmt.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?,"body":r.get::<_,String>(2)?,"updatedAt":r.get::<_,i64>(3)?,"createdAt":r.get::<_,i64>(4)?}))).unwrap().filter_map(|r|r.ok()).collect();
     // A note is only useful with its tag associations; the tags themselves
-    // come from /tags. Audio stays server-side. Junction tables carry no
-    // tombstone of their own, so links are returned in full and the client
-    // reconciles them against the parent.
+    // come from /tags. Junction tables carry no tombstone of their own, so
+    // links are returned in full and the client reconciles them against the
+    // parent.
     let mut stmt2 = conn.prepare("SELECT nt.tag_id, nt.note_id FROM note_tags nt JOIN notes n ON n.id = nt.note_id WHERE n.deleted_at IS NULL AND (?1 <= 0 OR n.updated_at > ?1)").unwrap();
     let note_tags: Vec<serde_json::Value> = stmt2.query_map([since], |r| Ok(serde_json::json!({"tagId":r.get::<_,String>(0)?,"noteId":r.get::<_,String>(1)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    // Metadata only — no `audioPath`. The bytes stay server-side and are
+    // fetched on demand from `GET /notes/audio/:id`.
+    let mut stmt3 = conn.prepare("SELECT id, note_id, duration_ms, position, created_at, updated_at FROM note_audio WHERE deleted_at IS NULL AND (?1 <= 0 OR updated_at > ?1) ORDER BY updated_at").unwrap();
+    let note_audio: Vec<serde_json::Value> = stmt3.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"noteId":r.get::<_,String>(1)?,"durationMs":r.get::<_,i64>(2)?,"position":r.get::<_,i64>(3)?,"createdAt":r.get::<_,i64>(4)?,"updatedAt":r.get::<_,i64>(5)?}))).unwrap().filter_map(|r|r.ok()).collect();
     let deleted: Vec<String> = conn.prepare("SELECT id FROM notes WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
-    Json(PullNotesResponse{server_time, items, note_tags, deleted})
+    Json(PullNotesResponse{server_time, items, note_tags, note_audio, deleted})
 }
 pub async fn pull_tasks(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
     let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
@@ -639,6 +643,35 @@ pub async fn get_url_content(State(state): State<AppState>, Path(id): Path<Strin
     )
     .await
     .into_response()
+}
+
+/// `GET /notes/audio/:id` — the mp3 bytes for a voice clip. The path is
+/// derived from the row's own id rather than trusting a stored `audio_path`
+/// string: every clip the upload endpoint accepts lands at exactly
+/// `<db_dir>/note_audio/<id>.mp3`, so there is nothing to resolve and no
+/// path from the DB to validate against traversal.
+pub async fn get_note_audio(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    if !super::media::is_safe_id(&id) {
+        return not_found("note audio not found").into_response();
+    }
+    let exists: bool = {
+        let conn = state.db.get().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM note_audio WHERE id = ?1 AND deleted_at IS NULL",
+            [&id],
+            |_| Ok(()),
+        )
+        .is_ok()
+    };
+    if !exists {
+        return not_found("note audio not found").into_response();
+    }
+    let path = super::push::db_dir(&state)
+        .join("note_audio")
+        .join(format!("{id}.mp3"));
+    super::media::serve_file(path, "audio/mpeg")
+        .await
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------

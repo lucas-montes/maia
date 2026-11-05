@@ -39,6 +39,10 @@ pub struct AppState {
     /// Shared client for statement feeds. One pool of connections across syncs
     /// rather than a new client per request.
     pub http: reqwest::Client,
+    /// What the notes markdown mirror last wrote per note id, shared between
+    /// the startup reconcile scan and the live watcher so neither mistakes
+    /// the other's write for an external edit.
+    pub notes_signatures: crate::notes_mirror::SignatureMap,
 }
 
 impl AppState {
@@ -57,6 +61,7 @@ impl AppState {
             logs: logs::new_buffer(200),
             ocr,
             http,
+            notes_signatures: crate::notes_mirror::new_signature_map(),
         }
     }
 }
@@ -97,6 +102,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/workouts", get(crate::handlers::read::pull_workouts).post(crate::handlers::push::push_workouts))
         .route("/templates", get(crate::handlers::pull::pull_templates).post(crate::handlers::push::push_templates))
         .route("/notes", get(crate::handlers::pull::pull_notes).post(crate::handlers::push::push_notes))
+        .route("/notes/audio/:id", get(crate::handlers::pull::get_note_audio))
         .route("/tasks", get(crate::handlers::pull::pull_tasks).post(crate::handlers::push::push_tasks))
         .route("/goals", get(crate::handlers::pull::pull_goals).post(crate::handlers::push::push_goals))
         .route("/meals", get(crate::handlers::read::pull_meals).post(crate::handlers::push::push_meals))
@@ -303,17 +309,27 @@ where
 {
     let _ = tracing_subscriber::fmt::try_init();
     let db = db::init_db(&config.db_path)?;
-    {
-        let conn = db.get().unwrap();
-        seed_exercises_if_empty(&conn, &config);
-    }
-    let listener = TcpListener::bind(&config.bind_addr).await?;
-    let port = listener.local_addr()?.port();
     let state = AppState::new(config, db);
-    // Start the poller before the listener: a file dropped in while the service
-    // was down is picked up on the first tick either way, and spawning here
-    // keeps the watcher's lifetime tied to the server process.
+    {
+        let conn = state.db.get().unwrap();
+        seed_exercises_if_empty(&conn, &state.config);
+        if let Some(notes_dir) = &state.config.notes_dir {
+            // Runs before the listener binds: a note pushed while the mirror
+            // was never consulted (or a file edited while the service was
+            // down) must be reconciled before any client can observe a stale
+            // half of it.
+            if let Err(e) = crate::notes_mirror::reconcile(&conn, notes_dir, &state.notes_signatures) {
+                tracing::warn!(error = %e, "notes mirror reconcile failed");
+            }
+        }
+    }
+    let listener = TcpListener::bind(&state.config.bind_addr).await?;
+    let port = listener.local_addr()?.port();
+    // Start the pollers before the listener: a file dropped in while the
+    // service was down is picked up on the first tick either way, and
+    // spawning here keeps each watcher's lifetime tied to the server process.
     crate::statements::watch::spawn(state.clone());
+    crate::notes_mirror::watch::spawn(state.clone());
     let router = create_router(state);
     let handle = tokio::spawn(async move {
         // Logged rather than unwrapped: a bind failure surfaces here after the

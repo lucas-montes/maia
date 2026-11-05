@@ -1082,6 +1082,15 @@ pub async fn push_notes(
         let _ = tx.execute("DELETE FROM note_tags WHERE tag_id=?1 OR note_id=?1", rusqlite::params![id]);
     }
     tx.commit().unwrap();
+    if let Some(notes_dir) = &state.config.notes_dir {
+        // Keeps the directory current without a phone ever connecting: a
+        // push from the phone is itself a "local" change as far as the
+        // mirror is concerned, and the live watcher has no filesystem event
+        // to wake it up for a change that originated over HTTP.
+        if let Err(e) = crate::notes_mirror::reconcile(&conn, notes_dir, &state.notes_signatures) {
+            tracing::warn!(error = %e, "notes mirror: failed to reconcile after push");
+        }
+    }
     (StatusCode::OK, Json(serde_json::json!({"server_time": server_time}))).into_response()
 }
 
@@ -1119,8 +1128,24 @@ fn split_bytes<'a>(data: &'a [u8], pattern: &[u8]) -> Vec<&'a [u8]> {
 fn find_double_crlf(data: &[u8]) -> Option<usize> {
     data.windows(4).position(|w| w==b"\r\n\r\n").map(|p| p+4).or_else(|| data.windows(2).position(|w| w==b"\n\n").map(|p| p+2))
 }
+/// `split_bytes` already consumed the `--boundary` marker itself, so a part
+/// that runs up to the *next* boundary never has `\r\n--` left inside it to
+/// find — only the bare `\r\n` that used to precede those dashes. Without
+/// stripping that, every part parsed this way (in practice: whichever part
+/// is last, most often `audio`) gets two trailing bytes that belong to the
+/// multipart framing, not the content.
 fn find_boundary_end(data: &[u8]) -> usize {
-    if let Some(pos)=data.windows(4).position(|w| w==b"\r\n--") { pos } else if let Some(pos)=data.windows(2).position(|w| w==b"\n-") { pos } else { data.len() }
+    if let Some(pos) = data.windows(4).position(|w| w == b"\r\n--") {
+        pos
+    } else if let Some(pos) = data.windows(2).position(|w| w == b"\n-") {
+        pos
+    } else if data.ends_with(b"\r\n") {
+        data.len() - 2
+    } else if data.ends_with(b"\n") {
+        data.len() - 1
+    } else {
+        data.len()
+    }
 }
 
 pub async fn push_tasks(
