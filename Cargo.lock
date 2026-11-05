@@ -721,17 +721,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chrome"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "chrono"
 version = "0.4.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -163,13 +163,17 @@ pub const MIGRATIONS: &[(i64, Step)] = &[
     // review and import them explicitly. `accounts` gains the provider identity
     // that lets a statement resolve to the same budget account across imports.
     (7, Step::Guarded(add_statement_schema)),
+    // The Chrome extension's page capture needs somewhere to put the
+    // captured HTML; `content_path` points at a file under `url_content/`
+    // alongside the database, mirroring how receipt pictures are stored.
+    (8, Step::Guarded(add_url_content_path)),
 ];
 
 /// Highest version in `MIGRATIONS`.
 ///
 /// A database newer than this means the data is newer than the binary, which is
 /// what a Nix rollback looks like. `migrate` refuses rather than serving.
-pub const LATEST_VERSION: i64 = 7;
+pub const LATEST_VERSION: i64 = 8;
 
 /// The v1 schema, exactly as it shipped.
 ///
@@ -937,6 +941,18 @@ fn add_statement_schema(conn: &Connection) -> anyhow::Result<()> {
         );
         "#,
     )?;
+    Ok(())
+}
+
+/// v8: `urls.content_path`, where a captured page's HTML lives on disk.
+///
+/// Guarded because the `CREATE TABLE IF NOT EXISTS urls` in v1 leaves an
+/// existing table untouched and SQLite has no `ADD COLUMN IF NOT EXISTS`.
+fn add_url_content_path(conn: &Connection) -> anyhow::Result<()> {
+    if column_exists(conn, "urls", "content_path")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE urls ADD COLUMN content_path TEXT")?;
     Ok(())
 }
 

@@ -415,6 +415,8 @@ pub struct PullAccountsResponse { pub server_time: i64, pub items: Vec<serde_jso
 pub struct PullReceiptsResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, pub deleted: Vec<String> }
 #[derive(Serialize)]
 pub struct PullTagsResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, pub deleted: Vec<String> }
+#[derive(Serialize)]
+pub struct PullUrlsResponse { pub server_time: i64, pub items: Vec<serde_json::Value>, pub deleted: Vec<String> }
 
 /// Foods, each with its composition nested inside it.
 ///
@@ -605,6 +607,38 @@ pub async fn pull_tags(State(state): State<AppState>, Query(q): Query<SinceQuery
     let items: Vec<serde_json::Value> = stmt.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"color":r.get::<_,Option<i64>>(2)?,"sortOrder":r.get::<_,i64>(3)?,"createdAt":r.get::<_,i64>(4)?,"updatedAt":r.get::<_,i64>(5)?}))).unwrap().filter_map(|r|r.ok()).collect();
     let deleted: Vec<String> = conn.prepare("SELECT id FROM tags WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
     Json(PullTagsResponse{server_time, items, deleted})
+}
+pub async fn pull_urls(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {
+    let since = q.since.unwrap_or(0); let server_time = db::server_time_ms(); let conn = state.db.get().unwrap();
+    let mut stmt = conn.prepare("SELECT id, title, url, source, tags, is_new, content_path IS NOT NULL, created_at, updated_at FROM urls WHERE deleted_at IS NULL AND (?1 <= 0 OR updated_at > ?1) ORDER BY is_new DESC, updated_at").unwrap();
+    let items: Vec<serde_json::Value> = stmt.query_map([since], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,Option<String>>(1)?,"url":r.get::<_,String>(2)?,"source":r.get::<_,Option<String>>(3)?,"tags":r.get::<_,Option<String>>(4)?,"isNew":r.get::<_,i64>(5)?!=0,"hasContent":r.get::<_,i64>(6)?!=0,"createdAt":r.get::<_,i64>(7)?,"updatedAt":r.get::<_,i64>(8)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    let deleted: Vec<String> = conn.prepare("SELECT id FROM urls WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
+    Json(PullUrlsResponse{server_time, items, deleted})
+}
+
+/// `GET /urls/:id/content` — the HTML a page-capture push stored.
+pub async fn get_url_content(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    if !super::media::is_safe_id(&id) {
+        return not_found("url not found").into_response();
+    }
+    let conn = state.db.get().unwrap();
+    let content_path: Option<String> = conn
+        .query_row(
+            "SELECT content_path FROM urls WHERE id = ?1 AND deleted_at IS NULL",
+            [&id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+    let Some(content_path) = content_path else {
+        return not_found("url has no saved content").into_response();
+    };
+    super::media::serve_file(
+        super::push::db_dir(&state).join(content_path),
+        "text/html; charset=utf-8",
+    )
+    .await
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------

@@ -426,6 +426,47 @@ pub struct UrlPush {
     pub is_new: bool,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
+    /// Captured page HTML (e.g. from the Chrome extension's "save page"
+    /// action). Absent on a metadata-only push such as `mark_url_read`'s
+    /// re-send, which must not clear previously-saved content.
+    #[serde(default)]
+    pub content: Option<String>,
+}
+
+/// Directory (relative to the DB) holding captured page HTML, mirroring how
+/// `receipt_ocr.rs` stores `receipt_pictures/<id>.<ext>`.
+const URL_CONTENT_SUBDIR: &str = "url_content";
+
+pub(crate) fn db_dir(state: &AppState) -> std::path::PathBuf {
+    state
+        .config
+        .db_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// Writes captured HTML to `<db_dir>/url_content/<id>.html` and returns the
+/// path to store in `urls.content_path`, relative to `db_dir` so it survives
+/// the database moving. Rejects unsafe ids rather than writing outside the
+/// content directory.
+fn save_url_content(state: &AppState, id: &str, content: &str) -> Option<String> {
+    if !super::media::is_safe_id(id) {
+        tracing::warn!(id, "refusing to store page content for unsafe url id");
+        return None;
+    }
+    let dir = db_dir(state).join(URL_CONTENT_SUBDIR);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(error = %e, "failed to create url_content dir");
+        return None;
+    }
+    let rel_path = format!("{URL_CONTENT_SUBDIR}/{id}.html");
+    if let Err(e) = std::fs::write(dir.join(format!("{id}.html")), content) {
+        tracing::warn!(error = %e, "failed to write captured page content");
+        return None;
+    }
+    Some(rel_path)
 }
 
 pub async fn push_urls(
@@ -437,9 +478,13 @@ pub async fn push_urls(
     let tx = conn.unchecked_transaction().unwrap();
 
     for entry in payload.urls {
+        let content_path = entry
+            .content
+            .as_deref()
+            .and_then(|content| save_url_content(&state, &entry.id, content));
         tx.execute(
-            "INSERT INTO urls (id, title, url, source, tags, is_new, created_at, updated_at, deleted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)
+            "INSERT INTO urls (id, title, url, source, tags, is_new, created_at, updated_at, deleted_at, content_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9)
              ON CONFLICT(id) DO UPDATE SET
                 title=excluded.title,
                 url=excluded.url,
@@ -447,7 +492,8 @@ pub async fn push_urls(
                 tags=excluded.tags,
                 is_new=excluded.is_new,
                 updated_at=excluded.updated_at,
-                deleted_at=NULL",
+                deleted_at=NULL,
+                content_path=COALESCE(excluded.content_path, urls.content_path)",
             rusqlite::params![
                 entry.id,
                 entry.title,
@@ -456,7 +502,8 @@ pub async fn push_urls(
                 entry.tags,
                 entry.is_new,
                 entry.created_at,
-                server_time
+                server_time,
+                content_path,
             ],
         )
         .unwrap();

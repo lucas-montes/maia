@@ -3,7 +3,8 @@
   "name": "Maia",
   "version": "1.0",
   "description": "Your assistant in the browser",
-  "permissions": ["contextMenus", "nativeMessaging", "activeTab", "scripting", "notifications", "sidePanel", "bookmarks", "readingList"],
+  "permissions": ["contextMenus", "activeTab", "scripting", "notifications", "sidePanel", "bookmarks", "readingList", "storage"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "omnibox": { "keyword" : "maia" },
   "background": {
     "service_worker": "background.js"
@@ -14,6 +15,7 @@
   "side_panel": {
     "default_path": "sidepanel.html"
   },
+  "options_page": "options.html",
   "commands": {
     "send-url": {
       "suggested_key": {

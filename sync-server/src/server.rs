@@ -23,6 +23,11 @@ const MAX_BACKUP_BYTES: usize = 256 * 1024 * 1024;
 /// hundred kilobytes; this is generous while still bounded.
 const MAX_STATEMENT_BYTES: usize = 32 * 1024 * 1024;
 
+/// Ceiling for a `/urls` push carrying captured page HTML. A `document
+/// .documentElement.outerHTML` snapshot is usually well under a megabyte, but
+/// a heavy single-page app can run past axum's 2 MB default.
+const MAX_URL_CONTENT_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
@@ -75,7 +80,13 @@ pub fn create_router(state: AppState) -> Router {
         .route("/exercises/catalog", get(crate::handlers::pull::pull_exercise_catalog))
         .route("/exercises/item/:id", get(crate::handlers::pull::get_exercise_item))
         .route("/ingredients", get(crate::handlers::pull::pull_ingredients).post(crate::handlers::push::push_ingredient))
-        .route("/urls", post(crate::handlers::push::push_urls))
+        .route(
+            "/urls",
+            get(crate::handlers::pull::pull_urls)
+                .post(crate::handlers::push::push_urls)
+                .layer(DefaultBodyLimit::max(MAX_URL_CONTENT_BYTES)),
+        )
+        .route("/urls/:id/content", get(crate::handlers::pull::get_url_content))
         .route("/stores", get(crate::handlers::pull::pull_stores).post(crate::handlers::push::push_stores))
         .route("/ingredients/catalog", get(crate::handlers::pull::pull_ingredient_catalog))
         .route("/ingredients/lookup", get(crate::handlers::lookup::lookup_ingredient))

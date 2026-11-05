@@ -1,9 +1,22 @@
 # Plan: Wire Chrome Extension to Daemon
 
-**Status:** Proposed
+**Status:** Superseded — see below.
 **Depends on:** system-daemon-wiring (for socket handler)
 
-## Summary
+> **Superseded.** This plan assumed `chrome/` → `src/socket.rs`'s daemon was
+> the live pipeline and proposed new `chrome_bookmarks`/`chrome_reading_list`/
+> `chrome_pages` tables there. In practice that daemon was never built out
+> (`handle_message` was a `todo!()`, and `chrome/` wasn't packaged by Nix at
+> all); the service actually deployed is `sync-server`. The extension now
+> talks straight to `sync-server`'s `/urls` resource instead (HTTP `fetch()`
+> from `background.js`, Bearer auth, no native-messaging host). `chrome/` has
+> been deleted. See the chrome_ext rewrite for what shipped: a `urls.
+> content_path` column + `GET /urls` + `GET /urls/:id/content` on
+> sync-server, and an options page / rewritten background.js / sidepanel on
+> the extension side. T03 (CLI queries) and T05/T06 (auto-tagging,
+> dedup) below were not implemented and remain open if wanted later.
+
+## Summary (original, kept for history)
 The Chrome extension and native messaging host already work end-to-end (browser events → `chrome/` binary → files). This plan completes the pipeline by wiring the daemon side: when Chrome sends data (bookmarks, reading list items, page content), the daemon stores it in SQLite and makes it queryable via CLI.
 
 ## Tasks

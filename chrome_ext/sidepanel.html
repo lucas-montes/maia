@@ -1,15 +1,29 @@
+<!DOCTYPE html>
 <html>
   <head>
-    <title>Dictionary Side Panel</title>
+    <meta charset="utf-8" />
+    <title>Maia</title>
+    <link rel="stylesheet" href="style.css" />
+    <style>
+      body { width: auto; text-align: left; padding: 12px; }
+      #status-line { font-size: 12px; margin-bottom: 10px; padding: 6px 8px; border-radius: 4px; }
+      #status-line.ok { background: #e6f4ea; color: #1a7f37; }
+      #status-line.error { background: #fce8e6; color: #c62828; }
+      #status-line.unconfigured { background: #fff4e5; color: #8a5a00; }
+      ul { list-style: none; padding: 0; margin: 0; }
+      li { border-bottom: 1px solid #eee; padding: 8px 0; }
+      li .title { font-weight: bold; display: block; }
+      li .url { font-size: 12px; color: #555; display: block; word-break: break-all; }
+      li .actions { margin-top: 4px; }
+      li .actions button { padding: 4px 8px; margin-right: 6px; cursor: pointer; }
+      #empty { color: #777; font-style: italic; }
+    </style>
   </head>
   <body>
-    <h1>Dictionary</h1>
-    <hr />
-    <p id="select-a-word">Select a word to see the definition.</p>
-    <div>
-      <h2 id="definition-word"></h2>
-      <p id="definition-text"></p>
-    </div>
+    <h1>Pending links</h1>
+    <div id="status-line"></div>
+    <p id="empty" hidden>Nothing pending.</p>
+    <ul id="list"></ul>
     <script src="sidepanel.js"></script>
   </body>
 </html>
