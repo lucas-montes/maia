@@ -113,7 +113,7 @@ hub; conflict resolution stays last-write-wins on `updated_at`. Tags participate
   - Verification notes (commands or checks): cargo integration test posting a note then reading the file;
     manual sync hub test.
 
-- [ ] T05: Mobile audio pull (status:open)
+- [x] T05: Mobile audio pull (status:done)
   - Task ID: T05
   - Goal: `PersonalPullService.pullNotes`: apply `noteAudio` rows via `insertOnConflictUpdate`; after pull,
     download bytes for clip ids whose local file is missing/empty via `apiClient.getBytes("notes/audio/<id>")`
@@ -126,7 +126,7 @@ hub; conflict resolution stays last-write-wins on `updated_at`. Tags participate
   - Verification notes (commands or checks): `flutter analyze`; manual sync hub pull test with a deleted
     local clip.
 
-- [ ] T06: Mobile markdown editor (status:open)
+- [x] T06: Mobile markdown editor (status:done)
   - Task ID: T06
   - Goal: Rework `note_editor_screen.dart`: title field + monospace raw markdown body `TextField` +
     icon-button preview toggle rendering the body (maintained markdown package: `flutter_markdown_plus` or
