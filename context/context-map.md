@@ -45,6 +45,7 @@ This file indexes all durable context artifacts for the Maia project.
 | `ui-unified-tabs` | completed | Grouped collapsible sidebar (Training/Nutrition/Health/Planning/Finance) + 13 tabs, virtual scroll, lazy media, per-tab sync |
 | `ui-vanilla-rewrite` | completed | `maia-ui` monolith rewritten as modular vanilla TS (daisyUI dashboard shell, `shell/` + `views/` per screen, no framework) |
 | `sync-ui-bugfixes` | completed | Desktop reads TEXT-uuid notes + `done/taskStatus` filtering, clickable workout detail, labeled set columns; `POST /tags` + `GET /templates` with nested sets; mobile pushes tags/stores/foods |
+| `statements-file-review` | completed | Statements grouped by dropped file and defaulted to awaiting approval; file review page lists accounts (existing vs created on import), entries by account, flattened transfer rows naming both accounts; checkbox multi-select with atomic batch import (`POST /statements/import`) and batch soft delete (`POST /statements/delete`); `GET /statements/file` one-snapshot endpoint; drop form places CSVs in the dump folder without triggering a scan |
 
 ## Decisions
 | Decision | Date | Summary |
