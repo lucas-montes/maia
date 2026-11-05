@@ -139,7 +139,7 @@ async fn send<R: DeserializeOwned>(
 ) -> Result<R, ApiError> {
     let base = server_base();
     let url = format!("{base}{path}");
-    let api_key = sync_server::Config::shared(None)
+    let api_key = maia::Config::shared(None)
         .map(|c| c.api_key.clone())
         .unwrap_or_default();
 
@@ -172,9 +172,9 @@ async fn send<R: DeserializeOwned>(
 /// somewhere to connect to -- so the host is replaced here rather than at each
 /// call site.
 fn server_base() -> String {
-    let port = sync_server::Config::shared(None)
+    let port = maia::Config::shared(None)
         .map(|c| c.port())
-        .unwrap_or(sync_server::config::DEFAULT_PORT);
+        .unwrap_or(maia::config::DEFAULT_PORT);
     format!("http://127.0.0.1:{port}")
 }
 

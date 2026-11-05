@@ -77,11 +77,11 @@
 
   # The HTTP API, headless. Pure axum plus bundled SQLite, so it builds and runs
   # without a desktop session -- this is what the NixOS service runs.
-  sync-server = craneLib.buildPackage (
+  maia = craneLib.buildPackage (
     commonArgs
     // {
       inherit cargoArtifacts;
-      cargoExtraArgs = "-p sync-server";
+      cargoExtraArgs = "-p maia";
     }
   );
 
@@ -153,8 +153,8 @@
     version = (readCargoToml ../maia-ui/src-tauri/Cargo.toml).package.version;
     # The Tauri app root (whatever directly contains src-tauri/).
     src = ../maia-ui;
-    # Widened to the workspace root: src-tauri depends on ../../sync-server, so
-    # the fileset has to reach the sibling crates.
+    # Widened to the workspace root: src-tauri depends on ../.. (the maia
+    # package), so the fileset has to reach the sibling crates.
     cargoRoot = ../.;
     inherit frontend;
     craneArgs = swaggerEnv // {preBuild = swaggerZipSetup;};
@@ -188,7 +188,7 @@
 in
   {
     inherit
-      sync-server
+      maia
       maia-desktop
       chrome-ext
       ;

@@ -731,7 +731,7 @@ pub fn migrate(conn: &Connection) -> anyhow::Result<()> {
         bail!(
             "database is at v{current} but this binary only knows v{LATEST_VERSION}.\n\
              The data is newer than the server binary, which is what a Nix rollback \
-             looks like: an older `sync-server` cannot know how to read schema \
+             looks like: an older `maia` binary cannot know how to read schema \
              v{current}.\n\
              Rebuild forward (`nixos-rebuild switch`) or restore a snapshot:\n    \
              sqlite3 <db> \".restore snapshots/maia.v{LATEST_VERSION}.db\""

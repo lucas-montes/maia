@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock};
 
 use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
-use sync_server::Config as SyncConfig;
+use maia::Config as SyncConfig;
 
 /// Shared application state managed by Tauri.
 struct AppState {
@@ -28,7 +28,7 @@ struct NoteWithContent {
     updated_at: String,
 }
 
-/// A receipt row, matching the `receipts` table in `sync_server::db`.
+/// A receipt row, matching the `receipts` table in `maia::db`.
 ///
 /// `id` is a UUID v7 string and timestamps are epoch milliseconds, per the v30
 /// schema. The previous struct targeted a long-gone `original_path` /
@@ -1566,7 +1566,7 @@ fn disambiguate_dump_name(name: &str, suffix: usize) -> String {
 /// Returns where the file landed, so the banner can show the real path.
 fn place_statement_file(
     dump_root: &std::path::Path,
-    source: sync_server::statements::SourceId,
+    source: maia::statements::SourceId,
     raw_name: &str,
     bytes: &[u8],
 ) -> Result<std::path::PathBuf, String> {
@@ -1601,7 +1601,7 @@ fn place_statement_file(
 /// triggers a scan nor touches the database.
 #[tauri::command]
 fn add_statement_files(source: String, files: Vec<StatementDrop>) -> CommandResult<Vec<String>> {
-    let Some(source_id) = sync_server::statements::SourceId::parse(&source) else {
+    let Some(source_id) = maia::statements::SourceId::parse(&source) else {
         return CommandResult {
             success: false,
             data: None,
@@ -2884,7 +2884,7 @@ const DEPLOYMENT_OWNED: &[&str] = &[
 
 /// The per-user overlay, or an empty object when absent.
 fn read_overlay() -> serde_json::Map<String, serde_json::Value> {
-    let path = sync_server::config::overlay_config_path();
+    let path = maia::config::overlay_config_path();
     std::fs::read_to_string(&path)
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
@@ -2999,7 +2999,7 @@ fn save_config(json: String) -> ConfigResponse {
         };
     }
 
-    let path = sync_server::config::overlay_config_path();
+    let path = maia::config::overlay_config_path();
     if let Some(parent) = path.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
             return ConfigResponse {
@@ -3250,7 +3250,7 @@ mod tests {
 
         // Create the file through the server's migrator first, since the app
         // opens read-only and cannot create anything itself.
-        let pool = sync_server::db::init_db(&path).unwrap();
+        let pool = maia::db::init_db(&path).unwrap();
         drop(pool);
 
         let conn = init_database(path.to_str().unwrap()).expect("read-only open should succeed");
@@ -3375,7 +3375,7 @@ mod tests {
         }
     }
 
-    use sync_server::statements::SourceId;
+    use maia::statements::SourceId;
 
     #[test]
     fn a_dropped_file_lands_in_the_source_folder() {

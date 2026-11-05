@@ -64,8 +64,8 @@ in
 
     package = mkOption {
       type = types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.sync-server;
-      description = "The sync-server package to run.";
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.maia;
+      description = "The maia package to run.";
     };
 
     dataDir = mkOption {
@@ -270,9 +270,9 @@ in
         # init_db, and refuses to bind if the database is newer than the binary --
         # which is what turns a Nix rollback into a visible failure instead of a
         # server that cannot read the schema.
-        ExecStart = "${cfg.package}/bin/sync-server --config ${configFile} serve";
+        ExecStart = "${cfg.package}/bin/maia --config ${configFile} serve";
         # `systemctl reload maia` migrates without dropping the listener.
-        ExecReload = "${cfg.package}/bin/sync-server --config ${configFile} migrate";
+        ExecReload = "${cfg.package}/bin/maia --config ${configFile} migrate";
 
         Restart = "on-failure";
         # Room for the WAL checkpoint during a clean SIGTERM drain.

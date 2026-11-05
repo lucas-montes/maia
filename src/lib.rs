@@ -1492,10 +1492,10 @@ mod tests {
     ///
     /// Ignored by default because it needs a real key and costs one API call:
     /// ```sh
-    /// GEMINI_API_KEY=... cargo test -p sync-server receipt_ocr_live -- --ignored --nocapture
+    /// GEMINI_API_KEY=... cargo test -p maia receipt_ocr_live -- --ignored --nocapture
     /// ```
-    /// Requires a receipt image in `sync-server/testdata/` — see
-    /// `sync-server/testdata/README.md`. That directory is gitignored.
+    /// Requires a receipt image in `testdata/` — see
+    /// `testdata/README.md`. That directory is gitignored.
     #[tokio::test]
     #[ignore = "needs a real Gemini key and a receipt image; run with --ignored --nocapture"]
     async fn receipt_ocr_live_gemini() {
@@ -1515,7 +1515,7 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(RECEIPT_IMAGE);
         assert!(
             path.exists(),
-            "receipt image not found at {} — see sync-server/testdata/README.md",
+            "receipt image not found at {} — see testdata/README.md",
             path.display()
         );
         let bytes = std::fs::read(&path).expect("read receipt image");

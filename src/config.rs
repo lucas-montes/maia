@@ -25,7 +25,7 @@ pub fn overlay_config_path() -> PathBuf {
 }
 
 /// Configuration file used when nothing else applies: the checkout's `maia.json`,
-/// which is what `cargo tauri dev` and a bare `sync-server serve` rely on.
+/// which is what `cargo tauri dev` and a bare `maia serve` rely on.
 pub const CHECKOUT_CONFIG: &str = "maia.json";
 
 /// The port the API listens on unless configured otherwise.

@@ -55,14 +55,14 @@
         };
 
         packages = {
-          inherit (packages) sync-server maia-desktop frontend chrome-ext;
+          inherit (packages) maia maia-desktop frontend chrome-ext;
         };
 
         apps = {
           # The headless server, which is what a deployment actually runs.
-          sync-server = flake-utils.lib.mkApp {
-            drv = packages.sync-server;
-            name = "sync-server";
+          maia = flake-utils.lib.mkApp {
+            drv = packages.maia;
+            name = "maia";
           };
           ui = flake-utils.lib.mkApp {
             drv = packages.maia-desktop;

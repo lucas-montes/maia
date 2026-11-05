@@ -2457,6 +2457,32 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 [[package]]
 name = "maia"
 version = "0.1.0"
+dependencies = [
+ "ai",
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "csv",
+ "encoding_rs",
+ "hex",
+ "inotify",
+ "r2d2",
+ "r2d2_sqlite",
+ "reqwest 0.12.22",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.12",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "utoipa",
+ "utoipa-swagger-ui",
+ "uuid",
+]
 
 [[package]]
 name = "maia-ui"
@@ -2464,11 +2490,11 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "maia",
  "reqwest 0.12.22",
  "rusqlite",
  "serde",
  "serde_json",
- "sync-server",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
@@ -4341,36 +4367,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "sync-server"
-version = "0.1.0"
-dependencies = [
- "ai",
- "anyhow",
- "axum",
- "chrono",
- "clap",
- "csv",
- "encoding_rs",
- "hex",
- "inotify",
- "r2d2",
- "r2d2_sqlite",
- "reqwest 0.12.22",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.12",
- "tokio",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "utoipa",
- "utoipa-swagger-ui",
- "uuid",
 ]
 
 [[package]]

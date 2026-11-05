@@ -21,9 +21,9 @@ exercise_media
 /receipts_archive
 
 # Live-OCR fixtures: the image is personal, the directory scaffolding is not.
-/sync-server/testdata/*
-!/sync-server/testdata/.gitkeep
-!/sync-server/testdata/README.md
+/testdata/*
+!/testdata/.gitkeep
+!/testdata/README.md
 
 # Statement drop folders: exports are personal documents. The dump tree keeps
 # its layout in the checkout with `.gitkeep`; the parsed and failed trees hold

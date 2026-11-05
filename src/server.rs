@@ -52,7 +52,7 @@ impl AppState {
             .then(|| Arc::new(ai::Model::with_model(config.model_api_key.clone(), config.model_name.clone())));
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .user_agent("maia-sync-server")
+            .user_agent("maia")
             .build()
             .unwrap_or_default();
         Self {
