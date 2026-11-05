@@ -59,7 +59,7 @@ pub async fn list_statements(
                     (SELECT COUNT(*) FROM bank_statement_lines l WHERE l.statement_id=s.id),
                     (SELECT COUNT(*) FROM bank_statement_lines l WHERE l.statement_id=s.id AND l.status='pending'),
                     (SELECT COUNT(*) FROM bank_statement_lines l WHERE l.statement_id=s.id AND l.status='imported'),
-                    a.name
+                    a.name, s.source_path
              FROM bank_statements s
              LEFT JOIN accounts a ON a.id = s.account_id
              WHERE s.deleted_at IS NULL
@@ -100,6 +100,7 @@ pub async fn list_statements(
                     "lineCount": row.get::<_, i64>(16)?,
                     "pendingCount": row.get::<_, i64>(17)?,
                     "importedCount": row.get::<_, i64>(18)?,
+                    "sourcePath": row.get::<_, Option<String>>(20)?,
                 }))
             },
         )
@@ -110,15 +111,11 @@ pub async fn list_statements(
     Ok(Json(serde_json::json!({ "items": items })))
 }
 
-pub async fn get_statement(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let conn = state
-        .db
-        .get()
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
+/// Assembles one statement's full payload (statement + lines + matches).
+///
+/// Shared by the single-statement endpoint and the per-file endpoint, which
+/// needs the same assembly for every statement a dropped file produced.
+fn statement_payload(conn: &rusqlite::Connection, id: &str) -> Result<serde_json::Value, ApiError> {
     let statement = conn
         .query_row(
             "SELECT s.id, s.source, s.institution, s.account_name, s.account_number,
@@ -204,18 +201,23 @@ pub async fn get_statement(
             "SELECT m.id, m.debit_line_id, m.credit_line_id, m.transaction_id,
                     m.confidence, m.reason, m.status,
                     d.description, d.amount, d.currency_code, d.posted_at, d.status,
-                    c.description, c.amount, c.currency_code, c.posted_at, c.status
+                    c.description, c.amount, c.currency_code, c.posted_at, c.status,
+                    ds.account_name, cs.account_name
              FROM transfer_matches m
              JOIN bank_statement_lines d ON d.id = m.debit_line_id
              JOIN bank_statement_lines c ON c.id = m.credit_line_id
+             JOIN bank_statements ds ON ds.id = d.statement_id
+             JOIN bank_statements cs ON cs.id = c.statement_id
              WHERE m.debit_line_id IN (SELECT id FROM bank_statement_lines WHERE statement_id=?1)
                 OR m.credit_line_id IN (SELECT id FROM bank_statement_lines WHERE statement_id=?1)",
         )
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     // The two sides of a transfer usually live in different statements (a CA
     // file has one statement per account), so the counterpart is joined here
-    // rather than looked up among this statement's lines. Without it the review
-    // screen could see the match but not the other side.
+    // rather than looked up among this statement's lines -- without it the
+    // review screen could see the match but not the other side. The account
+    // names of both sides come along too, so the review screen can say which
+    // accounts the money moves between instead of two bare descriptions.
     let matches = match_stmt
         .query_map(rusqlite::params![id], |row| {
             Ok(serde_json::json!({
@@ -242,17 +244,127 @@ pub async fn get_statement(
                     "postedAt": row.get::<_, i64>(15)?,
                     "status": row.get::<_, String>(16)?,
                 },
+                "debitAccountName": row.get::<_, Option<String>>(17)?,
+                "creditAccountName": row.get::<_, Option<String>>(18)?,
             }))
         })
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .filter_map(Result::ok)
         .collect::<Vec<_>>();
 
-    Ok(Json(serde_json::json!({
+    Ok(serde_json::json!({
         "statement": statement,
         "lines": lines,
         "matches": matches,
-    })))
+    }))
+}
+
+pub async fn get_statement(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let conn = state
+        .db
+        .get()
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(statement_payload(&conn, &id)?))
+}
+
+/// Query for [`get_statement_file`].
+#[derive(Debug, Deserialize)]
+pub struct FileQuery {
+    pub path: String,
+}
+
+/// The non-deleted statement ids one dropped file produced.
+fn file_statement_ids(conn: &rusqlite::Connection, path: &str) -> Result<Vec<String>, ApiError> {
+    let mut id_stmt = conn
+        .prepare(
+            "SELECT id FROM bank_statements
+             WHERE source_path = ?1 AND deleted_at IS NULL
+             ORDER BY account_name, created_at",
+        )
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let ids = id_stmt
+        .query_map(rusqlite::params![path], |row| row.get::<_, String>(0))
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Err(error(StatusCode::NOT_FOUND, "no statements for this file"));
+    }
+    Ok(ids)
+}
+
+/// Every statement one dropped file produced, fully assembled.
+///
+/// A CA export contains one account section per account, which the parser
+/// stages as one statement each; the review screen groups them by the file
+/// they came from and needs the whole picture in one snapshot.
+pub async fn get_statement_file(
+    State(state): State<AppState>,
+    Query(query): Query<FileQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let conn = state
+        .db
+        .get()
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let ids = file_statement_ids(&conn, &query.path)?;
+    let statements = ids
+        .iter()
+        .map(|id| statement_payload(&conn, id))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(serde_json::json!({ "statements": statements })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteStatementsRequest {
+    pub ids: Vec<String>,
+}
+
+/// Soft-deletes several statements in one transaction, with the same semantics
+/// as the single delete: imported transactions are kept, only the staged
+/// statement record goes. Returns the ids that were actually deleted.
+fn soft_delete_statements(
+    conn: &mut rusqlite::Connection,
+    ids: &[String],
+) -> Result<Vec<String>, ApiError> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let now = db::server_time_ms();
+    let mut deleted = Vec::new();
+    {
+        let mut stmt = tx
+            .prepare(
+                "UPDATE bank_statements SET deleted_at=?1, updated_at=?1
+                 WHERE id=?2 AND deleted_at IS NULL",
+            )
+            .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        for id in ids {
+            let changed = stmt
+                .execute(rusqlite::params![now, id])
+                .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            if changed > 0 {
+                deleted.push(id.clone());
+            }
+        }
+    }
+    tx.commit()
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(deleted)
+}
+
+pub async fn delete_statements(
+    State(state): State<AppState>,
+    Json(request): Json<DeleteStatementsRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut conn = state
+        .db
+        .get()
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let deleted = soft_delete_statements(&mut conn, &request.ids)?;
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
 pub async fn import_statement(
@@ -692,4 +804,166 @@ fn update_overlay(
     }
     std::fs::rename(&temp, &path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::statements::draft::{LineKind, StatementDraft, StatementLineDraft};
+    use crate::statements::store;
+
+    /// One staged statement with a single line of the given kind. Transfer
+    /// lines get opposite signs so `match_pending` can pair them: a debit is
+    /// negative, a credit positive. The account number varies so two accounts
+    /// of the same file are distinguishable.
+    fn stage(
+        pool: &crate::db::DbPool,
+        source_key: &str,
+        source_path: &str,
+        account_name: &str,
+        line_kind: LineKind,
+    ) -> String {
+        let amount = if matches!(line_kind, LineKind::Credit | LineKind::TransferIn) {
+            50.0
+        } else {
+            -50.0
+        };
+        let account_number = format!("{source_key}-{account_name}");
+        let draft = StatementDraft {
+            source: SourceId::CreditAgricole,
+            institution: "Credit Agricole".into(),
+            account_name: account_name.into(),
+            account_number: Some(account_number),
+            currency_code: "EUR".into(),
+            period_start: Some("2026-09-01".into()),
+            period_end: Some("2026-09-30".into()),
+            opening_balance: Some(100.0),
+            closing_balance: Some(90.0),
+            source_path: Some(source_path.into()),
+            stored_path: Some(source_path.into()),
+            source_hash: format!("hash-{source_key}"),
+            source_key: source_key.into(),
+            parsed: serde_json::json!({}),
+            warnings: Vec::new(),
+            lines: vec![StatementLineDraft {
+                source_ref: None,
+                posted_at: 1_760_000_000_000,
+                description: "Virement".into(),
+                amount,
+                currency_code: "EUR".into(),
+                balance_after: Some(90.0),
+                category_hint: None,
+                line_kind,
+                suggested_type: None,
+                suggested_category: None,
+                metadata: serde_json::json!({}),
+                fingerprint: format!("fp-{source_key}"),
+                dedupe_key: format!("dd-{source_key}"),
+            }],
+        };
+        let mut conn = pool.get().unwrap();
+        let tx = conn.transaction().unwrap();
+        let outcome = store::save_statement(&tx, draft).unwrap();
+        tx.commit().unwrap();
+        outcome.statement_id
+    }
+
+    #[test]
+    fn a_file_snapshot_covers_every_account_of_the_file() {
+        let pool = crate::db::init_memory().unwrap();
+        let path = "dump/credit_agricole/ca.csv";
+        let checking = stage(
+            &pool,
+            "ca-2026-09",
+            path,
+            "Compte de chèques",
+            LineKind::TransferOut,
+        );
+        let card = stage(
+            &pool,
+            "ca-eko-2026-09",
+            path,
+            "Eko by CA",
+            LineKind::TransferIn,
+        );
+        stage(
+            &pool,
+            "ca-2026-10",
+            "dump/credit_agricole/ca-other.csv",
+            "Compte de chèques",
+            LineKind::Debit,
+        );
+
+        // The transfer pair across the two statements of one file carries both
+        // account names, so the review screen can say what moved where.
+        {
+            let mut conn = pool.get().unwrap();
+            let tx = conn.transaction().unwrap();
+            store::match_pending(&tx).unwrap();
+            tx.commit().unwrap();
+        }
+
+        // The pool is one connection wide; reads wait until staging is done.
+        let conn = pool.get().unwrap();
+        let ids = file_statement_ids(&conn, path).unwrap();
+        assert_eq!(
+            ids,
+            vec![checking.clone(), card.clone()],
+            "ordered by account name, same file only"
+        );
+
+        let payload = statement_payload(&conn, &checking).unwrap();
+        let matches = payload["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["debitAccountName"], "Compte de chèques");
+        assert_eq!(matches[0]["creditAccountName"], "Eko by CA");
+    }
+
+    #[test]
+    fn a_batch_delete_removes_only_live_statements() {
+        let pool = crate::db::init_memory().unwrap();
+        let path = "dump/credit_agricole/ca.csv";
+        let first = stage(
+            &pool,
+            "ca-2026-09",
+            path,
+            "Compte de chèques",
+            LineKind::Debit,
+        );
+        let second = stage(&pool, "ca-2026-10", path, "Livret A", LineKind::Debit);
+
+        let deleted = {
+            let mut conn = pool.get().unwrap();
+            soft_delete_statements(&mut conn, &[first.clone(), "no-such-id".into()]).unwrap()
+        };
+        assert_eq!(
+            deleted,
+            vec![first.clone()],
+            "only the live row is reported"
+        );
+
+        {
+            let conn = pool.get().unwrap();
+            let ids = file_statement_ids(&conn, path).unwrap();
+            assert_eq!(
+                ids,
+                vec![second.clone()],
+                "the deleted statement leaves the snapshot"
+            );
+        }
+
+        // The second statement is untouched by the first delete, and deleting
+        // it again is a no-op that reports nothing new.
+        let again = {
+            let mut conn = pool.get().unwrap();
+            soft_delete_statements(&mut conn, &[first.clone(), second.clone()]).unwrap()
+        };
+        assert_eq!(again, vec![second.clone()]);
+
+        let conn = pool.get().unwrap();
+        assert!(
+            file_statement_ids(&conn, path).is_err(),
+            "with both statements deleted the file has no snapshot"
+        );
+    }
 }

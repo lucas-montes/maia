@@ -72,6 +72,8 @@ export interface StatementSummary {
   lineCount: number;
   pendingCount: number;
   importedCount: number;
+  /** The file the statement was staged from; statements of one dropped file share it. */
+  sourcePath?: string | null;
 }
 
 export interface StatementLine {
@@ -113,6 +115,9 @@ export interface TransferMatch {
   /** The counterpart is included even when it belongs to another statement. */
   debit: TransferMatchLine;
   credit: TransferMatchLine;
+  /** Account names of both sides, so a transfer can say what moved where. */
+  debitAccountName?: string | null;
+  creditAccountName?: string | null;
 }
 
 export interface StatementDetail {
@@ -460,11 +465,24 @@ export const api = {
   getStatement: (id: string) =>
     invoke<Envelope<StatementDetail>>("get_statement", { id }),
 
+  /** Every statement one dropped file produced, with lines and matches. */
+  getStatementFile: (path: string) =>
+    invoke<Envelope<{ statements: StatementDetail[] }>>("get_statement_file", { path }),
+
   importStatement: (args: {
     id: string;
     lines: StatementImportLine[];
     autoLink?: boolean;
   }) => invoke<Envelope<unknown>>("import_statement", args),
+
+  /** Imports pending lines of several statements in one server transaction. */
+  importStatements: (
+    statements: { id: string; lines: StatementImportLine[]; autoLink?: boolean }[],
+  ) => invoke<Envelope<unknown>>("import_statements", { statements }),
+
+  /** Soft-deletes several statements in one server transaction. */
+  deleteStatements: (ids: string[]) =>
+    invoke<Envelope<{ deleted: string[] }>>("delete_statements", { ids }),
 
   ignoreStatement: (id: string) =>
     invoke<Envelope<unknown>>("ignore_statement", { id }),

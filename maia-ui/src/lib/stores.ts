@@ -187,6 +187,10 @@ export const statementsAtom = atom<
     filter: string;
     source: string;
     selectedLines: string[];
+    /** Statements of one dropped file, when the file review page is open. */
+    fileReview: { path: string; statements: any[] } | null;
+    /** Statement ids picked on the list page for bulk import/delete. */
+    selectedStatements: string[];
     /** Last source the drop form placed files under, so the dropdown stays on it. */
     lastDropSource: string;
   }
@@ -194,9 +198,11 @@ export const statementsAtom = atom<
   ...emptyList<any>(),
   selectedId: null,
   detail: null,
-  filter: "",
+  filter: "awaiting",
   source: "",
   selectedLines: [],
+  fileReview: null,
+  selectedStatements: [],
   lastDropSource: localStorage.getItem("maia.statements.lastDropSource") ?? "credit_agricole",
 });
 

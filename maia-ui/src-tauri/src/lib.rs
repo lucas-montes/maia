@@ -1435,6 +1435,51 @@ async fn get_statement(id: String) -> CommandResult<serde_json::Value> {
     json_result(api::get(&format!("/statements/{id}")).await)
 }
 
+/// Percent-encodes a query value, keeping the unreserved set literal.
+///
+/// A dropped file's path carries directories and possibly non-ASCII names, so
+/// it cannot go into a URL raw.
+fn url_query_value(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*byte as char);
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// One dropped file's statements: every account the parser staged from it.
+#[tauri::command]
+async fn get_statement_file(path: String) -> CommandResult<serde_json::Value> {
+    let path = format!("/statements/file?path={}", url_query_value(&path));
+    json_result(api::get(&path).await)
+}
+
+/// Imports pending lines of several statements in one server transaction.
+///
+/// Each entry is `{ id, lines, autoLink }`, the same shape the single-statement
+/// import takes; the batch form keeps a file-level selection atomic.
+#[tauri::command]
+async fn import_statements(statements: Vec<serde_json::Value>) -> CommandResult<serde_json::Value> {
+    json_result(
+        api::post(
+            "/statements/import",
+            &serde_json::json!({ "statements": statements }),
+        )
+        .await,
+    )
+}
+
+/// Soft-deletes several statements in one server transaction.
+#[tauri::command]
+async fn delete_statements(ids: Vec<String>) -> CommandResult<serde_json::Value> {
+    json_result(api::post("/statements/delete", &serde_json::json!({ "ids": ids })).await)
+}
+
 #[tauri::command]
 async fn import_statement(
     id: String,
@@ -3043,7 +3088,10 @@ pub fn run() {
             list_fx_rates,
             list_statements,
             get_statement,
+            get_statement_file,
             import_statement,
+            import_statements,
+            delete_statements,
             ignore_statement,
             delete_statement,
             add_statement_files,

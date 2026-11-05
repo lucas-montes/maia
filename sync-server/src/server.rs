@@ -100,6 +100,8 @@ pub fn create_router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_STATEMENT_BYTES)),
         )
         .route("/statements/import", post(crate::handlers::statements::import_statements))
+        .route("/statements/delete", post(crate::handlers::statements::delete_statements))
+        .route("/statements/file", get(crate::handlers::statements::get_statement_file))
         .route(
             "/statements/:id",
             get(crate::handlers::statements::get_statement)
