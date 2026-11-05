@@ -185,7 +185,7 @@ export function mount(root: HTMLElement): () => void {
                 </div>
                 <div>
                   <label class="field-label text-xs">Sodium</label>
-                  <input id="ing-new-sodium" type="number" step="1" placeholder="5" class="input input-bordered w-full" />
+                  <input id="ing-new-sodium" type="number" step="0.1" placeholder="0.1" class="input input-bordered w-full" />
                 </div>
               </div>
             </div>

@@ -60,7 +60,7 @@ struct OffNutriments {
     #[serde(default, deserialize_with = "de_opt_f64")]
     fat_100g: Option<f64>,
     #[serde(default, deserialize_with = "de_opt_f64")]
-    sodium_100g: Option<f64>,
+    salt_100g: Option<f64>,
     #[serde(default, deserialize_with = "de_opt_f64")]
     fiber_100g: Option<f64>,
     #[serde(default, deserialize_with = "de_opt_f64")]
@@ -123,12 +123,15 @@ pub fn draft_from_off(barcode: &str, body: &serde_json::Value) -> Option<Ingredi
         proteins_100g: None,
         carbohydrates_100g: None,
         fat_100g: None,
-        sodium_100g: None,
+        salt_100g: None,
         fiber_100g: None,
         sugars_100g: None,
     });
-    // Sodium in OFF is grams/100g; our schema stores mg/100g.
-    let sodium_mg = nutr.sodium_100g.map(|g| g * 1000.0);
+    // Pass the salt_100g figure straight through, unconverted: it's the
+    // number printed on the nutrition table (per 100g, grams), and that raw
+    // value is what should land in the ingredient — no g/mg or salt/sodium
+    // factor applied.
+    let sodium_raw = nutr.salt_100g;
     Some(IngredientDraft {
         name: name.trim().to_string(),
         brand: p.brands.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
@@ -137,7 +140,7 @@ pub fn draft_from_off(barcode: &str, body: &serde_json::Value) -> Option<Ingredi
         protein_per100g: nutr.proteins_100g.unwrap_or(0.0),
         carbs_per100g: nutr.carbohydrates_100g.unwrap_or(0.0),
         fat_per100g: nutr.fat_100g.unwrap_or(0.0),
-        sodium_per100g: sodium_mg,
+        sodium_per100g: sodium_raw,
         fiber_per100g: nutr.fiber_100g,
         sugar_per100g: nutr.sugars_100g,
     })
@@ -182,7 +185,7 @@ mod tests {
                     "proteins_100g": 6.3,
                     "carbohydrates_100g": 57.5,
                     "fat_100g": 30.9,
-                    "sodium_100g": 0.107,
+                    "salt_100g": 0.107,
                     "fiber_100g": "3.4",
                     "sugars_100g": 56.3
                 }
@@ -192,7 +195,7 @@ mod tests {
         assert_eq!(d.name, "Nutella");
         assert_eq!(d.brand.as_deref(), Some("Ferrero"));
         assert_eq!(d.calories_per100g, 539.0);
-        assert!((d.sodium_per100g.unwrap() - 107.0).abs() < 0.01);
+        assert!((d.sodium_per100g.unwrap() - 0.107).abs() < 0.0001);
     }
 
     #[test]
