@@ -5,7 +5,7 @@
   craneLib,
   ...
 }: let
-  readCargoToml = path: builtins.fromTOML (builtins.readFile path);
+  readCargoToml = path: fromTOML (builtins.readFile path);
 
   # Only cargo-relevant files, so `target`, the 19 GB of media/data churn and
   # `context/tmp` never reach the store, and a dependency fingerprint never
@@ -16,8 +16,7 @@
   # parser test should do.
   src = lib.cleanSourceWith {
     src = ../.;
-    filter =
-      path: type:
+    filter = path: type:
       lib.hasInfix "/fixtures/statements/" path || craneLib.filterCargoSources path type;
   };
 
@@ -51,25 +50,26 @@
     fi
   '';
 
-  commonArgs = {
-    inherit src;
-    strictDeps = true;
+  commonArgs =
+    {
+      inherit src;
+      strictDeps = true;
 
-    nativeBuildInputs = [
-      pkgs.pkg-config
-    ];
-
-    buildInputs =
-      [
-        pkgs.openssl
-      ]
-      ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
-        pkgs.libiconv
+      nativeBuildInputs = [
+        pkgs.pkg-config
       ];
 
-    preBuild = swaggerZipSetup;
-  }
-  // swaggerEnv;
+      buildInputs =
+        [
+          pkgs.openssl
+        ]
+        ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+          pkgs.libiconv
+        ];
+
+      preBuild = swaggerZipSetup;
+    }
+    // swaggerEnv;
 
   # Build *just* the cargo dependencies, so all of that work can be reused
   # (e.g. via cachix) when running in CI.
@@ -185,11 +185,12 @@
     inherit frontend;
     inherit (tauri) app cargoArtifacts tauriConfig;
   };
-in {
-  inherit
-    sync-server
-    maia-desktop
-    chrome-ext
-    ;
-}
-// passthru
+in
+  {
+    inherit
+      sync-server
+      maia-desktop
+      chrome-ext
+      ;
+  }
+  // passthru
