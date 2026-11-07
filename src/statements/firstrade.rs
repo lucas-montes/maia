@@ -144,6 +144,7 @@ impl Parser for FirstradeSource {
                     period_end,
                     source_hash: ctx.source_hash.clone(),
                     stored_path: ctx.stored_path.clone(),
+                    source_path: ctx.source_path.clone(),
                     lines,
                     warnings: warnings.clone(),
                 }
@@ -160,6 +161,10 @@ pub struct FirstradeStatement {
     pub period_end: String,
     pub source_hash: String,
     pub stored_path: Option<String>,
+    /// The dropped file's own path, shared by every month this file
+    /// produced; carried through so the list endpoint can group them back
+    /// into one file (see [`ParseContext::source_path`]).
+    pub source_path: Option<String>,
     pub lines: Vec<StatementLineDraft>,
     pub warnings: Vec<String>,
 }
@@ -184,7 +189,7 @@ impl FirstradeStatement {
             period_end: Some(self.period_end.clone()),
             opening_balance: None,
             closing_balance: None,
-            source_path: None,
+            source_path: self.source_path,
             stored_path: self.stored_path,
             source_hash: self.source_hash,
             source_key: format!(
@@ -474,6 +479,7 @@ mod tests {
         ParseContext {
             source_hash: "hash".to_string(),
             stored_path: None,
+            source_path: None,
             fetched_at: 0,
         }
     }

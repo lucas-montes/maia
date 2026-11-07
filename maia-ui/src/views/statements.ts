@@ -163,7 +163,7 @@ function lineRow(line: StatementLine, checked: boolean): string {
   return `
     <tr data-line-row="${escapeHtml(line.id)}" class="${checked ? "bg-surface-800/40" : ""}">
       <td class="w-8 align-top">
-        ${selectable ? `<input type="checkbox" class="checkbox checkbox-sm" data-line-id="${escapeHtml(line.id)}" ${checked ? "checked" : ""} />` : ""}
+        ${selectable ? `<input type="checkbox" class="checkbox checkbox-sm align-top" data-line-id="${escapeHtml(line.id)}" ${checked ? "checked" : ""} />` : ""}
       </td>
       <td class="whitespace-nowrap align-top text-xs text-ink-400">${escapeHtml(formatEpoch(line.postedAt))}</td>
       <td class="align-top">
@@ -218,7 +218,7 @@ function transferRowsHtml(
       return `
         <tr data-transfer-match="${escapeHtml(match.id)}">
           <td class="w-8 align-top">
-            ${selectable ? `<input type="checkbox" class="checkbox checkbox-sm" data-line-id="${escapeHtml(localId)}" ${checked ? "checked" : ""} />` : ""}
+            ${selectable ? `<input type="checkbox" class="checkbox checkbox-sm align-top" data-line-id="${escapeHtml(localId)}" ${checked ? "checked" : ""} />` : ""}
           </td>
           <td class="whitespace-nowrap align-top text-xs text-ink-400">${escapeHtml(formatEpoch(debit.postedAt))}</td>
           <td class="align-top">
@@ -446,7 +446,11 @@ function fileHtml(statements: StatementDetail[], selected: Set<string>): string 
       <div class="rounded border border-surface-800 bg-base-100 p-4">
         <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
           <h3 class="text-sm font-medium text-ink-200">Accounts</h3>
-          <span class="text-xs text-ink-500">${statements.length} account${statements.length !== 1 ? "s" : ""} · ${pending} entr${pending !== 1 ? "ies" : "y"} pending</span>
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-ink-500">${statements.length} account${statements.length !== 1 ? "s" : ""} · ${pending} entr${pending !== 1 ? "ies" : "y"} pending</span>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="select-all" ${pending === 0 ? "disabled" : ""}>Select pending</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="select-none">Clear</button>
+          </div>
         </div>
         <table class="table table-sm w-full">
           <thead><tr><th></th><th>Account</th><th>Currency</th><th>Status</th><th class="text-right">Pending</th><th></th></tr></thead>
@@ -635,7 +639,10 @@ export function mount(root: HTMLElement): () => void {
               <button class="btn btn-primary btn-sm" type="button" data-action="drop-statement-files" disabled>Add</button>
             </div>
           </details>
-          <div class="text-sm text-ink-400">${state.items.length} statement${state.items.length !== 1 ? "s" : ""}</div>
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="text-sm text-ink-400">${state.items.length} statement${state.items.length !== 1 ? "s" : ""}</div>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="select-all-statements" ${(state.items as StatementSummary[]).some((s) => s.pendingCount > 0) ? "" : "disabled"}>Select all pending</button>
+          </div>
           ${listHtml(state.items as StatementSummary[], state.selectedId, state.selectedStatements)}
           <div>${backToDashboard()}</div>
         ${panelClose}`,
@@ -1197,6 +1204,19 @@ export function mount(root: HTMLElement): () => void {
       case "sync-feed":
         void syncFeed();
         return;
+      case "select-all-statements": {
+        // Top-level equivalent of "select-all" within a file: picks every
+        // statement in the current (filtered) view that still has pending
+        // entries, so the bulk import/delete bar below can act on all of
+        // them in one shot, across every file group.
+        const state = statementsAtom.get();
+        const ids = (state.items as StatementSummary[])
+          .filter((s) => s.pendingCount > 0)
+          .map((s) => s.id);
+        statementsAtom.set({ ...state, selectedStatements: ids });
+        render();
+        return;
+      }
       case "select-all": {
         const state = statementsAtom.get();
         if (state.fileReview) {

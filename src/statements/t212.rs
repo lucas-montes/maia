@@ -440,6 +440,7 @@ impl Parser for Trading212Source {
                     period_end,
                     source_hash: ctx.source_hash.clone(),
                     stored_path: ctx.stored_path.clone(),
+                    source_path: ctx.source_path.clone(),
                     lines,
                     warnings: warnings.clone(),
                 }
@@ -459,6 +460,10 @@ pub struct T212Statement {
     pub period_end: String,
     pub source_hash: String,
     pub stored_path: Option<String>,
+    /// Always `None` in practice: the feed has no dropped file, only API
+    /// responses (see [`ParseContext::source_path`]). Carried through anyway
+    /// so this draft construction matches the file-based parsers' shape.
+    pub source_path: Option<String>,
     pub lines: Vec<StatementLineDraft>,
     pub warnings: Vec<String>,
 }
@@ -481,7 +486,7 @@ impl T212Statement {
             period_end: Some(self.period_end.clone()),
             opening_balance: None,
             closing_balance: None,
-            source_path: None,
+            source_path: self.source_path,
             stored_path: self.stored_path,
             source_hash: self.source_hash,
             source_key: format!("{}:{}:{}", PROVIDER, self.account_number, self.month),
@@ -704,6 +709,7 @@ mod tests {
         ParseContext {
             source_hash: "hash".to_string(),
             stored_path: None,
+            source_path: None,
             fetched_at: 0,
         }
     }

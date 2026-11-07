@@ -146,13 +146,30 @@ impl RawDocument {
     }
 }
 
-/// Context computed by [`run`] after acquisition. Parsers copy the hash and
-/// stored path into their drafts so a later re-parse can find the original.
+/// Context computed by [`run`] after acquisition. Parsers copy the hash,
+/// stored path and source path into their drafts so a later re-parse can find
+/// the original and the list endpoint can group statements by dropped file.
 #[derive(Clone, Debug)]
 pub struct ParseContext {
     pub source_hash: String,
     pub stored_path: Option<String>,
+    /// The dropped file's own path, for file sources (`None` for a feed,
+    /// which has no file). Every statement a file's parse produces shares
+    /// this value, which is what lets the review screen group them back
+    /// into one card; see [`first_source_path`].
+    pub source_path: Option<String>,
     pub fetched_at: i64,
+}
+
+/// The first document's path, formatted for storage.
+///
+/// A file source gives one document; `docs.first()` is enough even though
+/// this takes the whole slice, so a feed's multi-document `Vec` (which has no
+/// path on any of them) is handled the same way without a special case.
+fn first_source_path(docs: &[RawDocument]) -> Option<String> {
+    docs.iter()
+        .find_map(|doc| doc.source_path.as_ref())
+        .map(|path| path.display().to_string())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -291,6 +308,7 @@ async fn run_with<P: Parser>(
     let ctx = ParseContext {
         source_hash,
         stored_path,
+        source_path: first_source_path(&docs),
         fetched_at: crate::db::server_time_ms(),
     };
 
@@ -300,7 +318,7 @@ async fn run_with<P: Parser>(
             // Keep the failure visible in the review screen instead of only in
             // the log. A later successful parse of the same bytes updates the
             // same row, so a parser fix is a retry rather than a new record.
-            record_failure(state, source, &ctx, &docs, &error)?;
+            record_failure(state, source, &ctx, &error)?;
             return Err(error.into());
         }
     };
@@ -324,15 +342,11 @@ fn record_failure(
     state: &AppState,
     source: SourceId,
     ctx: &ParseContext,
-    docs: &[RawDocument],
     error: &SourceError,
 ) -> anyhow::Result<()> {
     let conn = state.db.get()?;
     let now = crate::db::server_time_ms();
-    let source_path = docs
-        .iter()
-        .find_map(|doc| doc.source_path.as_ref())
-        .map(|path| path.display().to_string());
+    let source_path = ctx.source_path.clone();
     conn.execute(
         "INSERT INTO bank_statements
             (id, source, institution, account_name, account_number, currency_code,
