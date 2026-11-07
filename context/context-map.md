@@ -16,6 +16,7 @@ This file indexes all durable context artifacts for the Maia project.
 | `nix/packaging.md` | How the `server` flake packages (`sync-server`, `frontend`, `maia-desktop`) are built: crane deps caching, pnpm frontend, crane-tauri app, utoipa-swagger-ui download vendoring, build-environment gotchas |
 | `ui-rebuild/shell-and-screens.md` | UI shell, core screen implementations, settings editor, and notes file-backed records |
 | `sync/sync-contract.md` | FitFat offline-first sync contract (mirrors `~/Projects/fitfat/docs/api/openapi.yaml` and `context/sync/sync-contract.md`) |
+| `waybar-agenda.md` | `GET /agenda` response shape + copy-pasteable Waybar `custom` module config and `curl`/`jq` one-liner |
 
 ## Plans (proposed)
 | Plan | Status | Description |
@@ -25,7 +26,8 @@ This file indexes all durable context artifacts for the Maia project.
 | `finance-expenses-income` | proposed | Tx/investment CLI, bank/investment CSV parsing, receipt→expense link |
 | `finance-budget-simulation` | proposed | Budget tracking, auto-categorization, Monte Carlo sim integration |
 | `system-daemon-wiring` | proposed | DB init, main loop, socket handler, file watcher fixes (FOUNDATIONAL) |
-| `system-waybar` | proposed | Waybar JSON output for tasks, calendar, calories, finance |
+| `system-waybar` | superseded | Socket-era daemon sketch; replaced by `waybar-and-notifications` (HTTP `/agenda`) |
+| `waybar-and-notifications` | completed (T03 unverified end-to-end) | `GET /agenda` + Waybar module doc + background `notify-send` due-task notifier + systemd D-Bus session wiring |
 | `system-remote-storage` | proposed | S3/local sync for DB and watched files |
 | `tasks-sqlite-port` | proposed | Replace JSON todo storage with SQLite, wire new CLI, notifications |
 | `todo-txt-import` | proposed | Watch todo.txt files, parse tasks, save them, and notify on due dates |

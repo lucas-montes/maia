@@ -5,6 +5,7 @@ pub mod error;
 pub mod handlers;
 pub mod logs;
 pub mod notes_mirror;
+pub mod notifier;
 pub mod openapi;
 pub mod openfoodfacts;
 pub mod receipt_ocr;
@@ -63,6 +64,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn agenda_is_authed_and_reports_overdue_tasks() {
+        let pool = crate::db::init_memory().unwrap();
+        {
+            let conn = pool.get().unwrap();
+            let now = crate::db::server_time_ms();
+            conn.execute(
+                "INSERT INTO tasks (id, date, title, done, carry_over, sort_order, due_date, due_time_minutes, created_at) \
+                 VALUES ('a1', ?1, 'Overdue thing', 0, 1, 0, ?1, 0, 0)",
+                [now - 24 * 60 * 60 * 1000],
+            )
+            .unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool).await;
+        let base = format!("http://127.0.0.1:{port}");
+        let client = reqwest::Client::new();
+
+        // Same Bearer auth as every other route -- no key, no access.
+        let resp = client.get(format!("{base}/agenda")).send().await.unwrap();
+        assert_eq!(resp.status(), 401);
+
+        let resp = client
+            .get(format!("{base}/agenda"))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["overdue"].as_array().unwrap().len(), 1);
+        assert_eq!(body["overdue"][0]["id"], "a1");
+        assert!(body["dueToday"].as_array().unwrap().is_empty());
+        assert!(body["nextMeeting"].is_null());
 
         handle.abort();
     }
