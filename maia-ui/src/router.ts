@@ -11,6 +11,7 @@ const KNOWN: ViewId[] = [
   "workouts",
   "templates",
   "ingredients",
+  "priceComparison",
   "foods",
   "stores",
   "meals",

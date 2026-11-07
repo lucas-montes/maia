@@ -32,6 +32,7 @@ export type ViewId =
   | "workouts"
   | "templates"
   | "ingredients"
+  | "priceComparison"
   | "foods"
   | "stores"
   | "meals"
@@ -144,6 +145,14 @@ export const ingredientsAtom = atom<
   search: "",
   selectedId: null,
   showAddModal: false,
+});
+
+export const priceComparisonAtom = atom<
+  ListState<any> & { period: "week" | "month" | "year"; nutrient: string }
+>({
+  ...emptyList<any>(),
+  period: "month",
+  nutrient: "protein",
 });
 
 export const foodsAtom = atom<

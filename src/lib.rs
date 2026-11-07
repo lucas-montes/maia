@@ -7,6 +7,7 @@ pub mod logs;
 pub mod notes_mirror;
 pub mod openapi;
 pub mod openfoodfacts;
+pub mod pricing;
 pub mod receipt_ocr;
 pub mod seed;
 pub mod server;
@@ -335,6 +336,98 @@ mod tests {
             let count_p: i64 = conn.query_row("SELECT count(*) FROM ingredient_pictures WHERE id='p1'", [], |r| r.get(0)).unwrap();
             assert_eq!(count_p, 1);
         }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn match_receipt_item_creates_a_price_and_upserts_the_store_by_name() {
+        let pool = crate::db::init_memory().unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i1','Oats',100,10,20,5,1000,1000)", []).unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/ingredient-prices/match");
+
+        let payload = serde_json::json!({
+            "ingredientId": "i1",
+            "merchant": "Carrefour",
+            "price": 2.4,
+            "currencyCode": "EUR",
+            "packageGrams": 500.0,
+            "recordedAt": 1_700_000_000_000i64,
+            "sourceUrl": "https://example.com/oats",
+        });
+        let resp = client.post(&url).header("Authorization", "Bearer test-key").json(&payload).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let conn = pool.get().unwrap();
+        let (store_id, store_name): (String, String) = conn
+            .query_row("SELECT id, name FROM stores WHERE name = 'Carrefour'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(store_name, "Carrefour", "the store must be named after the merchant, not its id");
+
+        let (price, package_grams, source_url): (f64, Option<f64>, Option<String>) = conn
+            .query_row(
+                "SELECT price, package_grams, source_url FROM ingredient_prices WHERE ingredient_id='i1' AND store_id=?1",
+                rusqlite::params![store_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(price, 2.4);
+        assert_eq!(package_grams, Some(500.0));
+        assert_eq!(source_url, Some("https://example.com/oats".to_string()));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn match_receipt_item_on_the_same_day_overwrites_not_duplicates() {
+        let pool = crate::db::init_memory().unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute("INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i1','Oats',100,10,20,5,1000,1000)", []).unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/ingredient-prices/match");
+
+        let first = serde_json::json!({
+            "ingredientId": "i1", "merchant": "Carrefour", "price": 2.4,
+            "currencyCode": "EUR", "recordedAt": 1_700_000_000_000i64,
+        });
+        client.post(&url).header("Authorization", "Bearer test-key").json(&first).send().await.unwrap();
+
+        // Same ingredient, same merchant (different case), same day: overwrites.
+        let second = serde_json::json!({
+            "ingredientId": "i1", "merchant": "CARREFOUR", "price": 3.1,
+            "currencyCode": "EUR", "recordedAt": 1_700_000_000_000i64,
+        });
+        let resp = client.post(&url).header("Authorization", "Bearer test-key").json(&second).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let conn = pool.get().unwrap();
+        let store_count: i64 = conn.query_row("SELECT count(*) FROM stores", [], |r| r.get(0)).unwrap();
+        assert_eq!(store_count, 1, "a case-only difference must match the existing store, not create a second one");
+        let price_count: i64 = conn.query_row("SELECT count(*) FROM ingredient_prices", [], |r| r.get(0)).unwrap();
+        assert_eq!(price_count, 1, "re-matching the same day must overwrite, not duplicate");
+        let price: f64 = conn.query_row("SELECT price FROM ingredient_prices", [], |r| r.get(0)).unwrap();
+        assert_eq!(price, 3.1);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn match_receipt_item_rejects_an_unknown_ingredient() {
+        let pool = crate::db::init_memory().unwrap();
+        let (port, handle) = crate::server::start_test_server_with_db(pool).await;
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/ingredient-prices/match");
+        let payload = serde_json::json!({
+            "ingredientId": "nope", "merchant": "Carrefour", "price": 2.4,
+            "currencyCode": "EUR", "recordedAt": 1_700_000_000_000i64,
+        });
+        let resp = client.post(&url).header("Authorization", "Bearer test-key").json(&payload).send().await.unwrap();
+        assert_eq!(resp.status(), 404);
         handle.abort();
     }
 

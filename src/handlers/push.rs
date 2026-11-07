@@ -1,7 +1,8 @@
 use axum::{body::Bytes, extract::State, http::{HeaderMap, StatusCode}, response::IntoResponse, Json};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
-use crate::{db, server::AppState};
+use crate::{db, error::error_response, server::AppState};
 
 #[derive(Serialize)]
 pub struct SyncAck {
@@ -68,6 +69,11 @@ pub struct IngredientPricePush {
     pub package_grams: Option<f64>,
     #[serde(rename = "recordedAt")]
     pub recorded_at: i64,
+    /// Where this price was observed. Optional and defaulted like
+    /// `package_grams` above: an older client that omits it means "unset",
+    /// same as sending an explicit null.
+    #[serde(rename = "sourceUrl", default)]
+    pub source_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -265,7 +271,7 @@ pub async fn push_ingredient(
         )
         .unwrap();
         tx.execute(
-            "INSERT INTO ingredient_prices (id, ingredient_id, store_id, price, currency_code, package_grams, recorded_at, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, NULL) ON CONFLICT(id) DO UPDATE SET ingredient_id=excluded.ingredient_id, store_id=excluded.store_id, price=excluded.price, currency_code=excluded.currency_code, package_grams=excluded.package_grams, recorded_at=excluded.recorded_at, updated_at=excluded.updated_at, deleted_at=NULL",
+            "INSERT INTO ingredient_prices (id, ingredient_id, store_id, price, currency_code, package_grams, recorded_at, source_url, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?7, ?9, NULL) ON CONFLICT(id) DO UPDATE SET ingredient_id=excluded.ingredient_id, store_id=excluded.store_id, price=excluded.price, currency_code=excluded.currency_code, package_grams=excluded.package_grams, recorded_at=excluded.recorded_at, source_url=excluded.source_url, updated_at=excluded.updated_at, deleted_at=NULL",
             rusqlite::params![
                 price.id,
                 price.ingredient_id,
@@ -274,6 +280,7 @@ pub async fn push_ingredient(
                 price.currency_code,
                 price.package_grams,
                 price.recorded_at,
+                price.source_url,
                 server_time
             ],
         )
@@ -1587,4 +1594,153 @@ pub async fn push_exercises(
     }
     tx.commit().unwrap();
     Json(SyncAck { server_time })
+}
+
+// ---------------------------------------------------------------------------
+// Receipt line-item -> ingredient price matching (T02)
+//
+// Desktop-only: the receipt detail view lets a user match one parsed line
+// item to an existing ingredient. This is always manual -- there is no
+// fuzzy auto-matching and nothing here can create an ingredient -- and it is
+// the one write in the price-tracking feature that cannot be a plain upsert
+// of client-supplied rows, because the store is identified by *name*
+// (the receipt's merchant), not by an id the client already knows.
+// ---------------------------------------------------------------------------
+
+/// Request to record a price observation by matching one parsed receipt line
+/// item to an existing ingredient.
+#[derive(Deserialize)]
+pub struct MatchReceiptItemRequest {
+    #[serde(rename = "ingredientId")]
+    pub ingredient_id: String,
+    /// The receipt's merchant name. The store is found by a case-insensitive
+    /// match on this and created under a fresh id if the merchant has never
+    /// been matched before.
+    pub merchant: String,
+    pub price: f64,
+    #[serde(rename = "currencyCode")]
+    pub currency_code: String,
+    /// Entered by hand at match time -- the receipt OCR never parses a
+    /// package weight (see `receipt_ocr::ParsedItem`).
+    #[serde(rename = "packageGrams")]
+    pub package_grams: Option<f64>,
+    /// The receipt's own date, epoch milliseconds -- not "now".
+    #[serde(rename = "recordedAt")]
+    pub recorded_at: i64,
+    /// Where the price was seen, if the user pastes a link. Never fetched.
+    #[serde(rename = "sourceUrl", default)]
+    pub source_url: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct MatchReceiptItemResponse {
+    pub id: String,
+    #[serde(rename = "storeId")]
+    pub store_id: String,
+    #[serde(rename = "storeName")]
+    pub store_name: String,
+}
+
+/// `POST /ingredient-prices/match`.
+///
+/// Re-matching the same ingredient at the same store on the same day
+/// overwrites the previous observation: `ingredient_prices` already enforces
+/// one row per `(ingredient_id, store_id, recorded_at)`, the same constraint
+/// mobile's price sheet has always upserted against, carried over here rather
+/// than re-decided.
+pub async fn match_receipt_item(
+    State(state): State<AppState>,
+    Json(req): Json<MatchReceiptItemRequest>,
+) -> impl IntoResponse {
+    if !(req.price > 0.0) {
+        return error_response(StatusCode::BAD_REQUEST, "price must be positive").into_response();
+    }
+    let merchant = req.merchant.trim();
+    if merchant.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "merchant must not be empty").into_response();
+    }
+
+    let conn = state.db.get().unwrap();
+
+    let ingredient_exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM ingredients WHERE id = ?1 AND deleted_at IS NULL",
+            rusqlite::params![req.ingredient_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap();
+    if ingredient_exists.is_none() {
+        return error_response(StatusCode::NOT_FOUND, format!("ingredient {} not found", req.ingredient_id))
+            .into_response();
+    }
+
+    let server_time = db::server_time_ms();
+    let tx = conn.unchecked_transaction().unwrap();
+
+    let existing_store: Option<(String, String)> = tx
+        .query_row(
+            "SELECT id, name FROM stores WHERE deleted_at IS NULL AND lower(name) = lower(?1) LIMIT 1",
+            rusqlite::params![merchant],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .unwrap();
+    let (store_id, store_name) = match existing_store {
+        Some(found) => found,
+        None => {
+            let id = uuid::Uuid::now_v7().to_string();
+            tx.execute(
+                "INSERT INTO stores (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+                rusqlite::params![id, merchant, server_time],
+            )
+            .unwrap();
+            (id, merchant.to_string())
+        }
+    };
+
+    tx.execute(
+        "INSERT INTO ingredient_prices
+            (id, ingredient_id, store_id, price, currency_code, package_grams, recorded_at, source_url, created_at, updated_at, deleted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, NULL)
+         ON CONFLICT(ingredient_id, store_id, recorded_at) DO UPDATE SET
+            price=excluded.price,
+            currency_code=excluded.currency_code,
+            package_grams=excluded.package_grams,
+            source_url=excluded.source_url,
+            updated_at=excluded.updated_at,
+            deleted_at=NULL",
+        rusqlite::params![
+            uuid::Uuid::now_v7().to_string(),
+            req.ingredient_id,
+            store_id,
+            req.price,
+            req.currency_code,
+            req.package_grams,
+            req.recorded_at,
+            req.source_url,
+            server_time,
+        ],
+    )
+    .unwrap();
+
+    // The freshly generated id above is only used when there is no conflict;
+    // on a same-day re-match it is the *existing* row's id that stays live.
+    // Read it back rather than assuming which one won.
+    let final_id: String = tx
+        .query_row(
+            "SELECT id FROM ingredient_prices WHERE ingredient_id=?1 AND store_id=?2 AND recorded_at=?3",
+            rusqlite::params![req.ingredient_id, store_id, req.recorded_at],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    tx.commit().unwrap();
+
+    Json(MatchReceiptItemResponse {
+        id: final_id,
+        store_id,
+        store_name,
+    })
+    .into_response()
 }

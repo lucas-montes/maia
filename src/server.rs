@@ -93,6 +93,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/urls/:id/content", get(crate::handlers::pull::get_url_content))
         .route("/stores", get(crate::handlers::pull::pull_stores).post(crate::handlers::push::push_stores))
+        .route("/ingredient-prices/match", post(crate::handlers::push::match_receipt_item))
         .route("/ingredients/catalog", get(crate::handlers::pull::pull_ingredient_catalog))
         .route("/ingredients/lookup", get(crate::handlers::lookup::lookup_ingredient))
         .route("/ingredients/import-from-barcode", axum::routing::post(crate::handlers::lookup::import_from_barcode))
