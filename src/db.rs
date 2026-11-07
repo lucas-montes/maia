@@ -167,13 +167,18 @@ pub const MIGRATIONS: &[(i64, Step)] = &[
     // captured HTML; `content_path` points at a file under `url_content/`
     // alongside the database, mirroring how receipt pictures are stored.
     (8, Step::Guarded(add_url_content_path)),
+    // The due-task desktop notifier (`notifier::tick`) needs a persisted
+    // marker so a service restart does not replay every already-overdue task
+    // as a fresh `notify-send` call. Server-only: `pull_tasks` selects an
+    // explicit column list that omits it, so a phone never sees or clears it.
+    (9, Step::Guarded(add_task_notified_at)),
 ];
 
 /// Highest version in `MIGRATIONS`.
 ///
 /// A database newer than this means the data is newer than the binary, which is
 /// what a Nix rollback looks like. `migrate` refuses rather than serving.
-pub const LATEST_VERSION: i64 = 8;
+pub const LATEST_VERSION: i64 = 9;
 
 /// The v1 schema, exactly as it shipped.
 ///
@@ -953,6 +958,21 @@ fn add_url_content_path(conn: &Connection) -> anyhow::Result<()> {
         return Ok(());
     }
     conn.execute_batch("ALTER TABLE urls ADD COLUMN content_path TEXT")?;
+    Ok(())
+}
+
+/// v9: `tasks.notified_at`, when the due-task notifier last fired
+/// `notify-send` for this task's current due time.
+///
+/// NULL means "not yet notified for the due time it currently carries".
+/// `notifier::select_and_mark_due_tasks` sets it the moment it hands a task
+/// to `notify-send`, which is what keeps a restart from replaying every
+/// already-overdue task as a fresh notification.
+fn add_task_notified_at(conn: &Connection) -> anyhow::Result<()> {
+    if column_exists(conn, "tasks", "notified_at")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE tasks ADD COLUMN notified_at INTEGER")?;
     Ok(())
 }
 

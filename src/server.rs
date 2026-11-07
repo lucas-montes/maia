@@ -104,6 +104,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/notes", get(crate::handlers::pull::pull_notes).post(crate::handlers::push::push_notes))
         .route("/notes/audio/:id", get(crate::handlers::pull::get_note_audio))
         .route("/tasks", get(crate::handlers::pull::pull_tasks).post(crate::handlers::push::push_tasks))
+        .route("/agenda", get(crate::handlers::agenda::get_agenda))
         .route("/goals", get(crate::handlers::pull::pull_goals).post(crate::handlers::push::push_goals))
         .route("/meals", get(crate::handlers::read::pull_meals).post(crate::handlers::push::push_meals))
         .route("/body-metrics", get(crate::handlers::read::pull_body_metrics).post(crate::handlers::push::push_body_metrics))
@@ -330,6 +331,7 @@ where
     // spawning here keeps each watcher's lifetime tied to the server process.
     crate::statements::watch::spawn(state.clone());
     crate::notes_mirror::watch::spawn(state.clone());
+    crate::notifier::spawn(state.clone());
     let router = create_router(state);
     let handle = tokio::spawn(async move {
         // Logged rather than unwrapped: a bind failure surfaces here after the

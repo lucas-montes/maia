@@ -282,6 +282,43 @@ in
         # neither is locked out by the other's SQLite sidecars.
         User = cfg.user;
 
+        # The due-task notifier (`notifier::spawn`) calls `notify-send` from
+        # this process, which talks to the *session* D-Bus bus, not the
+        # system bus every other systemd system unit gets for free. Without
+        # these two variables `notify-send` fails outright with
+        # "GDBus.Error:org.freedesktop.DBus.Error.NoReply: Message recipient
+        # disconnected from message bus without replying" -- confirmed by
+        # running it from a shell with both unset.
+        #
+        # This only works at all because `User=` above is the same uid as
+        # the logged-in desktop session (required anyway, for the shared
+        # SQLite file) -- `/run/user/%U/bus` is *that* session's bus, not a
+        # new one. A service running as a uid with no logged-in session has
+        # nothing to connect to here and `notify-send` will keep failing;
+        # that failure is caught and logged, not propagated, so it cannot
+        # take the rest of the service down.
+        #
+        # `%U` is the numeric uid of `User=`, expanded by systemd itself, so
+        # this does not need to hardcode this machine's uid (1000) or depend
+        # on `cfg.user`'s uid being known at Nix eval time.
+        #
+        # Verified empirically on this machine (not yet verified end-to-end
+        # against the live deployed unit -- see the T03 note in
+        # context/plans/waybar-and-notifications.md and the implementation
+        # commit message):
+        #   - `notify-send` fails with the D-Bus error above when
+        #     `DBUS_SESSION_BUS_ADDRESS`/`XDG_RUNTIME_DIR` are unset.
+        #   - Setting both manually to the values below fixes it.
+        #   - The fix still works wrapped in `bwrap --ro-bind / /`, which
+        #     approximates this unit's `ProtectSystem=strict` +
+        #     `ProtectHome=read-only` (the latter documented to mount
+        #     `/run/user` read-only, not inaccessible) for the purpose of
+        #     *connecting* to an already-existing socket.
+        Environment = [
+          "XDG_RUNTIME_DIR=/run/user/%U"
+          "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus"
+        ];
+
         # Required, and not implied by StateDirectoryMode: ProtectSystem mounts
         # the whole hierarchy read-only, and StateDirectory is what carves
         # `dataDir` back out as a writable bind mount owned by `user`. Without
