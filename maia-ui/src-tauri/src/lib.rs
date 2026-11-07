@@ -4,6 +4,7 @@ use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use chrono::Datelike;
 use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 use maia::Config as SyncConfig;
@@ -1330,6 +1331,364 @@ fn list_fx_rates(
         error: None,
     }
 }
+
+// ---- Insights commands ----
+//
+// Every chart on the Insights screen (desktop-visualization-expansion plan)
+// reads straight from `maia.db` the same way the rest of this file does --
+// no new abstraction layer, just more `#[tauri::command]`s. The bucketing and
+// running-balance math is factored into plain functions that take a
+// `&Connection` (rather than `tauri::State`) so the tests at the bottom of
+// this file can seed an in-memory database and call them directly, without
+// going through Tauri's command dispatch.
+
+/// Buckets an epoch-millisecond timestamp into a sortable period key.
+///
+/// Weeks start on Monday -- picked once here and reused by every chart below,
+/// since mixing a Monday-start convention in one chart with a Sunday-start in
+/// another would make two independently-correct charts visually disagree
+/// about what "this week" means. "day" (and anything else unrecognized)
+/// passes through as a plain calendar day.
+fn bucket_key(epoch_ms: i64, period: &str) -> String {
+    let date = chrono::DateTime::from_timestamp_millis(epoch_ms)
+        .unwrap_or_default()
+        .naive_utc()
+        .date();
+    match period {
+        "month" => date.format("%Y-%m-01").to_string(),
+        "week" => {
+            let monday = date - chrono::Duration::days(date.weekday().num_days_from_monday() as i64);
+            monday.format("%Y-%m-%d").to_string()
+        }
+        _ => date.format("%Y-%m-%d").to_string(),
+    }
+}
+
+/// Weight/reps progression for one exercise, chronological.
+///
+/// Prefers `actual_*` (what was actually done) over the planned `weight_kg`/
+/// `reps`, matching how the rest of the app treats planned-vs-actual. A set
+/// with neither -- bodyweight or cardio work, where weight does not apply --
+/// is skipped rather than plotted as a false zero.
+fn compute_exercise_progression(
+    conn: &Connection,
+    exercise_id: &str,
+) -> rusqlite::Result<Vec<serde_json::Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT w.date, es.weight_kg, es.reps, es.actual_weight_kg, es.actual_reps \
+         FROM exercise_sets es \
+         JOIN workout_exercises we ON we.id = es.workout_exercise_id \
+         JOIN workouts w ON w.id = we.workout_id \
+         WHERE we.exercise_id = ?1 AND es.deleted_at IS NULL AND we.deleted_at IS NULL \
+           AND w.deleted_at IS NULL \
+         ORDER BY w.date ASC",
+    )?;
+    let rows: Vec<(i64, Option<f64>, Option<i64>, Option<f64>, Option<i64>)> = stmt
+        .query_map(params![exercise_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows
+        .into_iter()
+        .filter_map(|(date, weight, reps, aweight, areps)| {
+            let weight = aweight.or(weight)?;
+            let reps = areps.or(reps);
+            Some(serde_json::json!({"date": date, "weightKg": weight, "reps": reps}))
+        })
+        .collect())
+}
+
+/// Training volume (Σ weight_kg * reps, actual preferred over planned) per
+/// workout, summed into day/week/month buckets.
+fn compute_exercise_volume(conn: &Connection, period: &str) -> rusqlite::Result<Vec<serde_json::Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT w.id, w.date, es.weight_kg, es.reps, es.actual_weight_kg, es.actual_reps \
+         FROM exercise_sets es \
+         JOIN workout_exercises we ON we.id = es.workout_exercise_id \
+         JOIN workouts w ON w.id = we.workout_id \
+         WHERE es.deleted_at IS NULL AND we.deleted_at IS NULL AND w.deleted_at IS NULL \
+         ORDER BY w.date ASC",
+    )?;
+    let rows: Vec<(String, i64, Option<f64>, Option<i64>, Option<f64>, Option<i64>)> = stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // Per-workout volume first -- the chart buckets whole workouts, not sets
+    // -- then each workout's single volume number drops into its date's
+    // bucket.
+    let mut workout_date: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut workout_volume: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for (workout_id, date, weight, reps, aweight, areps) in rows {
+        let w = aweight.or(weight).unwrap_or(0.0);
+        let r = areps.or(reps).unwrap_or(0) as f64;
+        workout_date.entry(workout_id.clone()).or_insert(date);
+        *workout_volume.entry(workout_id).or_insert(0.0) += w * r;
+    }
+    let mut totals: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+    for (workout_id, volume) in workout_volume {
+        let key = bucket_key(workout_date[&workout_id], period);
+        *totals.entry(key).or_insert(0.0) += volume;
+    }
+    Ok(totals
+        .into_iter()
+        .map(|(bucket, volume_kg)| serde_json::json!({"bucket": bucket, "volumeKg": volume_kg}))
+        .collect())
+}
+
+/// Calories logged per day/week/month, summed across every meal in the bucket.
+fn compute_nutrition_calories(conn: &Connection, period: &str) -> rusqlite::Result<Vec<serde_json::Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT m.eaten_at, mf.calories FROM meal_foods mf \
+         JOIN meals m ON m.id = mf.meal_id \
+         WHERE mf.deleted_at IS NULL AND m.deleted_at IS NULL \
+         ORDER BY m.eaten_at ASC",
+    )?;
+    let rows: Vec<(i64, f64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    let mut totals: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+    for (eaten_at, calories) in rows {
+        *totals.entry(bucket_key(eaten_at, period)).or_insert(0.0) += calories;
+    }
+    Ok(totals
+        .into_iter()
+        .map(|(bucket, calories)| serde_json::json!({"bucket": bucket, "calories": calories}))
+        .collect())
+}
+
+/// Protein/carbs/fat logged per day/week/month, as three parallel series.
+fn compute_nutrition_macros(conn: &Connection, period: &str) -> rusqlite::Result<Vec<serde_json::Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT m.eaten_at, mf.protein, mf.carbs, mf.fat FROM meal_foods mf \
+         JOIN meals m ON m.id = mf.meal_id \
+         WHERE mf.deleted_at IS NULL AND m.deleted_at IS NULL \
+         ORDER BY m.eaten_at ASC",
+    )?;
+    let rows: Vec<(i64, f64, f64, f64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    let mut totals: std::collections::BTreeMap<String, (f64, f64, f64)> = std::collections::BTreeMap::new();
+    for (eaten_at, protein, carbs, fat) in rows {
+        let entry = totals.entry(bucket_key(eaten_at, period)).or_insert((0.0, 0.0, 0.0));
+        entry.0 += protein;
+        entry.1 += carbs;
+        entry.2 += fat;
+    }
+    Ok(totals
+        .into_iter()
+        .map(|(bucket, (protein, carbs, fat))| {
+            serde_json::json!({"bucket": bucket, "protein": protein, "carbs": carbs, "fat": fat})
+        })
+        .collect())
+}
+
+/// Expense totals (in `amount_base`, already currency-converted) grouped by
+/// category per day/week/month. Income and transfers are not spending, so
+/// only `type='expense'` rows count; a null/empty category becomes
+/// "Uncategorized" rather than being dropped.
+fn compute_category_totals(conn: &Connection, period: &str) -> rusqlite::Result<Vec<serde_json::Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT date, category, amount_base FROM transactions \
+         WHERE type = 'expense' AND deleted_at IS NULL \
+         ORDER BY date ASC",
+    )?;
+    let rows: Vec<(i64, Option<String>, f64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    let mut totals: std::collections::BTreeMap<(String, String), f64> = std::collections::BTreeMap::new();
+    for (date, category, amount_base) in rows {
+        let category = category
+            .filter(|c| !c.trim().is_empty())
+            .unwrap_or_else(|| "Uncategorized".to_string());
+        let key = (bucket_key(date, period), category);
+        *totals.entry(key).or_insert(0.0) += amount_base;
+    }
+    Ok(totals
+        .into_iter()
+        .map(|((bucket, category), total)| serde_json::json!({"bucket": bucket, "category": category, "total": total}))
+        .collect())
+}
+
+/// One raw transaction row relevant to a single account's running balance:
+/// `(date, type, amount_base, account_id, to_account_id)`.
+type BalanceRow = (i64, String, f64, Option<String>, Option<String>);
+
+/// The running-balance math, factored out of `compute_account_balance` so it
+/// can be unit tested against seeded rows without a database.
+///
+/// Starts at `opening` and walks `rows` (already ordered by date) in order.
+/// `amount`/`amount_base` are always stored as a positive magnitude -- see
+/// `create_transaction` in `src/statements/store.rs` -- so the sign has to
+/// come from `type` and from which side of a transfer this account is on:
+/// `account_id` is the transfer's source (debit) and `to_account_id` is its
+/// destination (credit). Get that backwards and every balance after the
+/// first transfer is wrong, which is exactly the gotcha the plan calls out.
+///
+/// Only the last balance observed in each period bucket is kept, which is
+/// what a day/week/month toggle on a running balance should show: where the
+/// balance *ended up* by the end of that bucket, not a sum of changes within
+/// it.
+fn running_balance_series(
+    opening: f64,
+    rows: &[BalanceRow],
+    account_id: &str,
+    period: &str,
+) -> Vec<serde_json::Value> {
+    let mut balance = opening;
+    let mut order: Vec<String> = Vec::new();
+    let mut last: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for (date, type_, amount_base, from, to) in rows {
+        match type_.as_str() {
+            "income" if from.as_deref() == Some(account_id) => balance += amount_base,
+            "expense" if from.as_deref() == Some(account_id) => balance -= amount_base,
+            "transfer" => {
+                if from.as_deref() == Some(account_id) {
+                    balance -= amount_base;
+                }
+                if to.as_deref() == Some(account_id) {
+                    balance += amount_base;
+                }
+            }
+            _ => {}
+        }
+        let key = bucket_key(*date, period);
+        if !last.contains_key(&key) {
+            order.push(key.clone());
+        }
+        last.insert(key, balance);
+    }
+    order
+        .into_iter()
+        .map(|key| serde_json::json!({"bucket": key, "balance": last[&key]}))
+        .collect()
+}
+
+/// Loads one account's opening balance and every transaction that touches it
+/// (as either side), then hands off to `running_balance_series`.
+fn compute_account_balance(
+    conn: &Connection,
+    account_id: &str,
+    period: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let opening: f64 = conn
+        .query_row(
+            "SELECT opening_balance FROM accounts WHERE id = ?1 AND deleted_at IS NULL",
+            params![account_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => "Account not found".to_string(),
+            e => format!("{e}"),
+        })?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT date, type, amount_base, account_id, to_account_id FROM transactions \
+             WHERE deleted_at IS NULL AND (account_id = ?1 OR to_account_id = ?1) \
+             ORDER BY date ASC",
+        )
+        .map_err(|e| format!("{e}"))?;
+    let rows: Vec<BalanceRow> = stmt
+        .query_map(params![account_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .map_err(|e| format!("{e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(running_balance_series(opening, &rows, account_id, period))
+}
+
+#[tauri::command]
+fn exercise_progression(
+    state: tauri::State<AppState>,
+    // camelCase to match the JS invoke arg literally, per house style (see
+    // `add_template_set`'s `templateExerciseId` etc.) -- this binding is not
+    // auto-converted from the frontend's argument key.
+    exerciseId: String,
+) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => return CommandResult { success: false, data: None, error: Some(format!("lock {e}")) },
+    };
+    match compute_exercise_progression(&conn, &exerciseId) {
+        Ok(rows) => CommandResult { success: true, data: Some(rows), error: None },
+        Err(e) => CommandResult { success: false, data: None, error: Some(format!("{e}")) },
+    }
+}
+
+#[tauri::command]
+fn exercise_volume(state: tauri::State<AppState>, period: String) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => return CommandResult { success: false, data: None, error: Some(format!("lock {e}")) },
+    };
+    match compute_exercise_volume(&conn, &period) {
+        Ok(rows) => CommandResult { success: true, data: Some(rows), error: None },
+        Err(e) => CommandResult { success: false, data: None, error: Some(format!("{e}")) },
+    }
+}
+
+#[tauri::command]
+fn nutrition_calories(state: tauri::State<AppState>, period: String) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => return CommandResult { success: false, data: None, error: Some(format!("lock {e}")) },
+    };
+    match compute_nutrition_calories(&conn, &period) {
+        Ok(rows) => CommandResult { success: true, data: Some(rows), error: None },
+        Err(e) => CommandResult { success: false, data: None, error: Some(format!("{e}")) },
+    }
+}
+
+#[tauri::command]
+fn nutrition_macros(state: tauri::State<AppState>, period: String) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => return CommandResult { success: false, data: None, error: Some(format!("lock {e}")) },
+    };
+    match compute_nutrition_macros(&conn, &period) {
+        Ok(rows) => CommandResult { success: true, data: Some(rows), error: None },
+        Err(e) => CommandResult { success: false, data: None, error: Some(format!("{e}")) },
+    }
+}
+
+#[tauri::command]
+fn finance_category_totals(
+    state: tauri::State<AppState>,
+    period: String,
+) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => return CommandResult { success: false, data: None, error: Some(format!("lock {e}")) },
+    };
+    match compute_category_totals(&conn, &period) {
+        Ok(rows) => CommandResult { success: true, data: Some(rows), error: None },
+        Err(e) => CommandResult { success: false, data: None, error: Some(format!("{e}")) },
+    }
+}
+
+#[tauri::command]
+fn finance_account_balance(
+    state: tauri::State<AppState>,
+    accountId: String,
+    period: String,
+) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => return CommandResult { success: false, data: None, error: Some(format!("lock {e}")) },
+    };
+    match compute_account_balance(&conn, &accountId, &period) {
+        Ok(rows) => CommandResult { success: true, data: Some(rows), error: None },
+        Err(e) => CommandResult { success: false, data: None, error: Some(e) },
+    }
+}
+
 #[tauri::command]
 async fn create_store(name: String) -> CommandResult<serde_json::Value> {
     let id = uuid::Uuid::now_v7().to_string();
@@ -3086,6 +3445,12 @@ pub fn run() {
             list_accounts,
             list_transactions,
             list_fx_rates,
+            exercise_progression,
+            exercise_volume,
+            nutrition_calories,
+            nutrition_macros,
+            finance_category_totals,
+            finance_account_balance,
             list_statements,
             get_statement,
             get_statement_file,
@@ -3272,6 +3637,194 @@ mod tests {
 
     fn keys_of(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
         value.as_object().unwrap().clone()
+    }
+
+    // ---- Insights: bucketing and running balance ----
+
+    fn ms(year: i32, month: u32, day: u32) -> i64 {
+        chrono::NaiveDate::from_ymd_opt(year, month, day)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis()
+    }
+
+    #[test]
+    fn bucket_key_uses_monday_start_weeks() {
+        // 2024-01-10 is a Wednesday; its week starts Monday 2024-01-08.
+        assert_eq!(bucket_key(ms(2024, 1, 10), "day"), "2024-01-10");
+        assert_eq!(bucket_key(ms(2024, 1, 10), "week"), "2024-01-08");
+        assert_eq!(bucket_key(ms(2024, 1, 10), "month"), "2024-01-01");
+        // A Monday is its own week-start.
+        assert_eq!(bucket_key(ms(2024, 1, 8), "week"), "2024-01-08");
+        // A Sunday belongs to the week that started the preceding Monday.
+        assert_eq!(bucket_key(ms(2024, 1, 14), "week"), "2024-01-08");
+    }
+
+    /// The one piece of real accounting logic in this plan: a transfer's
+    /// `account_id` is the source and `to_account_id` is the destination, and
+    /// `amount_base` is always a positive magnitude, so the sign has to come
+    /// from which side of the transfer this account is on. Get that backwards
+    /// and every balance after the first transfer is wrong.
+    #[test]
+    fn running_balance_series_handles_transfers() {
+        let day1 = ms(2024, 1, 8);
+        let day2 = ms(2024, 1, 9);
+        let rows: Vec<BalanceRow> = vec![
+            // Day 1: +50 income, then -30 out via transfer to a2.
+            (day1, "income".to_string(), 50.0, Some("a1".to_string()), None),
+            (day1, "transfer".to_string(), 30.0, Some("a1".to_string()), Some("a2".to_string())),
+            // Day 2: -20 expense, then +40 in via transfer from a3.
+            (day2, "expense".to_string(), 20.0, Some("a1".to_string()), None),
+            (day2, "transfer".to_string(), 40.0, Some("a3".to_string()), Some("a1".to_string())),
+        ];
+        let series = running_balance_series(100.0, &rows, "a1", "day");
+        assert_eq!(series.len(), 2, "{series:?}");
+        assert_eq!(series[0]["bucket"], "2024-01-08");
+        assert_eq!(series[0]["balance"], 120.0, "100 + 50 - 30");
+        assert_eq!(series[1]["bucket"], "2024-01-09");
+        assert_eq!(series[1]["balance"], 140.0, "120 - 20 + 40");
+    }
+
+    #[test]
+    fn running_balance_series_keeps_only_the_last_balance_per_bucket() {
+        // Two changes land in the same day/week/month bucket; the chart
+        // should show where the balance ended up, not every intermediate step.
+        let day = ms(2024, 1, 8);
+        let rows: Vec<BalanceRow> = vec![
+            (day, "income".to_string(), 10.0, Some("a1".to_string()), None),
+            (day, "expense".to_string(), 4.0, Some("a1".to_string()), None),
+        ];
+        let series = running_balance_series(0.0, &rows, "a1", "month");
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0]["balance"], 6.0);
+    }
+
+    #[test]
+    fn compute_account_balance_matches_hand_computed_running_balance() {
+        let pool = maia::db::init_memory().unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO accounts (id, name, type, opening_balance, created_at, updated_at) VALUES ('a1','Checking','bank',100,1000,1000)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO accounts (id, name, type, opening_balance, created_at, updated_at) VALUES ('a2','Savings','bank',0,1000,1000)",
+            [],
+        ).unwrap();
+        let day1 = ms(2024, 1, 8);
+        let day2 = ms(2024, 1, 9);
+        conn.execute(
+            "INSERT INTO transactions (id, type, amount, currency_code, amount_base, rate_used, account_id, to_account_id, date, created_at, updated_at) VALUES ('t1','income',50,'EUR',50,1,'a1',NULL,?1,1000,1000)",
+            params![day1],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO transactions (id, type, amount, currency_code, amount_base, rate_used, account_id, to_account_id, date, created_at, updated_at) VALUES ('t2','transfer',30,'EUR',30,1,'a1','a2',?1,1000,1000)",
+            params![day2],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO transactions (id, type, amount, currency_code, amount_base, rate_used, account_id, to_account_id, date, created_at, updated_at) VALUES ('t3','expense',20,'EUR',20,1,'a1',NULL,?1,1000,1000)",
+            params![day2],
+        ).unwrap();
+        // Hand-computed: 100 opening + 50 income - 30 transferred out - 20 expense = 100.
+        let series = compute_account_balance(&conn, "a1", "day").unwrap();
+        assert_eq!(series.last().unwrap()["balance"], 100.0, "{series:?}");
+        // The receiving side of the transfer must see its own +30.
+        let series_a2 = compute_account_balance(&conn, "a2", "day").unwrap();
+        assert_eq!(series_a2.last().unwrap()["balance"], 30.0, "{series_a2:?}");
+    }
+
+    #[test]
+    fn compute_category_totals_matches_hand_summed_check() {
+        let pool = maia::db::init_memory().unwrap();
+        let conn = pool.get().unwrap();
+        let day = ms(2024, 1, 8);
+        conn.execute(
+            "INSERT INTO transactions (id, type, amount, currency_code, amount_base, rate_used, category, date, created_at, updated_at) VALUES ('t1','expense',10,'EUR',10,1,'Groceries',?1,1000,1000)",
+            params![day],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO transactions (id, type, amount, currency_code, amount_base, rate_used, category, date, created_at, updated_at) VALUES ('t2','expense',5,'EUR',5,1,'Groceries',?1,1000,1000)",
+            params![day],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO transactions (id, type, amount, currency_code, amount_base, rate_used, category, date, created_at, updated_at) VALUES ('t3','expense',7,'EUR',7,1,NULL,?1,1000,1000)",
+            params![day],
+        ).unwrap();
+        // Income must not count as spending.
+        conn.execute(
+            "INSERT INTO transactions (id, type, amount, currency_code, amount_base, rate_used, category, date, created_at, updated_at) VALUES ('t4','income',1000,'EUR',1000,1,'Salary',?1,1000,1000)",
+            params![day],
+        ).unwrap();
+        let totals = compute_category_totals(&conn, "day").unwrap();
+        let groceries = totals.iter().find(|r| r["category"] == "Groceries").unwrap();
+        assert_eq!(groceries["total"], 15.0, "{totals:?}");
+        let uncategorized = totals.iter().find(|r| r["category"] == "Uncategorized").unwrap();
+        assert_eq!(uncategorized["total"], 7.0, "{totals:?}");
+        assert!(
+            totals.iter().all(|r| r["category"] != "Salary"),
+            "income leaked into spending-by-category: {totals:?}"
+        );
+    }
+
+    #[test]
+    fn compute_exercise_progression_skips_sets_without_weight() {
+        let pool = maia::db::init_memory().unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Bench','weightlifting',1000,1000)", []).unwrap();
+        conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e2','Plank','bodyweight',1000,1000)", []).unwrap();
+        conn.execute("INSERT INTO workouts (id, name, date, created_at, updated_at) VALUES ('w1','Push',1000,1000,1000)", []).unwrap();
+        conn.execute("INSERT INTO workout_exercises (id, workout_id, exercise_id, sort_order, updated_at) VALUES ('we1','w1','e1',0,1000)", []).unwrap();
+        conn.execute("INSERT INTO workout_exercises (id, workout_id, exercise_id, sort_order, updated_at) VALUES ('we2','w1','e2',1,1000)", []).unwrap();
+        // Planned 80kg/8, but actually did 85kg/6 -- actual must win.
+        conn.execute("INSERT INTO exercise_sets (id, workout_exercise_id, set_number, reps, weight_kg, actual_reps, actual_weight_kg, updated_at) VALUES ('s1','we1',1,8,80,6,85,1000)", []).unwrap();
+        // A plank set: no weight planned or done -- must be skipped, not zeroed.
+        conn.execute("INSERT INTO exercise_sets (id, workout_exercise_id, set_number, updated_at) VALUES ('s2','we2',1,1000)", []).unwrap();
+        let bench = compute_exercise_progression(&conn, "e1").unwrap();
+        assert_eq!(bench.len(), 1);
+        assert_eq!(bench[0]["weightKg"], 85.0);
+        assert_eq!(bench[0]["reps"], 6);
+        let plank = compute_exercise_progression(&conn, "e2").unwrap();
+        assert!(plank.is_empty(), "bodyweight set should be skipped: {plank:?}");
+    }
+
+    #[test]
+    fn compute_exercise_volume_rebuckets_by_month() {
+        let pool = maia::db::init_memory().unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute("INSERT INTO exercises (id, name, exercise_type, created_at, updated_at) VALUES ('e1','Bench','weightlifting',1000,1000)", []).unwrap();
+        let week1 = ms(2024, 1, 1);
+        let week3 = ms(2024, 1, 15);
+        conn.execute("INSERT INTO workouts (id, name, date, created_at, updated_at) VALUES ('w1','Push',?1,1000,1000)", params![week1]).unwrap();
+        conn.execute("INSERT INTO workouts (id, name, date, created_at, updated_at) VALUES ('w2','Push',?1,1000,1000)", params![week3]).unwrap();
+        conn.execute("INSERT INTO workout_exercises (id, workout_id, exercise_id, sort_order, updated_at) VALUES ('we1','w1','e1',0,1000)", []).unwrap();
+        conn.execute("INSERT INTO workout_exercises (id, workout_id, exercise_id, sort_order, updated_at) VALUES ('we2','w2','e1',0,1000)", []).unwrap();
+        // 100kg x 10 = 1000 each workout.
+        conn.execute("INSERT INTO exercise_sets (id, workout_exercise_id, set_number, reps, weight_kg, updated_at) VALUES ('s1','we1',1,10,100,1000)", []).unwrap();
+        conn.execute("INSERT INTO exercise_sets (id, workout_exercise_id, set_number, reps, weight_kg, updated_at) VALUES ('s2','we2',1,10,100,1000)", []).unwrap();
+
+        let by_week = compute_exercise_volume(&conn, "week").unwrap();
+        assert_eq!(by_week.len(), 2, "two different weeks: {by_week:?}");
+
+        let by_month = compute_exercise_volume(&conn, "month").unwrap();
+        assert_eq!(by_month.len(), 1, "same month should collapse to one bar: {by_month:?}");
+        assert_eq!(by_month[0]["volumeKg"], 2000.0);
+    }
+
+    #[test]
+    fn compute_nutrition_calories_sums_multiple_meals_per_day() {
+        let pool = maia::db::init_memory().unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute("INSERT INTO foods (id, name, created_at, updated_at) VALUES ('f1','Oats',1000,1000)", []).unwrap();
+        let day = ms(2024, 1, 8);
+        conn.execute("INSERT INTO meals (id, name, eaten_at, created_at, updated_at) VALUES ('m1','Breakfast',?1,1000,1000)", params![day]).unwrap();
+        conn.execute("INSERT INTO meals (id, name, eaten_at, created_at, updated_at) VALUES ('m2','Lunch',?1,1000,1000)", params![day]).unwrap();
+        conn.execute("INSERT INTO meal_foods (id, meal_id, food_id, amount, calories, protein, carbs, fat, updated_at) VALUES ('mf1','m1','f1',100,300,10,40,8,1000)", []).unwrap();
+        conn.execute("INSERT INTO meal_foods (id, meal_id, food_id, amount, calories, protein, carbs, fat, updated_at) VALUES ('mf2','m2','f1',100,500,20,60,15,1000)", []).unwrap();
+        let totals = compute_nutrition_calories(&conn, "day").unwrap();
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0]["calories"], 800.0, "{totals:?}");
     }
 
     #[test]

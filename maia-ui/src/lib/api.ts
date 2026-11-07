@@ -457,6 +457,21 @@ export const api = {
   createFxRate: (args: { code: string; baseCode: string; rateDate: string; rateToBase: number }) =>
     invoke<unknown>("create_fx_rate", args),
 
+  // ---- Insights charts ----
+
+  exerciseProgression: (exerciseId: string) => invoke<unknown>("exercise_progression", { exerciseId }),
+
+  exerciseVolume: (period: string) => invoke<unknown>("exercise_volume", { period }),
+
+  nutritionCalories: (period: string) => invoke<unknown>("nutrition_calories", { period }),
+
+  nutritionMacros: (period: string) => invoke<unknown>("nutrition_macros", { period }),
+
+  financeCategoryTotals: (period: string) => invoke<unknown>("finance_category_totals", { period }),
+
+  financeAccountBalance: (accountId: string, period: string) =>
+    invoke<unknown>("finance_account_balance", { accountId, period }),
+
   // ---- Statements ----
 
   listStatements: (args: { status?: string; source?: string } = {}) =>

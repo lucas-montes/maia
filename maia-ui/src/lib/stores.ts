@@ -47,7 +47,8 @@ export type ViewId =
   | "accounts"
   | "transactions"
   | "statements"
-  | "fxRates";
+  | "fxRates"
+  | "insights";
 
 export const routeAtom = atom<ViewId>("dashboard");
 export const sidebarCollapsedAtom = atom(false);
