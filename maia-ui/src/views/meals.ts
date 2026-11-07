@@ -54,7 +54,11 @@ export function mount(root: HTMLElement): () => void {
             ${ROLLUP_BUCKETS.map((b) => `<option value="${b.value}">${b.label}</option>`).join("")}
           </select>
         </div>
-        <canvas data-slot="rollup-chart" height="110"></canvas>
+        <!-- Fixed-height wrapper: with "maintainAspectRatio: false", Chart.js
+             sizes the canvas to its containing block, so an auto-height parent
+             produces a can-grow-forever feedback loop. Same pattern as
+             every chart panel in insights.ts. -->
+        <div class="relative h-48"><canvas data-slot="rollup-chart"></canvas></div>
         <div class="mt-1 text-xs text-ink-500" data-slot="rollup-note"></div>
       </div>
       <div class="min-h-0 flex-1 space-y-2 overflow-auto" data-slot="list"></div>

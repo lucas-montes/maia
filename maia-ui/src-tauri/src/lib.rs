@@ -1503,51 +1503,112 @@ fn compute_exercise_volume(conn: &Connection, period: &str) -> rusqlite::Result<
         .collect())
 }
 
-/// Calories logged per day/week/month, summed across every meal in the bucket.
-fn compute_nutrition_calories(conn: &Connection, period: &str) -> rusqlite::Result<Vec<serde_json::Value>> {
+/// One averaged nutrition row per bucket: the mean of the *per-day totals*
+/// over the distinct days with logged meals in that bucket.
+struct NutritionAverages {
+    bucket: String,
+    /// Days carried into the averages (the divisor).
+    days: u32,
+    calories: f64,
+    protein: f64,
+    carbs: f64,
+    fat: f64,
+}
+
+/// Calories and macros scaled per day. For a `day` bucket the average over
+/// its single day is just the day's total. For week/month buckets, summing
+/// every meal in the bucket would print bigger-and-bigger numbers as history
+/// accumulates, so the chart gets the average daily total instead. A day
+/// with no meals does not dilute the average: skipped logging days are
+/// anomalous, not dietary, and averaging over 7 calendar days would make a
+/// week containing 3 logged days look like a winning diet.
+fn compute_nutrition_averages(conn: &Connection, period: &str) -> rusqlite::Result<Vec<NutritionAverages>> {
     let mut stmt = conn.prepare(
-        "SELECT m.eaten_at, mf.calories FROM meal_foods mf \
+        "SELECT m.eaten_at, mf.calories, mf.protein, mf.carbs, mf.fat FROM meal_foods mf \
          JOIN meals m ON m.id = mf.meal_id \
          WHERE mf.deleted_at IS NULL AND m.deleted_at IS NULL \
          ORDER BY m.eaten_at ASC",
     )?;
-    let rows: Vec<(i64, f64)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let rows: Vec<(i64, f64, f64, f64, f64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
         .filter_map(|r| r.ok())
         .collect();
-    let mut totals: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
-    for (eaten_at, calories) in rows {
-        *totals.entry(bucket_key(eaten_at, period)).or_insert(0.0) += calories;
+
+    // First collapse every meal into per-day totals, so each day counts once
+    // regardless of how many meals were logged on it.
+    let mut by_day: std::collections::BTreeMap<String, (f64, f64, f64, f64)> = std::collections::BTreeMap::new();
+    for (eaten_at, calories, protein, carbs, fat) in rows {
+        let entry = by_day
+            .entry(bucket_key(eaten_at, "day"))
+            .or_insert((0.0, 0.0, 0.0, 0.0));
+        entry.0 += calories;
+        entry.1 += protein;
+        entry.2 += carbs;
+        entry.3 += fat;
     }
-    Ok(totals
+
+    // Then average each bucket's day totals.
+    let mut by_bucket: std::collections::BTreeMap<String, (f64, f64, f64, f64, u32)> = std::collections::BTreeMap::new();
+    for (day, (calories, protein, carbs, fat)) in by_day {
+        // `day` is already a normalized `YYYY-MM-DD` key, so re-bucketing it
+        // needs no timestamp round-trip.
+        let key = bucket_key_from_date(&day, period);
+        let entry = by_bucket.entry(key).or_insert((0.0, 0.0, 0.0, 0.0, 0));
+        entry.0 += calories;
+        entry.1 += protein;
+        entry.2 += carbs;
+        entry.3 += fat;
+        entry.4 += 1;
+    }
+
+    Ok(by_bucket
         .into_iter()
-        .map(|(bucket, calories)| serde_json::json!({"bucket": bucket, "calories": calories}))
+        .map(|(bucket, (calories, protein, carbs, fat, days))| {
+            let n = days as f64;
+            NutritionAverages {
+                bucket,
+                days,
+                calories: calories / n,
+                protein: protein / n,
+                carbs: carbs / n,
+                fat: fat / n,
+            }
+        })
         .collect())
 }
 
-/// Protein/carbs/fat logged per day/week/month, as three parallel series.
-fn compute_nutrition_macros(conn: &Connection, period: &str) -> rusqlite::Result<Vec<serde_json::Value>> {
-    let mut stmt = conn.prepare(
-        "SELECT m.eaten_at, mf.protein, mf.carbs, mf.fat FROM meal_foods mf \
-         JOIN meals m ON m.id = mf.meal_id \
-         WHERE mf.deleted_at IS NULL AND m.deleted_at IS NULL \
-         ORDER BY m.eaten_at ASC",
-    )?;
-    let rows: Vec<(i64, f64, f64, f64)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-        .filter_map(|r| r.ok())
-        .collect();
-    let mut totals: std::collections::BTreeMap<String, (f64, f64, f64)> = std::collections::BTreeMap::new();
-    for (eaten_at, protein, carbs, fat) in rows {
-        let entry = totals.entry(bucket_key(eaten_at, period)).or_insert((0.0, 0.0, 0.0));
-        entry.0 += protein;
-        entry.1 += carbs;
-        entry.2 += fat;
+/// Buckets an already-normalized `YYYY-MM-DD` date string without re-parsing
+/// it through a timestamp (`bucket_key` takes epoch millis). On malformed
+/// input the day is passed through unchanged rather than inventing 1970.
+fn bucket_key_from_date(day: &str, period: &str) -> String {
+    match period {
+        "month" => format!("{}-01", &day[..7]),
+        "week" => match chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d") {
+            Ok(date) => {
+                (date - chrono::Duration::days(date.weekday().num_days_from_monday() as i64))
+                    .format("%Y-%m-%d")
+                    .to_string()
+            }
+            Err(_) => day.to_string(),
+        },
+        _ => day.to_string(),
     }
-    Ok(totals
+}
+
+fn compute_nutrition_calories(conn: &Connection, period: &str) -> rusqlite::Result<Vec<serde_json::Value>> {
+    Ok(compute_nutrition_averages(conn, period)?
         .into_iter()
-        .map(|(bucket, (protein, carbs, fat))| {
-            serde_json::json!({"bucket": bucket, "protein": protein, "carbs": carbs, "fat": fat})
+        .map(|a| serde_json::json!({"bucket": a.bucket, "calories": a.calories}))
+        .collect())
+}
+
+/// Protein/carbs/fat logged per day, as three parallel series. Week/month
+/// buckets are averaged daily values, mirroring `compute_nutrition_calories`.
+fn compute_nutrition_macros(conn: &Connection, period: &str) -> rusqlite::Result<Vec<serde_json::Value>> {
+    Ok(compute_nutrition_averages(conn, period)?
+        .into_iter()
+        .map(|a| {
+            serde_json::json!({"bucket": a.bucket, "protein": a.protein, "carbs": a.carbs, "fat": a.fat})
         })
         .collect())
 }
@@ -4234,7 +4295,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_nutrition_calories_sums_multiple_meals_per_day() {
+    fn compute_nutrition_calories_day_bucket_is_daily_total() {
         let pool = maia::db::init_memory().unwrap();
         let conn = pool.get().unwrap();
         conn.execute("INSERT INTO foods (id, name, created_at, updated_at) VALUES ('f1','Oats',1000,1000)", []).unwrap();
@@ -4245,7 +4306,63 @@ mod tests {
         conn.execute("INSERT INTO meal_foods (id, meal_id, food_id, amount, calories, protein, carbs, fat, updated_at) VALUES ('mf2','m2','f1',100,500,20,60,15,1000)", []).unwrap();
         let totals = compute_nutrition_calories(&conn, "day").unwrap();
         assert_eq!(totals.len(), 1);
+        // A day bucket averages over exactly that day, so it is the sum.
         assert_eq!(totals[0]["calories"], 800.0, "{totals:?}");
+    }
+
+    #[test]
+    fn compute_nutrition_calories_averages_logged_days_per_bucket() {
+        let pool = maia::db::init_memory().unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute("INSERT INTO foods (id, name, created_at, updated_at) VALUES ('f1','Oats',1000,1000)", []).unwrap();
+        // 2024-01-08 is a Monday (see `bucket_key_uses_monday_start_weeks`).
+        let meal = |id: &str, day: u32, calories: f64| {
+            conn.execute(
+                "INSERT INTO meals (id, name, eaten_at, created_at, updated_at) VALUES (?1,'Meal',?2,1000,1000)",
+                params![format!("meal{id}"), ms(2024, 1, day)],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO meal_foods (id, meal_id, food_id, amount, calories, protein, carbs, fat, updated_at) VALUES (?1,?2,'f1',100,?3,0,0,0,1000)",
+                params![id, format!("meal{id}"), calories],
+            ).unwrap();
+        };
+        meal("mf1", 8, 800.0);
+        meal("mf2", 9, 400.0);
+        meal("mf3", 10, 200.0);
+
+        let week = compute_nutrition_calories(&conn, "week").unwrap();
+        assert_eq!(week.len(), 1, "same week: {week:?}");
+        // Mean of the three logged days -- NOT sum/7 and NOT sum over the week.
+        assert_eq!(week[0]["calories"], (800.0 + 400.0 + 200.0) / 3.0, "{week:?}");
+
+        let month = compute_nutrition_calories(&conn, "month").unwrap();
+        assert_eq!(month.len(), 1, "same month: {month:?}");
+        assert_eq!(month[0]["calories"], (800.0 + 400.0 + 200.0) / 3.0, "{month:?}");
+    }
+
+    #[test]
+    fn compute_nutrition_macros_average_per_bucket_too() {
+        let pool = maia::db::init_memory().unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute("INSERT INTO foods (id, name, created_at, updated_at) VALUES ('f1','Oats',1000,1000)", []).unwrap();
+        let insert = |id: &str, day: u32, protein: f64, carbs: f64, fat: f64| {
+            conn.execute(
+                "INSERT INTO meals (id, name, eaten_at, created_at, updated_at) VALUES (?1,'Meal',?2,1000,1000)",
+                params![format!("meal{id}"), ms(2024, 1, day)],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO meal_foods (id, meal_id, food_id, amount, calories, protein, carbs, fat, updated_at) VALUES (?1,?2,'f1',100,0,?3,?4,?5,1000)",
+                params![id, format!("meal{id}"), protein, carbs, fat],
+            ).unwrap();
+        };
+        insert("mf1", 8, 100.0, 200.0, 50.0);
+        insert("mf2", 9, 50.0, 100.0, 25.0);
+
+        let macros = compute_nutrition_macros(&conn, "week").unwrap();
+        assert_eq!(macros.len(), 1, "{macros:?}");
+        assert_eq!(macros[0]["protein"], 75.0, "{macros:?}");
+        assert_eq!(macros[0]["carbs"], 150.0, "{macros:?}");
+        assert_eq!(macros[0]["fat"], 37.5, "{macros:?}");
     }
 
     #[test]

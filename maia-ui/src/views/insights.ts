@@ -42,6 +42,13 @@ function bucketLabel(bucket: string, period: Period): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+/** Dataset label suffix for the nutrition charts: week/month buckets hold
+ *  mean daily values (`compute_nutrition_averages` on the Rust side), so the
+ *  axis meaning has to travel with the label. */
+function nutritionSeriesLabel(series: string, period: Period): string {
+  return period === "day" ? series : `${series} · avg/day`;
+}
+
 /** A `join` group of period buttons, scoped to one section by `data-section`
  *  so the click handler below only ever touches that section's state. */
 function periodButtons(sectionId: string, active: Period, options: Period[]): string {
@@ -105,7 +112,13 @@ export function mount(root: HTMLElement): () => void {
           <div class="card-body gap-3">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <h3 class="card-title text-base"><i data-lucide="dumbbell" class="h-4 w-4"></i>Exercise progression</h3>
-              <select id="insight-exercise" class="select select-bordered select-sm"></select>
+              <div>
+                <!-- Native combobox, per 'simulations.ts': a searchable text
+                     box whose datalist offers the full exercise catalog. -->
+                <input id="insight-exercise" list="insight-exercise-options" autocomplete="off"
+                       placeholder="Search exercise…" class="input input-bordered input-sm min-w-[220px]" />
+                <datalist id="insight-exercise-options"></datalist>
+              </div>
             </div>
             <div data-slot="progression-status"></div>
             <div class="h-56"><canvas data-slot="progression-chart"></canvas></div>
@@ -173,7 +186,10 @@ export function mount(root: HTMLElement): () => void {
     ${panelClose}
   `;
 
-  const exerciseSelect = root.querySelector<HTMLSelectElement>("#insight-exercise")!;
+  const exerciseInput = root.querySelector<HTMLInputElement>("#insight-exercise")!;
+  const exerciseDatalist = root.querySelector<HTMLDataListElement>("#insight-exercise-options")!;
+  // The catalog behind the datalist; the input carries names, ids live here.
+  let exercises: { id: string; name: string }[] = [];
   const accountSelect = root.querySelector<HTMLSelectElement>("#insight-account")!;
 
   const progressionStatus = root.querySelector("[data-slot='progression-status']") as HTMLElement;
@@ -274,6 +290,28 @@ export function mount(root: HTMLElement): () => void {
     }
   };
 
+  // Resolves the free-text exercise search into a specific exercise and
+  // redraws the chart. The datalist does live filtering natively; this only
+  // reacts once typing settles, and only when a real name has been entered.
+  let exerciseResolveTimer: number | null = null;
+  const resolveExerciseInput = (): void => {
+    if (exerciseResolveTimer !== null) window.clearTimeout(exerciseResolveTimer);
+    exerciseResolveTimer = window.setTimeout(() => {
+      exerciseResolveTimer = null;
+      const typed = exerciseInput.value.trim();
+      if (!typed) return;
+      const match = exercises.find((e) => e.name.trim().toLowerCase() === typed.toLowerCase());
+      if (match) {
+        void loadProgression(match.id);
+      } else if (exercises.length) {
+        setHtml(
+          progressionStatus,
+          statusBanner({ status: "error", message: `No exercise matching "${typed}"` }),
+        );
+      }
+    }, 250);
+  };
+
   const loadExerciseOptions = async (): Promise<void> => {
     try {
       const res = await api.listExercises();
@@ -283,11 +321,11 @@ export function mount(root: HTMLElement): () => void {
         return;
       }
       const items = unwrapList(res) as { id: string; name: string }[];
-      exerciseSelect.innerHTML =
-        items.map((e) => `<option value="${escapeHtml(e.id)}">${escapeHtml(e.name)}</option>`).join("") ||
-        `<option value="">No exercises</option>`;
+      exercises = items;
+      exerciseDatalist.innerHTML =
+        items.map((e) => `<option value="${escapeHtml(e.name)}"></option>`).join("");
       if (items.length) {
-        exerciseSelect.value = items[0].id;
+        exerciseInput.value = items[0].name;
         void loadProgression(items[0].id);
       }
     } catch (e) {
@@ -342,8 +380,10 @@ export function mount(root: HTMLElement): () => void {
       setHtml(caloriesStatus, "");
       const labels = rows.map((r) => bucketLabel(r.bucket, caloriesPeriod));
       const data = rows.map((r) => r.calories);
+      const label = nutritionSeriesLabel("Calories", caloriesPeriod);
       if (caloriesChart) {
         caloriesChart.data.labels = labels;
+        caloriesChart.data.datasets[0].label = label;
         caloriesChart.data.datasets[0].data = data;
         caloriesChart.update();
         return;
@@ -354,7 +394,7 @@ export function mount(root: HTMLElement): () => void {
           labels,
           datasets: [
             {
-              label: "Calories",
+              label,
               data,
               borderColor: BLUE,
               backgroundColor: BLUE_FILL,
@@ -393,8 +433,11 @@ export function mount(root: HTMLElement): () => void {
       const fat = rows.map((r) => r.fat);
       if (macrosChart) {
         macrosChart.data.labels = labels;
+        macrosChart.data.datasets[0].label = nutritionSeriesLabel("Protein (g)", macrosPeriod);
         macrosChart.data.datasets[0].data = protein;
+        macrosChart.data.datasets[1].label = nutritionSeriesLabel("Carbs (g)", macrosPeriod);
         macrosChart.data.datasets[1].data = carbs;
+        macrosChart.data.datasets[2].label = nutritionSeriesLabel("Fat (g)", macrosPeriod);
         macrosChart.data.datasets[2].data = fat;
         macrosChart.update();
         return;
@@ -404,9 +447,9 @@ export function mount(root: HTMLElement): () => void {
         data: {
           labels,
           datasets: [
-            { label: "Protein (g)", data: protein, borderColor: SERIES_COLORS[0], backgroundColor: SERIES_COLORS[0], tension: 0.3, spanGaps: true },
-            { label: "Carbs (g)", data: carbs, borderColor: SERIES_COLORS[1], backgroundColor: SERIES_COLORS[1], tension: 0.3, spanGaps: true },
-            { label: "Fat (g)", data: fat, borderColor: SERIES_COLORS[2], backgroundColor: SERIES_COLORS[2], tension: 0.3, spanGaps: true },
+            { label: nutritionSeriesLabel("Protein (g)", macrosPeriod), data: protein, borderColor: SERIES_COLORS[0], backgroundColor: SERIES_COLORS[0], tension: 0.3, spanGaps: true },
+            { label: nutritionSeriesLabel("Carbs (g)", macrosPeriod), data: carbs, borderColor: SERIES_COLORS[1], backgroundColor: SERIES_COLORS[1], tension: 0.3, spanGaps: true },
+            { label: nutritionSeriesLabel("Fat (g)", macrosPeriod), data: fat, borderColor: SERIES_COLORS[2], backgroundColor: SERIES_COLORS[2], tension: 0.3, spanGaps: true },
           ],
         },
         options: {
@@ -564,7 +607,8 @@ export function mount(root: HTMLElement): () => void {
     }
   });
 
-  exerciseSelect.addEventListener("change", () => void loadProgression(exerciseSelect.value));
+  exerciseInput.addEventListener("input", () => void resolveExerciseInput());
+  exerciseInput.addEventListener("change", () => void resolveExerciseInput());
   accountSelect.addEventListener("change", () => void loadBalance());
 
   // Independent fetches -- none awaits another, so one slow chart never
@@ -579,6 +623,7 @@ export function mount(root: HTMLElement): () => void {
   refreshIcons(root);
 
   return () => {
+    if (exerciseResolveTimer !== null) window.clearTimeout(exerciseResolveTimer);
     progressionChart?.destroy();
     volumeChart?.destroy();
     caloriesChart?.destroy();
