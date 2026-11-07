@@ -1378,9 +1378,13 @@ mod tests {
 
     /// A snapshot is a faithful copy of the database at the moment it is taken.
     ///
-    /// Rows are committed and the version stamped back to 0 so the migration has
-    /// real work to do, and the earlier snapshots are cleared so these are genuine
-    /// first captures rather than the reuse path.
+    /// Rows are committed and the version stamped back one step so the
+    /// migration has real work to do, and the earlier snapshots are cleared so
+    /// this is a genuine first capture rather than the reuse path. Stamped to
+    /// `LATEST_VERSION - 1` rather than 0: replaying every step from scratch
+    /// takes more snapshots than `SNAPSHOT_KEEP` retains once the schema has
+    /// more than 10 versions, which would prune the very snapshot (`v0`) this
+    /// test used to check for.
     #[test]
     fn snapshot_captures_committed_rows() {
         let dir = temp_dir("snapshot");
@@ -1394,11 +1398,12 @@ mod tests {
             .unwrap();
         }
         fs::remove_dir_all(dir.join("snapshots")).unwrap();
-        super::set_user_version(&conn, 0).unwrap();
+        let from_version = super::LATEST_VERSION - 1;
+        super::set_user_version(&conn, from_version).unwrap();
 
         super::migrate(&conn).unwrap();
 
-        let taken = dir.join("snapshots").join("maia.v0.db");
+        let taken = dir.join("snapshots").join(format!("maia.v{from_version}.db"));
         assert!(taken.exists(), "expected {} to exist", taken.display());
         let snap = Connection::open(&taken).unwrap();
         let n: i64 = snap
@@ -1408,15 +1413,22 @@ mod tests {
         assert_eq!(super::user_version(&conn).unwrap(), super::LATEST_VERSION);
     }
 
-    /// Each version change leaves a snapshot named for the version it came from.
+    /// Each version change leaves a snapshot named for the version it came
+    /// from. Checks the most recent couple of versions rather than `v0`/`v1`:
+    /// a from-scratch migration takes one snapshot per step, and once the
+    /// schema has more versions than `SNAPSHOT_KEEP` retains, the oldest ones
+    /// (low version numbers) are the first to be pruned — the most recent
+    /// ones are what's guaranteed to survive regardless of how long the
+    /// migration history gets.
     #[test]
     fn snapshot_named_for_the_version_it_precedes() {
         let dir = temp_dir("snapshot-names");
         let conn = Connection::open(dir.join("maia.db")).unwrap();
         super::migrate(&conn).unwrap();
         let snapshots = dir.join("snapshots");
-        for expected in ["maia.v0.db", "maia.v1.db", "maia.v2.db"] {
-            let path = snapshots.join(expected);
+        for v in [super::LATEST_VERSION - 1, super::LATEST_VERSION - 2] {
+            let expected = format!("maia.v{v}.db");
+            let path = snapshots.join(&expected);
             assert!(path.exists(), "expected {}", path.display());
             assert!(
                 super::is_readable_database(&path),
