@@ -16,6 +16,7 @@ The idea is to have an assistant that keep tracks of important things for me, re
 ### Finance & Budgeting
 - **Expense & Income Tracking**
   - Have a way to run simulations to verify financial decisions (cost of living in a remote country, inflation, investments, etc...)
+  - fix how statemetns are imported. I want to have first a list of the files that are being parsed and have statements to be approved. once i click on one I get a list of all the entries to insert, and accounts to create if any.
 
 
 ### System Integration

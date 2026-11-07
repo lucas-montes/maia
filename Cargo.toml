@@ -14,10 +14,6 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1.46.1", features = ["macros", "rt", "net", "io-util", "rt-multi-thread", "fs", "signal"] }
 
 ai = { path = "ai" }
-knowledge = { path = "knowledge" }
-shared = { path = "shared" }
-finances = { path = "finances" }
-health = { path = "health" }
 
 [dependencies]
 serde.workspace = true
