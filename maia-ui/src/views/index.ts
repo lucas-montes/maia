@@ -22,6 +22,7 @@ import * as transactions from "./transactions";
 import * as statements from "./statements";
 import * as fxRates from "./fxRates";
 import * as sync from "./sync";
+import * as simulations from "./simulations";
 
 export const routes: Record<ViewId, ViewModule> = {
   dashboard,
@@ -45,4 +46,5 @@ export const routes: Record<ViewId, ViewModule> = {
   statements,
   fxRates,
   sync,
+  simulations,
 };

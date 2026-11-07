@@ -308,6 +308,64 @@ export interface TemplateDetail {
   exercises: TemplateExerciseBlock[];
 }
 
+// ---- Finance scenarios ----
+
+export interface CategoryOverride {
+  category: string;
+  monthlyAmount: number;
+}
+
+/** Matches `finance_scenarios::Assumptions` on the server, which is also the
+    literal shape stored in `finance_scenarios.assumptions_json`. */
+export interface ScenarioAssumptions {
+  horizonMonths: number;
+  incomeDeltaMonthly: number;
+  categoryOverrides: CategoryOverride[];
+  inflationAnnualPct: number;
+  investmentReturnAnnualPct: number;
+}
+
+export interface FinanceScenario {
+  id: string;
+  name: string;
+  assumptions: ScenarioAssumptions;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface FinanceBaseline {
+  windowMonths: number;
+  monthlyIncome: number;
+  categoryMonthly: CategoryOverride[];
+  totalMonthlyExpense: number;
+  currentNetWorth: number;
+}
+
+export interface ProjectionPoint {
+  month: number;
+  netWorth: number;
+  monthlyExpenseTotal: number;
+}
+
+export interface ProjectionSummary {
+  endingNetWorth: number;
+  totalNetSaved: number;
+  finalMonthlyExpenseTotal: number;
+}
+
+export interface ScenarioProjection {
+  baseline: {
+    windowMonths: number;
+    monthlyIncome: number;
+    totalMonthlyExpense: number;
+    currentNetWorth: number;
+  };
+  projection: {
+    series: ProjectionPoint[];
+    summary: ProjectionSummary;
+  };
+}
+
 // ---- Envelope-style commands ----
 
 export const api = {
@@ -456,6 +514,30 @@ export const api = {
 
   createFxRate: (args: { code: string; baseCode: string; rateDate: string; rateToBase: number }) =>
     invoke<unknown>("create_fx_rate", args),
+
+  // ---- Finance scenarios ----
+
+  listFinanceScenarios: () => invoke<Envelope<{ items: FinanceScenario[] }>>("list_finance_scenarios"),
+
+  createFinanceScenario: (args: { name: string; assumptions: ScenarioAssumptions }) =>
+    invoke<Envelope<FinanceScenario>>("create_finance_scenario", args),
+
+  updateFinanceScenario: (args: { id: string; name: string; assumptions: ScenarioAssumptions }) =>
+    invoke<Envelope<FinanceScenario>>("update_finance_scenario", args),
+
+  deleteFinanceScenario: (id: string) =>
+    invoke<Envelope<{ id: string }>>("delete_finance_scenario", { id }),
+
+  getFinanceBaseline: (windowMonths?: number) =>
+    invoke<Envelope<FinanceBaseline>>("get_finance_baseline", { windowMonths }),
+
+  /** Projects a saved scenario (`scenarioId`) or an unsaved draft
+      (`assumptions`) — exactly one of the two should be given. */
+  projectFinanceScenario: (args: {
+    scenarioId?: string | null;
+    assumptions?: ScenarioAssumptions | null;
+    windowMonths?: number | null;
+  }) => invoke<Envelope<ScenarioProjection>>("project_finance_scenario", args),
 
   // ---- Statements ----
 

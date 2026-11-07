@@ -2,6 +2,8 @@ import { atom } from "nanostores";
 import type {
   DashboardCounts,
   Exercise,
+  FinanceBaseline,
+  FinanceScenario,
   Goal,
   Note,
   Receipt,
@@ -47,7 +49,8 @@ export type ViewId =
   | "accounts"
   | "transactions"
   | "statements"
-  | "fxRates";
+  | "fxRates"
+  | "simulations";
 
 export const routeAtom = atom<ViewId>("dashboard");
 export const sidebarCollapsedAtom = atom(false);
@@ -204,6 +207,44 @@ export const statementsAtom = atom<
   fileReview: null,
   selectedStatements: [],
   lastDropSource: localStorage.getItem("maia.statements.lastDropSource") ?? "credit_agricole",
+});
+
+/** Scenario id used for the always-available "no changes" reference line —
+    it never collides with a real scenario id (those are UUIDs). */
+export const BASELINE_PSEUDO_ID = "__baseline__";
+
+export const simulationsAtom = atom<
+  ListState<FinanceScenario> & {
+    baseline: FinanceBaseline | null;
+    windowMonths: number;
+    /** Scenario ids selected for the overlay chart; `BASELINE_PSEUDO_ID` is
+        the always-selectable "no changes" reference line. */
+    selectedIds: string[];
+    /** Projection results keyed by scenario id (or `BASELINE_PSEUDO_ID`). */
+    projections: Record<string, { series: { month: number; netWorth: number; monthlyExpenseTotal: number }[]; summary: { endingNetWorth: number; totalNetSaved: number; finalMonthlyExpenseTotal: number } }>;
+    editorOpen: boolean;
+    editingId: string | null;
+    editingName: string;
+    editingHorizonMonths: string;
+    editingIncomeDeltaMonthly: string;
+    editingInflationAnnualPct: string;
+    editingInvestmentReturnAnnualPct: string;
+    editingCategoryOverrides: { category: string; monthlyAmount: number }[];
+  }
+>({
+  ...emptyList<FinanceScenario>(),
+  baseline: null,
+  windowMonths: 12,
+  selectedIds: [BASELINE_PSEUDO_ID],
+  projections: {},
+  editorOpen: false,
+  editingId: null,
+  editingName: "",
+  editingHorizonMonths: "24",
+  editingIncomeDeltaMonthly: "0",
+  editingInflationAnnualPct: "0",
+  editingInvestmentReturnAnnualPct: "0",
+  editingCategoryOverrides: [],
 });
 
 export const fxRatesAtom = atom<ListState<any> & { base: string; date: string }>({

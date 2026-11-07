@@ -132,6 +132,18 @@ pub fn create_router(state: AppState) -> Router {
             "/statements/:id/ignore",
             post(crate::handlers::statements::ignore_statement),
         )
+        .route(
+            "/finance-scenarios",
+            get(crate::handlers::finance_scenarios::list_scenarios)
+                .post(crate::handlers::finance_scenarios::create_scenario),
+        )
+        .route(
+            "/finance-scenarios/:id",
+            axum::routing::put(crate::handlers::finance_scenarios::update_scenario)
+                .delete(crate::handlers::finance_scenarios::delete_scenario),
+        )
+        .route("/finance-scenarios/baseline", get(crate::handlers::finance_scenarios::get_baseline))
+        .route("/finance-scenarios/project", post(crate::handlers::finance_scenarios::project_scenario))
         .route("/statement-feeds", get(crate::handlers::statements::list_feeds))
         .route(
             "/statement-feeds/settings",
