@@ -3,6 +3,7 @@ import type { ViewModule } from "../router";
 
 import * as dashboard from "./dashboard";
 import * as todos from "./todos";
+import * as calendar from "./calendar";
 import * as goals from "./goals";
 import * as notes from "./notes";
 import * as urls from "./urls";
@@ -27,6 +28,7 @@ import * as insights from "./insights";
 export const routes: Record<ViewId, ViewModule> = {
   dashboard,
   todos,
+  calendar,
   goals,
   notes,
   urls,

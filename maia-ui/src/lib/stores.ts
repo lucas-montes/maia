@@ -1,5 +1,6 @@
 import { atom } from "nanostores";
 import type {
+  CalendarTask,
   DashboardCounts,
   Exercise,
   Goal,
@@ -37,6 +38,7 @@ export type ViewId =
   | "meals"
   | "bodyMetrics"
   | "todos"
+  | "calendar"
   | "receipts"
   | "notes"
   | "settings"
@@ -68,6 +70,31 @@ export const countsAtom = atom<DashboardCounts | null>(null);
 export const todosAtom = atom<ListState<Todo> & { filter: "all" | "active" | "completed" }>({
   ...emptyList<Todo>(),
   filter: "all",
+});
+
+export type CalendarGranularity = "month" | "week" | "day";
+
+/** Calendar view state. `selectedDate` is the anchor day for whichever grid
+ *  is showing (epoch ms, local start-of-day) and survives granularity
+ *  switches so drilling in/out never loses the user's place. `upNext` is
+ *  computed independently of the visible range — it always looks forward
+ *  from "now", regardless of which month/week/day is on screen. */
+export const calendarAtom = atom<{
+  granularity: CalendarGranularity;
+  selectedDate: number;
+  tasks: CalendarTask[];
+  status: Status;
+  message: string;
+  upNext: CalendarTask[];
+  upNextStatus: Status;
+}>({
+  granularity: "month",
+  selectedDate: Date.now(),
+  tasks: [],
+  status: "idle",
+  message: "",
+  upNext: [],
+  upNextStatus: "idle",
 });
 
 export const goalsAtom = atom<ListState<Goal>>(emptyList<Goal>());

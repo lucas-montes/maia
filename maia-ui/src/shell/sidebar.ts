@@ -21,6 +21,7 @@ const GROUPS: { name: string; icon: string; items: NavItem[] }[] = [
     icon: "clipboard-list",
     items: [
       { view: "todos", label: "Tasks", icon: "list-checks", countKey: "tasks" },
+      { view: "calendar", label: "Calendar", icon: "calendar" },
       { view: "goals", label: "Goals", icon: "target", countKey: "goals" },
       { view: "notes", label: "Notes", icon: "file-text", countKey: "notes" },
       { view: "urls", label: "URLs", icon: "link-2", countKey: "urls" },
