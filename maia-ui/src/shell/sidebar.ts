@@ -10,7 +10,10 @@ interface NavItem {
   countKey?: "tasks" | "goals" | "receipts" | "notes" | "urls";
 }
 
-const TOP_LEVEL: NavItem[] = [{ view: "dashboard", label: "Dashboard", icon: "gauge" }];
+const TOP_LEVEL: NavItem[] = [
+  { view: "dashboard", label: "Dashboard", icon: "gauge" },
+  { view: "insights", label: "Insights", icon: "line-chart" },
+];
 
 const GROUPS: { name: string; icon: string; items: NavItem[] }[] = [
   {

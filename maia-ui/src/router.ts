@@ -27,6 +27,7 @@ const KNOWN: ViewId[] = [
   "transactions",
   "statements",
   "fxRates",
+  "insights",
 ];
 
 function viewFromHash(): ViewId {
