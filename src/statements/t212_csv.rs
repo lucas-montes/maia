@@ -412,6 +412,7 @@ fn group_by_month(rows: Vec<Row>, ctx: &ParseContext) -> Vec<T212CsvStatement> {
                 period_end,
                 source_hash: ctx.source_hash.clone(),
                 stored_path: ctx.stored_path.clone(),
+                source_path: ctx.source_path.clone(),
                 lines,
                 warnings: warnings.clone(),
             }
@@ -430,6 +431,10 @@ pub struct T212CsvStatement {
     pub period_end: String,
     pub source_hash: String,
     pub stored_path: Option<String>,
+    /// The dropped file's own path, shared by every month this file
+    /// produced; carried through so the list endpoint can group them back
+    /// into one file (see [`ParseContext::source_path`]).
+    pub source_path: Option<String>,
     pub lines: Vec<StatementLineDraft>,
     pub warnings: Vec<String>,
 }
@@ -452,7 +457,7 @@ impl T212CsvStatement {
             period_end: Some(self.period_end.clone()),
             opening_balance: None,
             closing_balance: None,
-            source_path: None,
+            source_path: self.source_path,
             stored_path: self.stored_path,
             source_hash: self.source_hash,
             // CSV statements key differently from the feed: same source
@@ -478,6 +483,7 @@ mod tests {
         ParseContext {
             source_hash: "hash".to_string(),
             stored_path: Some("/stored/export.csv".to_string()),
+            source_path: Some("dump/trading212/export.csv".to_string()),
             fetched_at: 0,
         }
     }
@@ -555,6 +561,13 @@ mod tests {
             );
             let draft = Vec::from([statement.clone()]).into_drafts();
             assert!(draft[0].source_key.starts_with("trading212:csv:"));
+            // Regression: every month a CSV export produces must carry the
+            // file's own path, which is what lets the statements list group
+            // them back into one file card instead of one row per month.
+            assert_eq!(
+                draft[0].source_path.as_deref(),
+                Some("dump/trading212/export.csv")
+            );
         }
     }
 

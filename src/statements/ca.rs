@@ -85,6 +85,7 @@ impl Parser for CreditAgricoleSource {
                 section,
                 source_hash: ctx.source_hash.clone(),
                 stored_path: ctx.stored_path.clone(),
+                source_path: ctx.source_path.clone(),
             })
             .collect())
     }
@@ -95,6 +96,10 @@ pub struct CaStatement {
     pub section: CaSection,
     pub source_hash: String,
     pub stored_path: Option<String>,
+    /// The dropped file's own path, shared by every account section it
+    /// produced; carried through so the list endpoint can group them back
+    /// into one file (see [`ParseContext::source_path`]).
+    pub source_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -197,7 +202,7 @@ impl CaStatement {
             period_end: section.period_end.map(|d| d.format("%Y-%m-%d").to_string()),
             opening_balance: section.opening_balance,
             closing_balance: section.closing_balance,
-            source_path: None,
+            source_path: self.source_path,
             stored_path: self.stored_path,
             source_hash: self.source_hash,
             source_key,
@@ -672,6 +677,7 @@ mod tests {
                 section,
                 source_hash: "abc".to_string(),
                 stored_path: None,
+                source_path: None,
             })
             .collect();
         let drafts = statements.into_drafts();
@@ -691,5 +697,39 @@ mod tests {
             first.dedupe_key,
             sha256_hex(&["credit_agricole", "11112222333", &first.fingerprint])
         );
+    }
+
+    /// Regression test for the file-grouping bug: every account section a
+    /// dropped CA file produces must carry that *same* `source_path`, which is
+    /// the key the statements list groups by. `CaStatement::into_draft` used
+    /// to hardcode `source_path: None`, discarding the value `Parser::parse`
+    /// already had available on the raw document — so every statement from
+    /// one dropped file landed in its own singleton group instead of one file
+    /// card. This drives the real `Parser::parse` entry point (not the lower
+    /// level `parse_csv` the tests above use) with a `ParseContext` carrying a
+    /// path, the way `run_with` builds it for a real watched file.
+    #[test]
+    fn every_section_of_one_file_shares_its_source_path() {
+        let Some(bytes) = fixture() else { return };
+        let path = PathBuf::from("dump/credit_agricole/ca.csv");
+        let docs = vec![RawDocument::file(DocumentKind::Csv, bytes, path.clone())];
+        let ctx = ParseContext {
+            source_hash: "abc".to_string(),
+            stored_path: None,
+            source_path: Some(path.display().to_string()),
+            fetched_at: 0,
+        };
+        let source = CreditAgricoleSource::new(path.clone());
+        let statements = source.parse(&docs, &ctx).unwrap();
+        assert_eq!(statements.len(), 3, "three account sections");
+        let drafts = statements.into_drafts();
+        for draft in &drafts {
+            assert_eq!(
+                draft.source_path.as_deref(),
+                Some("dump/credit_agricole/ca.csv"),
+                "every statement from one dropped file must carry that file's path, \
+                 so the list can group them back into one card"
+            );
+        }
     }
 }
