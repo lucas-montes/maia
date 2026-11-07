@@ -177,13 +177,31 @@ pub const MIGRATIONS: &[(i64, Step)] = &[
     // per-ingredient: the link belongs to the specific price, not to the
     // ingredient as a permanent attribute. Never auto-fetched.
     (10, Step::Guarded(add_ingredient_price_source_url)),
+    // Financial scenario simulations: named, saved "what if" projections over
+    // the real transaction history. `assumptions_json` holds a JSON blob
+    // (shape owned by `crate::finance_scenarios::Assumptions`), the same
+    // store-as-text convention `receipts.parsed_json` already uses. Brand new
+    // table, so a plain `CREATE TABLE IF NOT EXISTS` needs no guard.
+    (
+        11,
+        Step::Sql(
+            "CREATE TABLE IF NOT EXISTS finance_scenarios (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                assumptions_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                deleted_at INTEGER
+            );",
+        ),
+    ),
 ];
 
 /// Highest version in `MIGRATIONS`.
 ///
 /// A database newer than this means the data is newer than the binary, which is
 /// what a Nix rollback looks like. `migrate` refuses rather than serving.
-pub const LATEST_VERSION: i64 = 10;
+pub const LATEST_VERSION: i64 = 11;
 
 /// The v1 schema, exactly as it shipped.
 ///

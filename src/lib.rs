@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod finance_scenarios;
 pub mod handlers;
 pub mod logs;
 pub mod notes_mirror;

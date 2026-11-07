@@ -1789,6 +1789,78 @@ async fn create_fx_rate(
     )
     .await
 }
+// --- Finance scenarios ------------------------------------------------------
+//
+// Same story as statements: the server is the only writer, so these are thin
+// HTTP wrappers over `/finance-scenarios`.
+
+#[tauri::command]
+async fn list_finance_scenarios() -> CommandResult<serde_json::Value> {
+    json_result(api::get("/finance-scenarios").await)
+}
+
+#[tauri::command]
+async fn create_finance_scenario(
+    name: String,
+    assumptions: serde_json::Value,
+) -> CommandResult<serde_json::Value> {
+    json_result(
+        api::post(
+            "/finance-scenarios",
+            &serde_json::json!({ "name": name, "assumptions": assumptions }),
+        )
+        .await,
+    )
+}
+
+#[tauri::command]
+async fn update_finance_scenario(
+    id: String,
+    name: String,
+    assumptions: serde_json::Value,
+) -> CommandResult<serde_json::Value> {
+    json_result(
+        api::put(
+            &format!("/finance-scenarios/{id}"),
+            &serde_json::json!({ "name": name, "assumptions": assumptions }),
+        )
+        .await,
+    )
+}
+
+#[tauri::command]
+async fn delete_finance_scenario(id: String) -> CommandResult<serde_json::Value> {
+    json_result(api::delete(&format!("/finance-scenarios/{id}")).await)
+}
+
+#[tauri::command]
+async fn get_finance_baseline(windowMonths: Option<u32>) -> CommandResult<serde_json::Value> {
+    let path = match windowMonths {
+        Some(months) => format!("/finance-scenarios/baseline?windowMonths={months}"),
+        None => "/finance-scenarios/baseline".to_string(),
+    };
+    json_result(api::get(&path).await)
+}
+
+#[tauri::command]
+async fn project_finance_scenario(
+    scenarioId: Option<String>,
+    assumptions: Option<serde_json::Value>,
+    windowMonths: Option<u32>,
+) -> CommandResult<serde_json::Value> {
+    json_result(
+        api::post(
+            "/finance-scenarios/project",
+            &serde_json::json!({
+                "scenarioId": scenarioId,
+                "assumptions": assumptions,
+                "windowMonths": windowMonths,
+            }),
+        )
+        .await,
+    )
+}
+
 // --- Statements -----------------------------------------------------------
 //
 // Staging lives on the server: it parses files and provider feeds, and it is
@@ -3805,6 +3877,12 @@ pub fn run() {
             sync_statement_feed,
             create_store,
             create_fx_rate,
+            list_finance_scenarios,
+            create_finance_scenario,
+            update_finance_scenario,
+            delete_finance_scenario,
+            get_finance_baseline,
+            project_finance_scenario,
             update_ingredient,
             create_ingredient,
             add_ingredient_price,

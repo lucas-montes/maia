@@ -30,6 +30,7 @@ const KNOWN: ViewId[] = [
   "statements",
   "fxRates",
   "insights",
+  "simulations",
 ];
 
 function viewFromHash(): ViewId {

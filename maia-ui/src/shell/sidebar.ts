@@ -62,6 +62,7 @@ const GROUPS: { name: string; icon: string; items: NavItem[] }[] = [
       { view: "transactions", label: "Transactions", icon: "credit-card" },
       { view: "statements", label: "Statements", icon: "file-text" },
       { view: "receipts", label: "Receipts", icon: "receipt", countKey: "receipts" },
+      { view: "simulations", label: "Simulations", icon: "trending-up" },
     ],
   },
   {
