@@ -754,6 +754,66 @@ fn list_tasks(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Va
     }
 }
 
+/// Lists tasks for the desktop calendar: every task whose own day
+/// (`due_date` if set, else `date`) falls within `[start, end]` (epoch ms,
+/// inclusive), plus *every* recurring anchor regardless of its own date —
+/// the caller expands those client-side (see `src/lib/recurrence.ts`), and
+/// an anchor created long before `start` can still recur into the range.
+#[tauri::command]
+fn list_tasks_range(
+    state: tauri::State<AppState>,
+    start: i64,
+    end: i64,
+) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return CommandResult {
+                success: false,
+                data: None,
+                error: Some(format!("lock {e}")),
+            };
+        }
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT id, date, title, done, task_status, due_date, due_time_minutes, start_time_minutes, end_time_minutes, notes, recurrence, series_id, created_at, updated_at \
+         FROM tasks \
+         WHERE deleted_at IS NULL \
+           AND (recurrence IS NOT NULL OR COALESCE(due_date, date) BETWEEN ?1 AND ?2) \
+         ORDER BY COALESCE(due_date, date) ASC",
+    ) {
+        Ok(s) => s,
+        Err(e) => return CommandResult { success: false, data: None, error: Some(format!("{e}")) },
+    };
+    let rows: Vec<serde_json::Value> = stmt
+        .query_map(params![start, end], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "date": r.get::<_, i64>(1)?,
+                "title": r.get::<_, String>(2)?,
+                "done": r.get::<_, i64>(3)?,
+                "taskStatus": r.get::<_, Option<i64>>(4)?,
+                "dueDate": r.get::<_, Option<i64>>(5)?,
+                "dueTimeMinutes": r.get::<_, Option<i64>>(6)?,
+                "startTimeMinutes": r.get::<_, Option<i64>>(7)?,
+                "endTimeMinutes": r.get::<_, Option<i64>>(8)?,
+                "notes": r.get::<_, Option<String>>(9)?,
+                "recurrence": r.get::<_, Option<String>>(10)?,
+                "seriesId": r.get::<_, Option<String>>(11)?,
+                "createdAt": r.get::<_, i64>(12)?,
+                "updatedAt": r.get::<_, i64>(13)?,
+            }))
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    CommandResult {
+        success: true,
+        data: Some(rows),
+        error: None,
+    }
+}
+
 // ---- Goal commands ----
 
 #[tauri::command]
@@ -3068,6 +3128,7 @@ pub fn run() {
             archive_receipt,
             restore_receipt,
             list_tasks,
+            list_tasks_range,
             list_templates,
             list_workouts,
             get_workout,

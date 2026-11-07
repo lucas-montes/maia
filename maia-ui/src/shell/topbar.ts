@@ -13,6 +13,7 @@ const VIEW_TITLES: Record<string, string> = {
   meals: "Meals",
   bodyMetrics: "Body Metrics",
   todos: "Tasks",
+  calendar: "Calendar",
   goals: "Goals",
   notes: "Notes",
   urls: "Saved URLs",

@@ -1,8 +1,9 @@
 # pnpm 11 reads settings from here rather than from the `pnpm` field in
 # package.json, which it now ignores.
 #
-# esbuild's install script places the platform binary that vite shells out to,
-# so the build cannot work without it -- and pnpm 10 onwards exits non-zero when
-# a dependency has a build script that has not been declared here.
-onlyBuiltDependencies:
-  - esbuild
+# esbuild's install script places the platform binary that vite (and now
+# vitest, which pins its own esbuild) shells out to, so the build cannot work
+# without it -- pnpm 10+ exits non-zero until a dependency's build script is
+# approved here.
+allowBuilds:
+  esbuild: true

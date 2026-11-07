@@ -184,6 +184,27 @@ export interface Todo {
   updatedAt: number;
 }
 
+/** Row shape of `list_tasks_range` — wide enough to feed `recurrence.ts`'s
+ *  `expandRecurrence`/`buildOccurrences` (unlike `Todo`, this carries the
+ *  recurrence rule, series id, and all three time-of-day fields). */
+export interface CalendarTask {
+  id: string;
+  date: number;
+  title: string;
+  done: number;
+  taskStatus: number | null;
+  dueDate: number | null;
+  dueTimeMinutes: number | null;
+  startTimeMinutes: number | null;
+  endTimeMinutes: number | null;
+  notes: string | null;
+  /** Raw JSON TEXT column; parse with `parseRecurrence` from `recurrence.ts`. */
+  recurrence: string | null;
+  seriesId: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface Workout {
   id: string;
   name: string;
@@ -331,6 +352,12 @@ export const api = {
   restoreReceipt: (id: string) => invoke<Envelope<void>>("restore_receipt", { id }),
 
   listTasks: () => invoke<Envelope<Todo[]>>("list_tasks"),
+
+  /** Tasks for the calendar view: everything due/dated within `[start, end]`
+   *  (epoch ms, inclusive), plus every recurring anchor for client-side
+   *  expansion — see `lib/recurrence.ts`. */
+  listTasksRange: (args: { start: number; end: number }) =>
+    invoke<Envelope<CalendarTask[]>>("list_tasks_range", args),
 
   listGoals: () => invoke<Envelope<Goal[]>>("list_goals"),
 
