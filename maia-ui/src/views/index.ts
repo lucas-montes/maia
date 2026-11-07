@@ -13,6 +13,7 @@ import * as exercises from "./exercises";
 import * as workouts from "./workouts";
 import * as templates from "./templates";
 import * as ingredients from "./ingredients";
+import * as priceComparison from "./priceComparison";
 import * as foods from "./foods";
 import * as stores from "./stores";
 import * as meals from "./meals";
@@ -38,6 +39,7 @@ export const routes: Record<ViewId, ViewModule> = {
   workouts,
   templates,
   ingredients,
+  priceComparison,
   foods,
   stores,
   meals,

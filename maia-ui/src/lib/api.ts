@@ -448,6 +448,41 @@ export const api = {
     fatPer100g: number;
   }) => invoke<unknown>("update_ingredient", args),
 
+  // ---- Ingredient price tracking (T02/T03/T05/T06) ----
+
+  addIngredientPrice: (args: {
+    ingredientId: string;
+    storeId: string;
+    price: number;
+    currencyCode: string;
+    packageGrams: number | null;
+    recordedAt: number;
+    sourceUrl: string | null;
+  }) => invoke<unknown>("add_ingredient_price", args),
+
+  matchReceiptItem: (args: {
+    ingredientId: string;
+    merchant: string;
+    price: number;
+    currencyCode: string;
+    packageGrams: number | null;
+    recordedAt: number;
+    sourceUrl: string | null;
+  }) => invoke<unknown>("match_receipt_item", args),
+
+  /** Cheapest-per-nutrient-gram comparison across every ingredient for the
+   *  period (week/month/year) containing `atMs`. */
+  nutrientPriceComparison: (args: { period: "week" | "month" | "year"; nutrient: string; atMs: number }) =>
+    invoke<unknown>("nutrient_price_comparison", args),
+
+  /** A logged meal's estimated cost, or `data: null` when nothing in it has
+   *  ever been priced. */
+  mealCostEstimate: (mealId: string) => invoke<unknown>("meal_cost_estimate", { mealId }),
+
+  /** The day/week/month aggregate "estimated food spend" rollup. */
+  foodSpendRollup: (args: { bucket: "day" | "week" | "month"; sinceMs: number; untilMs: number }) =>
+    invoke<unknown>("food_spend_rollup", args),
+
   listFoods: () => invoke<unknown>("list_foods"),
 
   createFood: (args: { name: string; components: { ingredientId: string; amount: number }[]; cookedWeight: number }) =>

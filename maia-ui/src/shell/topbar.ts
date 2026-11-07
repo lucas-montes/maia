@@ -8,6 +8,7 @@ const VIEW_TITLES: Record<string, string> = {
   workouts: "Workouts",
   templates: "Templates",
   ingredients: "Ingredients",
+  priceComparison: "Price Comparison",
   foods: "Recipes",
   stores: "Stores",
   meals: "Meals",

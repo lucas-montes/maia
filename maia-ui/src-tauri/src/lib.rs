@@ -1155,7 +1155,11 @@ fn list_ingredients(state: tauri::State<AppState>) -> CommandResult<Vec<serde_js
         .collect();
     for (id, name, cal, prot, carb, fat, sod, fib, sug, arch, brand, barcode, created) in rows {
         let pics: Vec<serde_json::Value> = conn.prepare("SELECT id, image_path, sort_order FROM ingredient_pictures WHERE ingredient_id=?1 ORDER BY sort_order").unwrap().query_map([&id], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"imagePath":r.get::<_,String>(1)?,"sortOrder":r.get::<_,i64>(2)?}))).unwrap().filter_map(|r|r.ok()).collect();
-        let prices: Vec<serde_json::Value> = conn.prepare("SELECT id, store_id, price, currency_code, recorded_at FROM ingredient_prices WHERE ingredient_id=?1 ORDER BY recorded_at DESC LIMIT 20").unwrap().query_map([&id], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"storeId":r.get::<_,String>(1)?,"price":r.get::<_,f64>(2)?,"currencyCode":r.get::<_,String>(3)?,"recordedAt":r.get::<_,i64>(4)?}))).unwrap().filter_map(|r|r.ok()).collect();
+        // package_grams is what turns a price into a comparable cost-per-100g;
+        // source_url is the optional "where I saw this" link. Both used to be
+        // missing here, so the ingredient detail view could not show a
+        // cost-per-100g history at all -- see T03 in the price-tracking plan.
+        let prices: Vec<serde_json::Value> = conn.prepare("SELECT id, store_id, price, currency_code, package_grams, recorded_at, source_url FROM ingredient_prices WHERE ingredient_id=?1 AND deleted_at IS NULL ORDER BY recorded_at DESC LIMIT 100").unwrap().query_map([&id], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"storeId":r.get::<_,String>(1)?,"price":r.get::<_,f64>(2)?,"currencyCode":r.get::<_,String>(3)?,"packageGrams":r.get::<_,Option<f64>>(4)?,"recordedAt":r.get::<_,i64>(5)?,"sourceUrl":r.get::<_,Option<String>>(6)?}))).unwrap().filter_map(|r|r.ok()).collect();
         out.push(serde_json::json!({"id":id,"name":name,"calories_per100g":cal,"protein_per100g":prot,"carbs_per100g":carb,"fat_per100g":fat,"sodium_per100g":sod,"fiber_per100g":fib,"sugar_per100g":sug,"is_archived":arch!=0,"brand":brand,"barcode":barcode,"createdAt":created,"pictures":pics,"prices":prices}));
     }
     CommandResult {
@@ -2162,36 +2166,309 @@ fn read_ingredient_for_push(state: &tauri::State<AppState>, id: &str) -> Option<
 
     let mut out = base;
     let obj = out.as_object_mut()?;
+    // `sub_rows` returns raw snake_case column names; every other caller in
+    // this file remaps them to the camelCase shape the push endpoint expects
+    // (see `read_food_for_push`, `template_payload`) but this one never did,
+    // so re-pushing an ingredient that already had pictures or prices would
+    // fail to deserialize server-side (`IngredientPicturePush`/
+    // `IngredientPricePush` require `imagePath`/`storeId`/etc, not
+    // `image_path`/`store_id`). Fixed here rather than carried forward, since
+    // T02's receipt-match flow re-pushes exactly this payload.
     obj.insert(
         "pictures".into(),
-        serde_json::Value::Array(sub_rows(
-            &conn,
-            "ingredient_pictures",
-            "ingredient_id",
-            id,
-            &["id", "image_path", "sort_order", "created_at"],
-            "ingredientId",
-        )),
+        serde_json::Value::Array(
+            sub_rows(
+                &conn,
+                "ingredient_pictures",
+                "ingredient_id",
+                id,
+                &["id", "image_path", "sort_order", "created_at"],
+                "ingredientId",
+            )
+            .into_iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                    "ingredientId": p.get("ingredientId").cloned().unwrap_or(serde_json::Value::Null),
+                    "imagePath": p.get("image_path").cloned().unwrap_or(serde_json::Value::Null),
+                    "sortOrder": p.get("sort_order").cloned().unwrap_or(serde_json::Value::Null),
+                    "createdAt": p.get("created_at").cloned().unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .collect(),
+        ),
     );
     obj.insert(
         "prices".into(),
-        serde_json::Value::Array(sub_rows(
-            &conn,
-            "ingredient_prices",
-            "ingredient_id",
-            id,
-            &[
-                "id",
-                "store_id",
-                "price",
-                "currency_code",
-                "package_grams",
-                "recorded_at",
-            ],
-            "ingredientId",
-        )),
+        serde_json::Value::Array(
+            sub_rows(
+                &conn,
+                "ingredient_prices",
+                "ingredient_id",
+                id,
+                &[
+                    "id",
+                    "store_id",
+                    "price",
+                    "currency_code",
+                    "package_grams",
+                    "recorded_at",
+                    "source_url",
+                ],
+                "ingredientId",
+            )
+            .into_iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                    "ingredientId": p.get("ingredientId").cloned().unwrap_or(serde_json::Value::Null),
+                    "storeId": p.get("store_id").cloned().unwrap_or(serde_json::Value::Null),
+                    "price": p.get("price").cloned().unwrap_or(serde_json::Value::Null),
+                    "currencyCode": p.get("currency_code").cloned().unwrap_or(serde_json::Value::Null),
+                    "packageGrams": p.get("package_grams").cloned().unwrap_or(serde_json::Value::Null),
+                    "recordedAt": p.get("recorded_at").cloned().unwrap_or(serde_json::Value::Null),
+                    "sourceUrl": p.get("source_url").cloned().unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .collect(),
+        ),
     );
     Some(out)
+}
+
+/// The deployment's base currency, for the price-tracking aggregates below.
+/// Defaults to EUR -- same fallback `Config::base_currency` itself uses --
+/// rather than failing a read command outright when the config cannot load.
+fn base_currency() -> String {
+    maia::Config::shared(None)
+        .map(|c| c.base_currency.clone())
+        .unwrap_or_else(|_| "EUR".to_string())
+}
+
+/// Records a price observation for an existing ingredient (T03's "Add price",
+/// parity with mobile's price sheet). Like `update_ingredient`, this starts
+/// from the ingredient's current push payload and appends to it rather than
+/// sending only the new row, because `POST /ingredients` upserts everything
+/// it is given.
+#[tauri::command]
+async fn add_ingredient_price(
+    state: tauri::State<'_, AppState>,
+    ingredientId: String,
+    storeId: String,
+    price: f64,
+    currencyCode: String,
+    packageGrams: Option<f64>,
+    recordedAt: i64,
+    sourceUrl: Option<String>,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let Some(mut ingredient) = read_ingredient_for_push(&state, &ingredientId) else {
+        return Ok(CommandResult {
+            success: false,
+            data: None,
+            error: Some(format!("Ingredient {ingredientId} not found")),
+        });
+    };
+    let id = uuid::Uuid::now_v7().to_string();
+    let new_price = serde_json::json!({
+        "id": id,
+        "ingredientId": ingredientId,
+        "storeId": storeId,
+        "price": price,
+        "currencyCode": currencyCode,
+        "packageGrams": packageGrams,
+        "recordedAt": recordedAt,
+        "sourceUrl": sourceUrl,
+    });
+    if let Some(obj) = ingredient.as_object_mut() {
+        match obj.get_mut("prices").and_then(|p| p.as_array_mut()) {
+            Some(prices) => prices.push(new_price),
+            None => {
+                obj.insert("prices".into(), serde_json::Value::Array(vec![new_price]));
+            }
+        }
+    }
+    Ok(push_ok("/ingredients", &ingredient, serde_json::json!({ "id": id })).await)
+}
+
+/// Matches one parsed receipt line item to an existing ingredient (T02),
+/// recording a price observation at the receipt's own store and date. The
+/// store is found-or-created by the receipt's merchant name server-side (see
+/// `POST /ingredient-prices/match`); this command only forwards the inputs
+/// the match dialog collects.
+#[tauri::command]
+async fn match_receipt_item(
+    ingredientId: String,
+    merchant: String,
+    price: f64,
+    currencyCode: String,
+    packageGrams: Option<f64>,
+    recordedAt: i64,
+    sourceUrl: Option<String>,
+) -> CommandResult<serde_json::Value> {
+    json_result(
+        api::post(
+            "/ingredient-prices/match",
+            &serde_json::json!({
+                "ingredientId": ingredientId,
+                "merchant": merchant,
+                "price": price,
+                "currencyCode": currencyCode,
+                "packageGrams": packageGrams,
+                "recordedAt": recordedAt,
+                "sourceUrl": sourceUrl,
+            }),
+        )
+        .await,
+    )
+}
+
+/// Every ingredient's price-per-100g for the given period (one of "week",
+/// "month", "year") containing `atMs`, plus the derived price-per-gram of
+/// `nutrient` ("protein" | "carbs" | "fat" | "sodium" | "fiber" | "sugar").
+/// Rows with no price data for the period, or no figure for the chosen
+/// nutrient, are omitted rather than shown as a misleading zero. Sorted
+/// cheapest-per-nutrient-gram first.
+#[tauri::command]
+fn nutrient_price_comparison(
+    state: tauri::State<AppState>,
+    period: String,
+    nutrient: String,
+    atMs: i64,
+) -> CommandResult<Vec<serde_json::Value>> {
+    let Some(period) = parse_period(&period) else {
+        return CommandResult {
+            success: false,
+            data: None,
+            error: Some(format!("unknown period '{period}'")),
+        };
+    };
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => return CommandResult { success: false, data: None, error: Some(format!("lock {e}")) },
+    };
+    let base = base_currency();
+    let mut stmt = match conn.prepare(
+        "SELECT id, name, protein_per100g, carbs_per100g, fat_per100g, sodium_per100g, fiber_per100g, sugar_per100g
+         FROM ingredients WHERE deleted_at IS NULL AND is_archived = 0 ORDER BY name",
+    ) {
+        Ok(s) => s,
+        Err(e) => return CommandResult { success: false, data: None, error: Some(format!("prep {e}")) },
+    };
+    let rows: Vec<(String, String, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>)> =
+        match stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+            })
+            .and_then(|m| m.collect())
+        {
+            Ok(v) => v,
+            Err(e) => return CommandResult { success: false, data: None, error: Some(format!("{e}")) },
+        };
+    drop(stmt);
+
+    let mut out = Vec::new();
+    for (id, name, protein, carbs, fat, sodium, fiber, sugar) in rows {
+        let Ok(Some(price_per_100g)) = maia::pricing::price_per_100g_for_period(&conn, &id, &base, period, atMs) else {
+            continue;
+        };
+        let nutrient_per_100g = match nutrient.as_str() {
+            "protein" => protein,
+            "carbs" => carbs,
+            "fat" => fat,
+            "sodium" => sodium,
+            "fiber" => fiber,
+            "sugar" => sugar,
+            _ => None,
+        };
+        let Some(per_gram) = maia::pricing::price_per_nutrient_gram(price_per_100g, nutrient_per_100g) else {
+            continue;
+        };
+        out.push(serde_json::json!({
+            "ingredientId": id,
+            "name": name,
+            "pricePer100g": price_per_100g,
+            "pricePerNutrientGram": per_gram,
+            "currencyCode": base,
+        }));
+    }
+    out.sort_by(|a, b| {
+        let av = a["pricePerNutrientGram"].as_f64().unwrap_or(f64::MAX);
+        let bv = b["pricePerNutrientGram"].as_f64().unwrap_or(f64::MAX);
+        av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    CommandResult { success: true, data: Some(out), error: None }
+}
+
+/// A logged meal's estimated cost (see `maia::pricing::meal_cost_estimate`):
+/// `null` data when nothing in it has ever been priced, otherwise the total
+/// in the deployment's base currency plus whether every ingredient
+/// contributed (`complete: false` means a partial, best-effort sum).
+#[tauri::command]
+fn meal_cost_estimate(state: tauri::State<AppState>, mealId: String) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => return CommandResult { success: false, data: None, error: Some(format!("lock {e}")) },
+    };
+    match maia::pricing::meal_cost_estimate(&conn, &mealId, &base_currency()) {
+        Ok(Some(estimate)) => CommandResult {
+            success: true,
+            data: Some(serde_json::json!({
+                "totalBase": estimate.total_base,
+                "complete": estimate.complete,
+                "currencyCode": base_currency(),
+            })),
+            error: None,
+        },
+        Ok(None) => CommandResult { success: true, data: None, error: None },
+        Err(e) => CommandResult { success: false, data: None, error: Some(format!("{e}")) },
+    }
+}
+
+/// The day/week/month "estimated food spend" rollup: every logged meal's cost
+/// estimate, bucketed and summed. `bucket` is one of "day", "week", "month".
+#[tauri::command]
+fn food_spend_rollup(
+    state: tauri::State<AppState>,
+    bucket: String,
+    sinceMs: i64,
+    untilMs: i64,
+) -> CommandResult<Vec<serde_json::Value>> {
+    let Some(bucket) = parse_period(&bucket) else {
+        return CommandResult { success: false, data: None, error: Some(format!("unknown bucket '{bucket}'")) };
+    };
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => return CommandResult { success: false, data: None, error: Some(format!("lock {e}")) },
+    };
+    match maia::pricing::food_spend_rollup(&conn, &base_currency(), bucket, sinceMs, untilMs) {
+        Ok(buckets) => CommandResult {
+            success: true,
+            data: Some(
+                buckets
+                    .into_iter()
+                    .map(|b| {
+                        serde_json::json!({
+                            "bucketStartMs": b.bucket_start_ms,
+                            "totalBase": b.total_base,
+                            "complete": b.complete,
+                        })
+                    })
+                    .collect(),
+            ),
+            error: None,
+        },
+        Err(e) => CommandResult { success: false, data: None, error: Some(format!("{e}")) },
+    }
+}
+
+fn parse_period(s: &str) -> Option<maia::pricing::Period> {
+    match s {
+        "day" => Some(maia::pricing::Period::Day),
+        "week" => Some(maia::pricing::Period::Week),
+        "month" => Some(maia::pricing::Period::Month),
+        "year" => Some(maia::pricing::Period::Year),
+        _ => None,
+    }
 }
 
 /// Rows of a child table belonging to one parent, shaped for a push payload.
@@ -3530,6 +3807,11 @@ pub fn run() {
             create_fx_rate,
             update_ingredient,
             create_ingredient,
+            add_ingredient_price,
+            match_receipt_item,
+            nutrient_price_comparison,
+            meal_cost_estimate,
+            food_spend_rollup,
             list_foods,
             create_food,
             update_food,

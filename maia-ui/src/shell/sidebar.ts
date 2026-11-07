@@ -41,6 +41,7 @@ const GROUPS: { name: string; icon: string; items: NavItem[] }[] = [
     icon: "utensils",
     items: [
       { view: "ingredients", label: "Ingredients", icon: "shopping-basket" },
+      { view: "priceComparison", label: "Price Comparison", icon: "trending-down" },
       { view: "foods", label: "Recipes", icon: "chef-hat" },
       { view: "stores", label: "Stores", icon: "store" },
       { view: "meals", label: "Meals", icon: "utensils" },

@@ -172,13 +172,18 @@ pub const MIGRATIONS: &[(i64, Step)] = &[
     // as a fresh `notify-send` call. Server-only: `pull_tasks` selects an
     // explicit column list that omits it, so a phone never sees or clears it.
     (9, Step::Guarded(add_task_notified_at)),
+    // A price observation can be backed by a page the user found it on (e.g. a
+    // supermarket's online catalogue), kept for reference. Per-observation, not
+    // per-ingredient: the link belongs to the specific price, not to the
+    // ingredient as a permanent attribute. Never auto-fetched.
+    (10, Step::Guarded(add_ingredient_price_source_url)),
 ];
 
 /// Highest version in `MIGRATIONS`.
 ///
 /// A database newer than this means the data is newer than the binary, which is
 /// what a Nix rollback looks like. `migrate` refuses rather than serving.
-pub const LATEST_VERSION: i64 = 9;
+pub const LATEST_VERSION: i64 = 10;
 
 /// The v1 schema, exactly as it shipped.
 ///
@@ -973,6 +978,17 @@ fn add_task_notified_at(conn: &Connection) -> anyhow::Result<()> {
         return Ok(());
     }
     conn.execute_batch("ALTER TABLE tasks ADD COLUMN notified_at INTEGER")?;
+    Ok(())
+}
+
+/// v10: `ingredient_prices.source_url`, an optional link to where a price was
+/// observed (e.g. an online catalogue page). Manual entry/paste only; nothing
+/// ever fetches or follows it automatically.
+fn add_ingredient_price_source_url(conn: &Connection) -> anyhow::Result<()> {
+    if column_exists(conn, "ingredient_prices", "source_url")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE ingredient_prices ADD COLUMN source_url TEXT")?;
     Ok(())
 }
 

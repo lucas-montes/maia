@@ -134,6 +134,10 @@ pub struct IngredientPrice {
     pub package_grams: Option<f64>,
     #[serde(rename = "recordedAt")]
     pub recorded_at: i64,
+    /// Where this price was observed (e.g. an online catalogue page). Never
+    /// auto-fetched -- manual entry/paste only.
+    #[serde(rename = "sourceUrl")]
+    pub source_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -275,7 +279,7 @@ pub async fn pull_ingredients(
             .unwrap_or_default();
 
         let mut price_stmt = conn
-            .prepare("SELECT id, ingredient_id, store_id, price, currency_code, package_grams, recorded_at FROM ingredient_prices WHERE ingredient_id = ?1 AND deleted_at IS NULL")
+            .prepare("SELECT id, ingredient_id, store_id, price, currency_code, package_grams, recorded_at, source_url FROM ingredient_prices WHERE ingredient_id = ?1 AND deleted_at IS NULL")
             .unwrap();
         let prices = price_stmt
             .query_map([&id], |row| {
@@ -287,6 +291,7 @@ pub async fn pull_ingredients(
                     currency_code: row.get(4)?,
                     package_grams: row.get(5)?,
                     recorded_at: row.get(6)?,
+                    source_url: row.get(7)?,
                 })
             })
             .unwrap()
