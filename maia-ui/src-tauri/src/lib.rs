@@ -1324,10 +1324,34 @@ fn list_accounts(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json:
     };
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, type, opening_balance, note, created_at FROM accounts ORDER BY name",
+            "SELECT id, name, type, opening_balance, note, created_at, source, external_id
+             FROM accounts WHERE deleted_at IS NULL ORDER BY name",
         )
         .unwrap();
-    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"type":r.get::<_,String>(2)?,"openingBalance":r.get::<_,f64>(3)?,"note":r.get::<_,Option<String>>(4)?,"createdAt":r.get::<_,i64>(5)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    let rows: Vec<serde_json::Value> = stmt
+        .query_map([], |r| {
+            let id: String = r.get(0)?;
+            // The balance is computed per account with the same
+            // opening-plus-net rule the Insights chart uses, so the list view
+            // and the charts cannot disagree about what an account is worth.
+            let balance = compute_current_balance(&conn, &id).unwrap_or(f64::NAN);
+            Ok(serde_json::json!({
+                "id": id,
+                "name": r.get::<_, String>(1)?,
+                "type": r.get::<_, String>(2)?,
+                "openingBalance": r.get::<_, f64>(3)?,
+                "note": r.get::<_, Option<String>>(4)?,
+                "createdAt": r.get::<_, i64>(5)?,
+                // Accounts created by a statement import carry their provider
+                // identity; hand-created ones have neither.
+                "source": r.get::<_, Option<String>>(6)?,
+                "externalId": r.get::<_, Option<String>>(7)?,
+                "balance": balance,
+            }))
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
     CommandResult {
         success: true,
         data: Some(rows),
@@ -1346,8 +1370,47 @@ fn list_transactions(state: tauri::State<AppState>) -> CommandResult<Vec<serde_j
             };
         }
     };
-    let mut stmt = conn.prepare("SELECT id, type, amount, currency_code, amount_base, rate_used, category, date, note, receipt_id, is_draft FROM transactions ORDER BY date DESC LIMIT 500").unwrap();
-    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"type":r.get::<_,String>(1)?,"amount":r.get::<_,f64>(2)?,"currencyCode":r.get::<_,String>(3)?,"amountBase":r.get::<_,f64>(4)?,"rateUsed":r.get::<_,f64>(5)?,"category":r.get::<_,Option<String>>(6)?,"date":r.get::<_,i64>(7)?,"note":r.get::<_,Option<String>>(8)?,"receiptId":r.get::<_,Option<String>>(9)?,"isDraft":r.get::<_,i64>(10)? !=0}))).unwrap().filter_map(|r|r.ok()).collect();
+    // Both sides are named straight from the join: a transfer without its
+    // account names ("transfer 500") told the reader nothing about where the
+    // money moved, and a spend without the account it left is equally blind.
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.id, t.type, t.amount, t.currency_code, t.amount_base, t.rate_used,
+                    t.category, t.date, t.note, t.receipt_id, t.is_draft,
+                    t.account_id, t.to_account_id, a.name, b.name
+             FROM transactions t
+             LEFT JOIN accounts a ON t.account_id = a.id
+             LEFT JOIN accounts b ON t.to_account_id = b.id
+             WHERE t.deleted_at IS NULL
+             ORDER BY t.date DESC LIMIT 500",
+        )
+        .unwrap();
+    let rows: Vec<serde_json::Value> = stmt
+        .query_map([], |r| {
+            let account_id: Option<String> = r.get(11)?;
+            let note: Option<String> = r.get(8)?;
+            let category: Option<String> = r.get(6)?;
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "type": r.get::<_, String>(1)?,
+                "amount": r.get::<_, f64>(2)?,
+                "currencyCode": r.get::<_, String>(3)?,
+                "amountBase": r.get::<_, f64>(4)?,
+                "rateUsed": r.get::<_, f64>(5)?,
+                "category": category,
+                "date": r.get::<_, i64>(7)?,
+                "note": note,
+                "receiptId": r.get::<_, Option<String>>(9)?,
+                "isDraft": r.get::<_, i64>(10)? != 0,
+                "accountId": account_id,
+                "toAccountId": r.get::<_, Option<String>>(12)?,
+                "accountName": r.get::<_, Option<String>>(13)?,
+                "toAccountName": r.get::<_, Option<String>>(14)?,
+            }))
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
     CommandResult {
         success: true,
         data: Some(rows),
@@ -1693,6 +1756,55 @@ fn running_balance_series(
         .into_iter()
         .map(|key| serde_json::json!({"bucket": key, "balance": last[&key]}))
         .collect()
+}
+
+/// Current balance of one account: its opening balance plus the net effect
+/// of every live transaction that touches it — the same accounting used by
+/// [`running_balance_series`], collapsed to the last value.
+///
+/// Kept as a standalone fold (rather than calling the series) so a list of
+/// accounts can be priced without building every chart bucket.
+fn compute_current_balance(conn: &Connection, account_id: &str) -> Result<f64, String> {
+    let opening: f64 = conn
+        .query_row(
+            "SELECT opening_balance FROM accounts WHERE id = ?1 AND deleted_at IS NULL",
+            params![account_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => "Account not found".to_string(),
+            e => format!("{e}"),
+        })?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT type, amount_base, account_id, to_account_id FROM transactions \
+             WHERE deleted_at IS NULL AND (account_id = ?1 OR to_account_id = ?1)",
+        )
+        .map_err(|e| format!("{e}"))?;
+    let mut balance = opening;
+    let mut rows = stmt
+        .query(params![account_id])
+        .map_err(|e| format!("{e}"))?;
+    while let Some(row) = rows.next().map_err(|e| format!("{e}"))? {
+        let type_: String = row.get(0).map_err(|e| format!("{e}"))?;
+        let amount_base: f64 = row.get(1).map_err(|e| format!("{e}"))?;
+        let from: Option<String> = row.get(2).map_err(|e| format!("{e}"))?;
+        let to: Option<String> = row.get(3).map_err(|e| format!("{e}"))?;
+        match type_.as_str() {
+            "income" if from.as_deref() == Some(account_id) => balance += amount_base,
+            "expense" if from.as_deref() == Some(account_id) => balance -= amount_base,
+            "transfer" => {
+                if from.as_deref() == Some(account_id) {
+                    balance -= amount_base;
+                }
+                if to.as_deref() == Some(account_id) {
+                    balance += amount_base;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(balance)
 }
 
 /// Loads one account's opening balance and every transaction that touches it
@@ -2376,6 +2488,18 @@ fn base_currency() -> String {
     maia::Config::shared(None)
         .map(|c| c.base_currency.clone())
         .unwrap_or_else(|_| "EUR".to_string())
+}
+
+/// Exposes the deployment's base currency to the finance views: a transaction
+/// already in base currency must not be shown as `X base (rate 1)` noise, and
+/// only converted rows earn that line.
+#[tauri::command]
+fn get_base_currency() -> CommandResult<String> {
+    CommandResult {
+        success: true,
+        data: Some(base_currency()),
+        error: None,
+    }
 }
 
 /// Records a price observation for an existing ingredient (T03's "Add price",
@@ -3915,6 +4039,7 @@ pub fn run() {
             list_tags,
             list_accounts,
             list_transactions,
+            get_base_currency,
             list_fx_rates,
             exercise_progression,
             exercise_volume,

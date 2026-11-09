@@ -1,5 +1,6 @@
 import {
   api,
+  isEnvelopeFailure,
   type StatementDetail,
   type StatementFeedStatus,
   type StatementImportLine,
@@ -191,11 +192,15 @@ function lineRow(line: StatementLine, checked: boolean): string {
  *
  *  A match may have one side in another statement of the same file (a CA file
  *  stages one statement per account); the row names both accounts, and only a
- *  line present in [localIds] can be selected here. */
+ *  line present in [localIds] can be selected here. When neither side is yet
+ *  tied to a real account, a per-row counterpart picker chooses where the
+ *  money goes — or nothing at all, which imports the line as a plain
+ *  expense/income instead of an invented account. */
 function transferRowsHtml(
   matches: TransferMatch[],
   localIds: Set<string>,
   selected: Set<string>,
+  accounts: { id: string; name: string; type: string }[],
 ): string {
   const live = matches.filter((m) => m.status !== "dismissed");
   if (live.length === 0) return "";
@@ -231,23 +236,39 @@ function transferRowsHtml(
             <span class="text-ink-500"> → </span>
             <span class="text-ok-400">${escapeHtml(money(credit.amount, credit.currencyCode))}</span>
           </td>
-          <td class="whitespace-nowrap align-top">${badge}</td>
-          <td class="align-top text-xs text-ink-500">${match.status === "auto" ? "both sides import as one transfer" : "suggested: importing one side leaves the other separate"}</td>
+          <td class="align-top">${badge}</td>
+          <td class="align-top">
+            ${selectable
+              ? `<select class="select select-xs select-bordered w-40" data-counterpart-for="${escapeHtml(localId)}" title="Pick where the money moves — or leave empty to book as expense/income">
+                  <option value="">— import as expense/income —</option>
+                  ${accounts
+                    .map(
+                      (a) =>
+                        `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)} (${escapeHtml(a.type)})</option>`,
+                    )
+                    .join("")}
+                </select>`
+              : `<span class="text-xs text-ink-500">${match.status === "auto" ? "both sides import as one transfer" : "suggested: importing one side leaves the other separate"}</span>`}
+          </td>
         </tr>`;
     })
     .join("");
   return `
     <div class="rounded border border-surface-800 bg-base-100 p-4">
       <h3 class="text-sm font-medium text-ink-200">Transfers <span class="font-normal text-ink-500">(money between your own accounts)</span></h3>
-      <p class="mt-1 mb-2 text-xs text-ink-500">An automatic pair imports as one transfer transaction; a suggested one is left as two separate entries unless you accept it.</p>
+      <p class="mt-1 mb-2 text-xs text-ink-500">An automatic pair imports as one transfer; pick the other account when the review does not know it, or leave the choice empty to book the entry as a plain expense or income.</p>
       <table class="table table-sm w-full">
-        <thead><tr><th></th><th>Date</th><th>Movement</th><th class="text-right">Amount</th><th>Match</th><th>Effect</th></tr></thead>
+        <thead><tr><th></th><th>Date</th><th>Movement</th><th class="text-right">Amount</th><th>Match</th><th>Counterpart</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;
 }
 
-function detailHtml(detail: StatementDetail, selected: Set<string>): string {
+function detailHtml(
+  detail: StatementDetail,
+  selected: Set<string>,
+  accounts: { id: string; name: string; type: string }[],
+): string {
   const s = detail.statement;
   const matched = new Set<string>();
   for (const match of detail.matches) {
@@ -295,7 +316,7 @@ function detailHtml(detail: StatementDetail, selected: Set<string>): string {
         ${s.warnings.length > 0 ? `<div class="mt-3 rounded border border-surface-800 bg-base-100 p-2 text-xs text-warn-400">${s.warnings.map((w) => escapeHtml(w)).join("<br />")}</div>` : ""}
       </div>
 
-      ${transferRowsHtml(detail.matches, new Set(detail.lines.map((line) => line.id)), selected)}
+      ${transferRowsHtml(detail.matches, new Set(detail.lines.map((line) => line.id)), selected, accounts)}
 
       ${trades.length > 0 ? `<div class="rounded border border-surface-800 bg-base-100 p-4">
         <h3 class="mb-2 text-sm font-medium text-ink-200">Trades <span class="font-normal text-ink-500">(informational, never imported)</span></h3>
@@ -343,7 +364,11 @@ function detailHtml(detail: StatementDetail, selected: Set<string>): string {
  *  accounts first, then the entries grouped by account, then transfers and
  *  informational trades. Selection is shared across all accounts, so one
  *  import call can cover the whole file. */
-function fileHtml(statements: StatementDetail[], selected: Set<string>): string {
+function fileHtml(
+  statements: StatementDetail[],
+  selected: Set<string>,
+  accounts: { id: string; name: string; type: string }[],
+): string {
   const localIds = new Set<string>();
   const matches: TransferMatch[] = [];
   const trades: StatementLine[] = [];
@@ -460,7 +485,7 @@ function fileHtml(statements: StatementDetail[], selected: Set<string>): string 
 
       ${entrySections || `<div class="rounded border border-surface-800 bg-base-100 p-4 text-sm text-ink-500">No importable entries in this file.</div>`}
 
-      ${transferRowsHtml(matches, localIds, selected)}
+      ${transferRowsHtml(matches, localIds, selected, accounts)}
 
       ${trades.length > 0 ? `<div class="rounded border border-surface-800 bg-base-100 p-4">
         <h3 class="mb-2 text-sm font-medium text-ink-200">Trades <span class="font-normal text-ink-500">(informational, never imported)</span></h3>
@@ -509,6 +534,21 @@ export function mount(root: HTMLElement): () => void {
   root.innerHTML = `<div data-slot="content"></div>`;
   const content = root.querySelector("[data-slot='content']") as HTMLElement;
   let feeds: StatementFeedStatus[] = [];
+  /** Existing accounts for the transfer counterpart picker; `listAccounts`
+   *  is the desktop's local read, so it is cheap and always current. */
+  let accounts: { id: string; name: string; type: string }[] = [];
+
+  const loadAccounts = async (): Promise<void> => {
+    try {
+      const res = await api.listAccounts();
+      if (isEnvelopeFailure(res)) return;
+      accounts = ((res as { data?: unknown }).data ?? []) as { id: string; name: string; type: string }[];
+      // A late list must not silently keep showing a stale or empty picker.
+      render();
+    } catch {
+      // The picker degrades to "import as expense/income".
+    }
+  };
 
   const selectedSet = (): Set<string> => new Set(statementsAtom.get().selectedLines);
 
@@ -584,12 +624,13 @@ export function mount(root: HTMLElement): () => void {
 
   const render = (): void => {
     const state = statementsAtom.get();
+    const accountOptions = accounts.map((a) => ({ id: a.id, name: a.name, type: a.type }));
     if (state.selectedId && state.detail) {
       setHtml(
         content,
         `${panelOpen("Statement Review", state.detail.statement.institution, "panel-fit")}
           ${statusBanner(state)}
-          ${detailHtml(state.detail as StatementDetail, selectedSet())}
+          ${detailHtml(state.detail as StatementDetail, selectedSet(), accountOptions)}
         ${panelClose}`,
       );
     } else if (state.fileReview) {
@@ -597,7 +638,7 @@ export function mount(root: HTMLElement): () => void {
         content,
         `${panelOpen("File review", basename(state.fileReview.path), "panel-fit")}
           ${statusBanner(state)}
-          ${fileHtml(state.fileReview.statements as StatementDetail[], selectedSet())}
+          ${fileHtml(state.fileReview.statements as StatementDetail[], selectedSet(), accountOptions)}
         ${panelClose}`,
       );
     } else {
@@ -902,11 +943,18 @@ export function mount(root: HTMLElement): () => void {
     return [...selected].map((id) => {
       const type = content.querySelector<HTMLSelectElement>(`[data-type-for="${CSS.escape(id)}"]`)?.value;
       const category = content.querySelector<HTMLInputElement>(`[data-category-for="${CSS.escape(id)}"]`)?.value.trim();
+      const counterpart = content.querySelector<HTMLSelectElement>(
+        `[data-counterpart-for="${CSS.escape(id)}"]`,
+      )?.value;
       return {
         id,
         action,
         ...(action === "import" && type ? { type: type as StatementImportLine["type"] } : {}),
         ...(action === "import" && category ? { category } : {}),
+        // An explicit counterpart makes the row a real transfer; without one
+        // the server books it as an expense/income rather than inventing an
+        // account.
+        ...(action === "import" && counterpart ? { counterpartAccountId: counterpart } : {}),
       };
     });
   };
@@ -1270,6 +1318,7 @@ export function mount(root: HTMLElement): () => void {
   render();
   void loadList();
   void loadFeeds();
+  void loadAccounts();
   const unsubscribe = statementsAtom.subscribe(rerender);
   return () => unsubscribe();
 }

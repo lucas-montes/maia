@@ -16,6 +16,40 @@ export interface Envelope<T> {
   error?: string;
 }
 
+/** One row of the desktop `list_accounts` command. */
+export interface FinanceAccount {
+  id: string;
+  name: string;
+  type: string;
+  openingBalance: number;
+  note: string | null;
+  createdAt: number;
+  /** Non-null for accounts a statement import created. */
+  source: string | null;
+  externalId: string | null;
+  /** Opening balance plus the net of every transaction touching the account. */
+  balance: number;
+}
+
+/** One row of the desktop `list_transactions` command. */
+export interface FinanceTransaction {
+  id: string;
+  type: "expense" | "income" | "transfer" | string;
+  amount: number;
+  currencyCode: string;
+  amountBase: number;
+  rateUsed: number;
+  category: string | null;
+  date: number;
+  note: string | null;
+  receiptId: string | null;
+  isDraft: boolean;
+  accountId: string | null;
+  toAccountId: string | null;
+  accountName: string | null;
+  toAccountName: string | null;
+}
+
 // ---- Shared record shapes ----
 
 export interface Note {
@@ -136,6 +170,10 @@ export interface StatementImportLine {
   action?: "import" | "skip";
   type?: "expense" | "income" | "transfer";
   category?: string | null;
+  /** Transfer lines: the account on the other side. Omitted means "no
+   *  counterpart is known" — the server then books the line as a plain
+   *  expense/income instead of pointing it at an invented account. */
+  counterpartAccountId?: string | null;
 }
 
 export interface StatementFeedStatus {
@@ -571,6 +609,10 @@ export const api = {
   listAccounts: () => invoke<unknown>("list_accounts"),
 
   listTransactions: () => invoke<unknown>("list_transactions"),
+
+  /** The deployment's base currency, so finance rows do not show
+   *  `500 EUR → 500 base (rate 1)` for entries that never needed converting. */
+  getBaseCurrency: () => invoke<Envelope<string>>("get_base_currency"),
 
   listFxRates: (args: { base: string; date: string }) => invoke<unknown>("list_fx_rates", args),
 

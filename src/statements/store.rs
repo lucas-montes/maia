@@ -613,7 +613,7 @@ fn load_line(tx: &Transaction<'_>, id: &str) -> anyhow::Result<LineRow> {
     .with_context(|| format!("statement line {id} not found"))
 }
 
-/// Import selected lines into `is_draft = 1` transactions.
+/// Import selected lines into final transactions.
 ///
 /// Idempotent by construction: every transaction id is a UUID v5 over the
 /// line/pair identity, inserts use `ON CONFLICT DO NOTHING`, and a tombstoned
@@ -997,7 +997,36 @@ fn import_single(
             .as_deref()
             .or(statement_counterpart_override);
         let counterpart_id =
-            resolve_counterpart_account(tx, statement, &account_id, counterpart_override, now)?;
+            resolve_counterpart_account(tx, &account_id, counterpart_override)?;
+        let Some(counterpart_id) = counterpart_id else {
+            // No counterpart the user ever mapped: money moving with the
+            // outside world, not between own accounts. Book it as a plain
+            // expense (money leaving the account) or income (arriving from
+            // outside) instead of a transfer to an invented account.
+            let fallback = if line.amount < 0.0 {
+                SuggestedType::Expense
+            } else {
+                SuggestedType::Income
+            };
+            let id = stable_uuid(TRANSACTION_NS, &format!("line:{}", line.dedupe_key));
+            let rate = rate_for(tx, &line.currency_code, base_currency, line.posted_at)?;
+            create_transaction(
+                tx,
+                &id,
+                fallback.as_str(),
+                line.amount.abs(),
+                &line.currency_code,
+                rate,
+                &account_id,
+                None,
+                category.as_deref(),
+                line.posted_at,
+                &line.description,
+                now,
+            )?;
+            mark_imported(tx, &line.id, &id, now)?;
+            return Ok(id);
+        };
         let id = stable_uuid(TRANSACTION_NS, &format!("line:{}", line.dedupe_key));
         let rate = rate_for(tx, &line.currency_code, base_currency, line.posted_at)?;
         create_transaction(
@@ -1116,8 +1145,10 @@ fn mark_imported(
     Ok(())
 }
 
-/// Create a draft transaction. `ON CONFLICT DO NOTHING` makes re-import a
-/// no-op; a tombstoned row is reported rather than revived.
+/// Create a final transaction (the user already approved these lines in the
+/// review screen, so they book immediately — no draft state to reconcile
+/// later). `ON CONFLICT DO NOTHING` makes re-import a no-op; a tombstoned row
+/// is reported rather than revived.
 #[allow(clippy::too_many_arguments)]
 fn create_transaction(
     tx: &Transaction<'_>,
@@ -1139,7 +1170,7 @@ fn create_transaction(
             (id, type, amount, currency_code, amount_base, rate_used, account_id,
              to_account_id, category, date, note, receipt_id, is_draft,
              created_at, updated_at, deleted_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,NULL,1,?12,?12,NULL)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,NULL,0,?12,?12,NULL)
          ON CONFLICT(id) DO NOTHING",
         params![
             id,
@@ -1239,44 +1270,26 @@ fn resolve_account(
     Ok(Some(id))
 }
 
+/// The counterpart of a transfer-imported line, when the user mapped one.
+///
+/// Without an explicit mapping there is no counterpart: the caller books the
+/// line as a plain expense/income on the source account instead. An earlier
+/// version invented an `<account name> (external)` placeholder here, which
+/// multiplied real accounts by ones the user never created and turned
+/// other-people payments into self-transfers.
 fn resolve_counterpart_account(
     tx: &Transaction<'_>,
-    statement: &StatementRow,
     source_account: &str,
     override_id: Option<&str>,
-    now: i64,
-) -> anyhow::Result<String> {
-    if let Some(id) = override_id {
-        ensure_account_live(tx, id)?;
-        if id == source_account {
-            bail!("transfer source and destination are the same account");
-        }
-        return Ok(id.to_string());
-    }
-    // With no explicit counterpart, use a stable "external" account so the
-    // transaction still balances instead of crediting nowhere.
-    let id = stable_uuid(
-        ACCOUNT_NS,
-        &format!("account:{}:external", statement.source),
-    );
-    tx.execute(
-        "INSERT INTO accounts
-            (id, name, type, opening_balance, note, created_at, updated_at,
-             deleted_at, source, external_id)
-         VALUES (?1,?2,'other',0.0,NULL,?3,?3,NULL,?4,'external')
-         ON CONFLICT(id) DO NOTHING",
-        params![
-            id,
-            format!("{} (external)", statement.account_name),
-            now,
-            statement.source,
-        ],
-    )?;
-    ensure_account_live(tx, &id)?;
+) -> anyhow::Result<Option<String>> {
+    let Some(id) = override_id else {
+        return Ok(None);
+    };
+    ensure_account_live(tx, id)?;
     if id == source_account {
         bail!("transfer source and destination are the same account");
     }
-    Ok(id)
+    Ok(Some(id.to_string()))
 }
 
 fn account_exists(tx: &Transaction<'_>, id: &str) -> anyhow::Result<bool> {
