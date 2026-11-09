@@ -2370,6 +2370,88 @@ async fn upload_receipt_files(files: Vec<ReceiptDrop>) -> CommandResult<Vec<serd
     }
 }
 
+/// Saves edits to one account — name, type, opening balance and note — the
+/// transaction ledger itself is untouched, so every balance shifts cleanly:
+/// `compute_current_balance` adds the net of transactions on top of whatever
+/// the opening balance now is.
+///
+/// The desktop database is read-only, so the edit travels server-ward as a
+/// client-wins push of the whole row (the shape `handlers::push::AccountPush`
+/// expects); the server's upsert ignores `source`/`external_id` on conflict,
+/// keeping statement-linked accounts wired to their provider.
+#[tauri::command]
+async fn save_account(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    name: String,
+    account_type: String,
+    opening_balance: f64,
+    note: String,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(CommandResult {
+            success: false,
+            data: None,
+            error: Some("Account name cannot be empty".to_string()),
+        });
+    }
+    if !opening_balance.is_finite() {
+        return Ok(CommandResult {
+            success: false,
+            data: None,
+            error: Some("Opening balance must be a number".to_string()),
+        });
+    }
+
+    // Short-lived read: only what the push payload needs; no guard across an await.
+    let row: Option<(String, i64, Option<i64>)> = {
+        let conn = state.db.lock().map_err(|e| format!("{e}"))?;
+        conn.query_row(
+            "SELECT type, created_at, deleted_at FROM accounts WHERE id = ?1",
+            rusqlite::params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok()
+    };
+    let Some((old_type, created_at, deleted_at)) = row else {
+        return Ok(CommandResult {
+            success: false,
+            data: None,
+            error: Some(format!("Account {id} not found")),
+        });
+    };
+    if deleted_at.is_some() {
+        return Ok(CommandResult {
+            success: false,
+            data: None,
+            error: Some("Account is deleted".to_string()),
+        });
+    }
+
+    let body = serde_json::json!({
+        "accounts": [{
+            "id": id,
+            "name": trimmed,
+            "type": if account_type.trim().is_empty() { old_type.as_str() } else { account_type.trim() },
+            "openingBalance": opening_balance,
+            "note": if note.trim().is_empty() { serde_json::Value::Null } else { serde_json::Value::String(note.trim().to_string()) },
+            "createdAt": created_at,
+            "deletedAt": deleted_at,
+        }],
+        "deleted": [],
+    });
+    let _ = api::post::<_, serde_json::Value>("/accounts", &body)
+        .await
+        .map_err(|e| e.to_message())?;
+
+    Ok(CommandResult {
+        success: true,
+        data: Some(serde_json::json!({"saved": true})),
+        error: None,
+    })
+}
+
 /// Epoch-milliseconds from the OCR date text, whatever shape it came in
 /// (RFC 3339, both naive splits, or a bare date), falling back to
 /// [fallback_ms]. Noon on a bare date — a receipt is a daytime artifact.
@@ -4315,6 +4397,7 @@ pub fn run() {
             get_base_currency,
             upload_receipt_files,
             create_receipt_transaction,
+            save_account,
             list_fx_rates,
             exercise_progression,
             exercise_volume,

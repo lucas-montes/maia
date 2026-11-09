@@ -20,6 +20,11 @@ const SOURCE_LABELS: Record<string, string> = {
   firstrade: "Firstrade",
 };
 
+/** Account types, matching what the budget accounts push accepts and the
+ *  phone's `AccountType` understands; the list keeps the account's current
+ *  type visible even when it is outside this set. */
+const ACCOUNT_TYPES = ["bank", "savings", "investment", "cash", "credit", "other"];
+
 /** Amount with its currency code, signed for the account the row belongs to.
  *  Income and inbound transfers show `+`; expenses and outbound transfers
  *  show `−`; rows already in base currency use their base amount, foreign
@@ -55,6 +60,8 @@ export function mount(root: HTMLElement): () => void {
   /** Open account detail; `null` shows the list. Local to the view (like the
    *  statements view's state) so re-renders keep the selection alive. */
   let selectedId: string | null = null;
+  /** The account whose edit panel is open, when one is. */
+  let editingAccountId: string | null = null;
   let baseCurrency = "EUR";
   let statementItems: StatementSummary[] = [];
   let transactionItems: FinanceTransaction[] = [];
@@ -188,9 +195,47 @@ export function mount(root: HTMLElement): () => void {
       </div>`;
   }
 
+  function editPanelHtml(ac: FinanceAccount): string {
+    const types = [...new Set([...ACCOUNT_TYPES, ac.type])];
+    return `
+      <div class="mt-3 space-y-3 border-t border-surface-800 pt-3">
+        <div class="grid grid-cols-2 gap-3 text-sm">
+          <label class="space-y-1">
+            <span class="text-xs text-ink-500">Name</span>
+            <input class="input input-bordered input-sm w-full" data-edit-field="name" value="${escapeHtml(ac.name)}" />
+          </label>
+          <label class="space-y-1">
+            <span class="text-xs text-ink-500">Type</span>
+            <select class="select select-bordered select-sm w-full" data-edit-field="type">
+              ${types
+                .map(
+                  (t) =>
+                    `<option value="${escapeHtml(t)}" ${t === ac.type ? "selected" : ""}>${escapeHtml(t)}</option>`,
+                )
+                .join("")}
+            </select>
+          </label>
+          <label class="space-y-1">
+            <span class="text-xs text-ink-500">Opening balance (${escapeHtml(baseCurrency)})</span>
+            <input class="input input-bordered input-sm w-full font-mono" type="number" step="0.01" data-edit-field="opening" value="${ac.openingBalance}" />
+          </label>
+          <label class="space-y-1">
+            <span class="text-xs text-ink-500">Note</span>
+            <input class="input input-bordered input-sm w-full" data-edit-field="note" value="${escapeHtml(ac.note ?? "")}" />
+          </label>
+        </div>
+        <p class="text-xs text-ink-500">Every balance on this account shifts by the same amount: the ledger is untouched, the opening balance is what changes.</p>
+        <div class="flex justify-end gap-2">
+          <button class="btn btn-ghost btn-sm" type="button" data-action="account-edit-cancel">Cancel</button>
+          <button class="btn btn-primary btn-sm" type="button" data-action="account-edit-save" data-account-id="${escapeHtml(ac.id)}">Save</button>
+        </div>
+      </div>`;
+  }
+
   function detailHtml(ac: FinanceAccount): string {
     const source = ac.source ? SOURCE_LABELS[ac.source] ?? ac.source : null;
     const negative = ac.balance < 0;
+    const editing = editingAccountId === ac.id;
     return `
       <div class="min-h-0 flex-1 space-y-4 overflow-auto">
         <button class="btn btn-ghost btn-sm" type="button" data-action="accounts-back">← Back to accounts</button>
@@ -200,7 +245,11 @@ export function mount(root: HTMLElement): () => void {
             <h3 class="text-base font-medium text-ink-100">${escapeHtml(ac.name)}</h3>
             <span class="badge badge-ghost badge-xs">${escapeHtml(ac.type)}</span>
             ${source ? `<span class="badge badge-xs badge-outline">${escapeHtml(source)}</span>` : ""}
+            ${!editing ? `<button class="btn btn-ghost btn-xs ml-auto" type="button" data-action="account-edit" data-account-id="${escapeHtml(ac.id)}">
+              <i data-lucide="pencil" class="h-3.5 w-3.5"></i> Edit
+            </button>` : ""}
           </div>
+          ${editing ? editPanelHtml(ac) : ""}
           <div class="grid grid-cols-2 gap-3 text-sm">
             <div><span class="text-ink-500">Current balance:</span> <span class="font-mono ${negative ? "text-err-400" : "text-ok-400"}">${ac.balance < 0 ? "−" : ""}${headlineBalance(Math.abs(ac.balance))} ${escapeHtml(baseCurrency)}</span></div>
             <div><span class="text-ink-500">Opening balance:</span> <span class="font-mono text-ink-300">${headlineBalance(ac.openingBalance)} ${escapeHtml(baseCurrency)}</span></div>
@@ -379,8 +428,65 @@ export function mount(root: HTMLElement): () => void {
     if (periodButton?.dataset.period) {
       seriesPeriod = periodButton.dataset.period as Period;
       render();
+      return;
+    }
+    if (target.closest("[data-action='account-edit']")) {
+      editingAccountId = target.closest<HTMLElement>("[data-account-id]")?.dataset.accountId ?? null;
+      render();
+      return;
+    }
+    if (target.closest("[data-action='account-edit-cancel']")) {
+      editingAccountId = null;
+      render();
+      return;
+    }
+    const saveButton = target.closest<HTMLElement>("[data-action='account-edit-save']");
+    if (saveButton?.dataset.accountId) {
+      void saveAccountEdits(saveButton.dataset.accountId);
     }
   });
+
+  /** Reads the open edit panel, validates it client-side, and pushes the
+   *  change server-ward. Reuses `load()` so the new balance/name arrive the
+   *  same way the page first got its data. */
+  const saveAccountEdits = async (id: string): Promise<void> => {
+    const nameEl = root.querySelector<HTMLInputElement>("[data-edit-field='name']");
+    const openingEl = root.querySelector<HTMLInputElement>("[data-edit-field='opening']");
+    if (!nameEl || !openingEl) return;
+    const name = nameEl.value.trim();
+    if (!name) {
+      accountsAtom.set({ ...accountsAtom.get(), status: "error", message: "Account name cannot be empty" });
+      return;
+    }
+    const opening = Number(openingEl.value.trim());
+    if (!Number.isFinite(opening)) {
+      accountsAtom.set({ ...accountsAtom.get(), status: "error", message: "Opening balance must be a number" });
+      return;
+    }
+    const typeEl = root.querySelector<HTMLSelectElement>("[data-edit-field='type']");
+    const noteEl = root.querySelector<HTMLInputElement>("[data-edit-field='note']");
+    accountsAtom.set({ ...accountsAtom.get(), status: "saving", message: "" });
+    try {
+      const res = await api.saveAccount({
+        id,
+        name,
+        accountType: typeEl?.value ?? "",
+        openingBalance: opening,
+        note: noteEl?.value ?? "",
+      });
+      if (!res.success) {
+        accountsAtom.set({ ...accountsAtom.get(), status: "error", message: res.error ?? "Could not save the account" });
+        return;
+      }
+      editingAccountId = null;
+      // `load()` re-renders with its own status; the confirmation must land
+      // after it, and the atom subscription carries it to the banner.
+      await load();
+      accountsAtom.set({ ...accountsAtom.get(), status: "saved", message: "Account saved" });
+    } catch (e) {
+      accountsAtom.set({ ...accountsAtom.get(), status: "error", message: String(e) });
+    }
+  };
 
   void load();
   void loadTransactionsAndStatements();
