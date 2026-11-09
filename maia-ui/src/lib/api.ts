@@ -700,16 +700,20 @@ export const api = {
     files: { name: string; data: string }[],
   ) => invoke<Envelope<string[]>>("add_statement_files", { source, files }),
 
-  /** Saves name/type/opening-balance/note edits for one account (client-wins
-   *  push; the server ignores its source/external_id on update). The ledger
-   *  is untouched — balances shift by the new opening balance. */
+  /** Saves name/type/note edits for one account (client-wins push; the
+   *  server ignores its source/external_id on update). [currentBalance] is
+   *  what the account holds today — the command derives the stored opening
+   *  balance from it and the ledger's net, and returns that opening. */
   saveAccount: (args: {
     id: string;
     name: string;
     accountType: string;
-    openingBalance: number;
+    currentBalance: number;
     note: string;
-  }) => invoke<Envelope<{ saved: boolean }>>("save_account", args),
+  }) => invoke<Envelope<{ saved: boolean; openingBalance: number; net: number }>>(
+    "save_account",
+    args,
+  ),
 
   /** Uploads one or many picked receipt pictures to the server's OCR
    *  endpoint, one request per file, and reports per-file: `id` when the

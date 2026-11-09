@@ -1775,13 +1775,22 @@ fn compute_current_balance(conn: &Connection, account_id: &str) -> Result<f64, S
             rusqlite::Error::QueryReturnedNoRows => "Account not found".to_string(),
             e => format!("{e}"),
         })?;
+    Ok(opening + account_net_effect(conn, account_id)?)
+}
+
+/// The net effect of every live transaction that touches one account —
+/// income and inbound transfers add, expenses and outbound transfers
+/// subtract, each at [amount_base]. The shared accounting between the list
+/// view's prices and re-basing an account on its *current* balance: the
+/// distance from opening, both directions.
+fn account_net_effect(conn: &Connection, account_id: &str) -> Result<f64, String> {
     let mut stmt = conn
         .prepare(
             "SELECT type, amount_base, account_id, to_account_id FROM transactions \
              WHERE deleted_at IS NULL AND (account_id = ?1 OR to_account_id = ?1)",
         )
         .map_err(|e| format!("{e}"))?;
-    let mut balance = opening;
+    let mut net = 0.0;
     let mut rows = stmt
         .query(params![account_id])
         .map_err(|e| format!("{e}"))?;
@@ -1791,20 +1800,20 @@ fn compute_current_balance(conn: &Connection, account_id: &str) -> Result<f64, S
         let from: Option<String> = row.get(2).map_err(|e| format!("{e}"))?;
         let to: Option<String> = row.get(3).map_err(|e| format!("{e}"))?;
         match type_.as_str() {
-            "income" if from.as_deref() == Some(account_id) => balance += amount_base,
-            "expense" if from.as_deref() == Some(account_id) => balance -= amount_base,
+            "income" if from.as_deref() == Some(account_id) => net += amount_base,
+            "expense" if from.as_deref() == Some(account_id) => net -= amount_base,
             "transfer" => {
                 if from.as_deref() == Some(account_id) {
-                    balance -= amount_base;
+                    net -= amount_base;
                 }
                 if to.as_deref() == Some(account_id) {
-                    balance += amount_base;
+                    net += amount_base;
                 }
             }
             _ => {}
         }
     }
-    Ok(balance)
+    Ok(net)
 }
 
 /// Loads one account's opening balance and every transaction that touches it
@@ -2370,10 +2379,15 @@ async fn upload_receipt_files(files: Vec<ReceiptDrop>) -> CommandResult<Vec<serd
     }
 }
 
-/// Saves edits to one account — name, type, opening balance and note — the
-/// transaction ledger itself is untouched, so every balance shifts cleanly:
-/// `compute_current_balance` adds the net of transactions on top of whatever
-/// the opening balance now is.
+/// Saves edits to one account — name, type, note, and **the current balance
+/// the account holds today**, which is what a person actually knows; the
+/// opening balance is not asked for anywhere.
+///
+/// The stored opening balance is derived: it becomes the typed current
+/// balance minus the net effect of the account's live transactions, so the
+/// ledger is untouched and every figure computed from opening + net — the
+/// list badge, the detail page, the balance chart — lands exactly on the
+/// number the user typed.
 ///
 /// The desktop database is read-only, so the edit travels server-ward as a
 /// client-wins push of the whole row (the shape `handlers::push::AccountPush`
@@ -2385,7 +2399,7 @@ async fn save_account(
     id: String,
     name: String,
     account_type: String,
-    opening_balance: f64,
+    current_balance: f64,
     note: String,
 ) -> Result<CommandResult<serde_json::Value>, String> {
     let trimmed = name.trim().to_string();
@@ -2396,38 +2410,42 @@ async fn save_account(
             error: Some("Account name cannot be empty".to_string()),
         });
     }
-    if !opening_balance.is_finite() {
+    if !current_balance.is_finite() {
         return Ok(CommandResult {
             success: false,
             data: None,
-            error: Some("Opening balance must be a number".to_string()),
+            error: Some("Current balance must be a number".to_string()),
         });
     }
 
-    // Short-lived read: only what the push payload needs; no guard across an await.
-    let row: Option<(String, i64, Option<i64>)> = {
+    // Short-lived read lock: row facts plus the net that re-bases the
+    // opening balance; nothing held across the awaits below.
+    let (old_type, created_at, deleted_at, opening_balance, net) = {
         let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-        conn.query_row(
-            "SELECT type, created_at, deleted_at FROM accounts WHERE id = ?1",
-            rusqlite::params![id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .ok()
+        let row: Option<(String, i64, Option<i64>)> = conn
+            .query_row(
+                "SELECT type, created_at, deleted_at FROM accounts WHERE id = ?1",
+                rusqlite::params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok();
+        let Some((old_type, created_at, deleted_at)) = row else {
+            return Ok(CommandResult {
+                success: false,
+                data: None,
+                error: Some(format!("Account {id} not found")),
+            });
+        };
+        if deleted_at.is_some() {
+            return Ok(CommandResult {
+                success: false,
+                data: None,
+                error: Some("Account is deleted".to_string()),
+            });
+        }
+        let net = account_net_effect(&conn, &id)?;
+        (old_type, created_at, deleted_at, current_balance - net, net)
     };
-    let Some((old_type, created_at, deleted_at)) = row else {
-        return Ok(CommandResult {
-            success: false,
-            data: None,
-            error: Some(format!("Account {id} not found")),
-        });
-    };
-    if deleted_at.is_some() {
-        return Ok(CommandResult {
-            success: false,
-            data: None,
-            error: Some("Account is deleted".to_string()),
-        });
-    }
 
     let body = serde_json::json!({
         "accounts": [{
@@ -2447,7 +2465,7 @@ async fn save_account(
 
     Ok(CommandResult {
         success: true,
-        data: Some(serde_json::json!({"saved": true})),
+        data: Some(serde_json::json!({"saved": true, "openingBalance": opening_balance, "net": net})),
         error: None,
     })
 }

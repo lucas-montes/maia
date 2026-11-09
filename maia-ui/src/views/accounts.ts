@@ -216,15 +216,15 @@ export function mount(root: HTMLElement): () => void {
             </select>
           </label>
           <label class="space-y-1">
-            <span class="text-xs text-ink-500">Opening balance (${escapeHtml(baseCurrency)})</span>
-            <input class="input input-bordered input-sm w-full font-mono" type="number" step="0.01" data-edit-field="opening" value="${ac.openingBalance}" />
+            <span class="text-xs text-ink-500">Current balance (${escapeHtml(baseCurrency)})</span>
+            <input class="input input-bordered input-sm w-full font-mono" type="number" step="0.01" data-edit-field="balance" value="${Number(ac.balance.toFixed(2))}" />
           </label>
           <label class="space-y-1">
             <span class="text-xs text-ink-500">Note</span>
             <input class="input input-bordered input-sm w-full" data-edit-field="note" value="${escapeHtml(ac.note ?? "")}" />
           </label>
         </div>
-        <p class="text-xs text-ink-500">Every balance on this account shifts by the same amount: the ledger is untouched, the opening balance is what changes.</p>
+        <p class="text-xs text-ink-500">You set what the account holds today; the opening balance is derived from it and the net of this account's transactions.</p>
         <div class="flex justify-end gap-2">
           <button class="btn btn-ghost btn-sm" type="button" data-action="account-edit-cancel">Cancel</button>
           <button class="btn btn-primary btn-sm" type="button" data-action="account-edit-save" data-account-id="${escapeHtml(ac.id)}">Save</button>
@@ -453,16 +453,16 @@ export function mount(root: HTMLElement): () => void {
    *  same way the page first got its data. */
   const saveAccountEdits = async (id: string): Promise<void> => {
     const nameEl = root.querySelector<HTMLInputElement>("[data-edit-field='name']");
-    const openingEl = root.querySelector<HTMLInputElement>("[data-edit-field='opening']");
-    if (!nameEl || !openingEl) return;
+    const balanceEl = root.querySelector<HTMLInputElement>("[data-edit-field='balance']");
+    if (!nameEl || !balanceEl) return;
     const name = nameEl.value.trim();
     if (!name) {
       accountsAtom.set({ ...accountsAtom.get(), status: "error", message: "Account name cannot be empty" });
       return;
     }
-    const opening = Number(openingEl.value.trim());
-    if (!Number.isFinite(opening)) {
-      accountsAtom.set({ ...accountsAtom.get(), status: "error", message: "Opening balance must be a number" });
+    const currentBalance = Number(balanceEl.value.trim());
+    if (!Number.isFinite(currentBalance)) {
+      accountsAtom.set({ ...accountsAtom.get(), status: "error", message: "Current balance must be a number" });
       return;
     }
     const typeEl = root.querySelector<HTMLSelectElement>("[data-edit-field='type']");
@@ -473,7 +473,7 @@ export function mount(root: HTMLElement): () => void {
         id,
         name,
         accountType: typeEl?.value ?? "",
-        openingBalance: opening,
+        currentBalance,
         note: noteEl?.value ?? "",
       });
       if (!res.success) {
@@ -481,10 +481,15 @@ export function mount(root: HTMLElement): () => void {
         return;
       }
       editingAccountId = null;
-      // `load()` re-renders with its own status; the confirmation must land
-      // after it, and the atom subscription carries it to the banner.
+      // `load()` re-renders with its own status; the confirmation lands
+      // after it (the atom subscription carries it to the banner), naming
+      // the derived opening so the swap is visible, not magic.
       await load();
-      accountsAtom.set({ ...accountsAtom.get(), status: "saved", message: "Account saved" });
+      accountsAtom.set({
+        ...accountsAtom.get(),
+        status: "saved",
+        message: `Account saved — opening balance set to ${headlineBalance(res.data?.openingBalance ?? 0)} ${baseCurrency}`,
+      });
     } catch (e) {
       accountsAtom.set({ ...accountsAtom.get(), status: "error", message: String(e) });
     }
