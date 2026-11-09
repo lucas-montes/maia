@@ -2441,7 +2441,7 @@ async fn save_account(
         }],
         "deleted": [],
     });
-    let _ = api::post::<_, serde_json::Value>("/accounts", &body)
+    let _ = api::post::<_, serde_json::Value>("/budget-accounts", &body)
         .await
         .map_err(|e| e.to_message())?;
 
