@@ -39,7 +39,8 @@ base64 = "0.22"
 uuid = { version = "1.0", features = ["v4", "v7", "serde"] }
 maia = { path = "../.." }
 # Default features off: the sync server is reached over plain HTTP on loopback,
-# so pulling in a TLS stack would be dead weight in the binary.
-reqwest = { version = "0.12", default-features = false }
+# so pulling in a TLS stack would be dead weight in the binary. Multipart is on
+# for the receipt import, which POSTs image files to the OCR endpoint.
+reqwest = { version = "0.12", default-features = false, features = ["multipart"] }
 tokio = { version = "1", features = ["rt", "sync"] }
 

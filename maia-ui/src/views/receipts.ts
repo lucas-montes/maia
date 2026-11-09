@@ -177,10 +177,17 @@ function lineItemsHtml(r: Receipt): string {
     </div>`;
 }
 
-/** Receipts — list, detail pane with lazily loaded image, archive/restore. */
+/** Receipts — list, detail pane with lazily loaded image, archive/restore.
+ *  The header carries the import form: pick one or many receipt pictures,
+ *  they upload to the server's OCR endpoint, parse, and each lands a draft
+ *  expense once its parse succeeds. */
 export function mount(root: HTMLElement): () => void {
-  root.innerHTML = `<div data-slot="content"></div>`;
+  root.innerHTML = `
+    <div data-slot="content"></div>
+    <input type="file" accept="image/*" multiple hidden data-import-input />
+  `;
   const content = root.querySelector("[data-slot='content']") as HTMLElement;
+  const importInput = root.querySelector<HTMLInputElement>("[data-import-input]") as HTMLInputElement;
 
   const render = (): void => {
     const s = receiptsAtom.get();
@@ -203,6 +210,10 @@ export function mount(root: HTMLElement): () => void {
           ${statusBanner(s)}
           <div class="flex items-center justify-between">
             <span class="text-sm text-ink-400">${s.items.length} receipt${s.items.length !== 1 ? "s" : ""}</span>
+            <button class="btn btn-secondary btn-sm" type="button" data-action="import-receipts">
+              <i data-lucide="image-plus" class="h-4 w-4"></i>
+              Import receipts
+            </button>
           </div>
           ${listHtml(s.items, s.selectedId)}
           <div>${backToDashboard()}</div>
@@ -315,6 +326,11 @@ export function mount(root: HTMLElement): () => void {
       receiptsAtom.set({ ...receiptsAtom.get(), selectedId: null });
       return;
     }
+    if (target.closest("[data-action='import-receipts']")) {
+      importInput.value = "";
+      importInput.click();
+      return;
+    }
     const archiveBtn = target.closest<HTMLElement>("[data-action='archive-receipt']");
     if (archiveBtn?.dataset.receiptId) void archive(archiveBtn.dataset.receiptId);
     const restoreBtn = target.closest<HTMLElement>("[data-action='restore-receipt']");
@@ -326,10 +342,167 @@ export function mount(root: HTMLElement): () => void {
       if (r && item) void openMatchModal(r, item);
     }
   });
+  importInput.addEventListener("change", () => {
+    void importFiles(Array.from(importInput.files ?? []));
+  });
 
   void list();
   const unsub = receiptsAtom.subscribe(render);
   return unsub;
+}
+
+/** Upload → OCR poll → draft-expense creation, narrated on the view's banner.
+ *
+ *  One pick can carry many pictures; each is its own HTTP request (the OCR
+ *  endpoint takes a single file part), so results are counted per receipt.
+ *  The rows land in the shared database the moment the server accepts an
+ *  upload, so the list refreshes live while parsing — the poll just watches
+ *  for each receipt to reach a terminal parse state (like the phone does
+ *  against `/:id/parse`), then creates the draft expense a parsed total
+ *  stands for. */
+const importFiles = async (picked: File[]): Promise<void> => {
+  if (picked.length === 0) return;
+  const plural = (n: number): string => `${n} receipt${n !== 1 ? "s" : ""}`;
+  receiptsAtom.set({
+    ...receiptsAtom.get(),
+    status: "saving",
+    message: `Uploading ${plural(picked.length)}...`,
+  });
+
+  const drops = await Promise.all(
+    picked.map(async (f) => ({
+      name: f.name,
+      data: await readReceiptFileAsDataURL(f),
+    })),
+  );
+  const uploaded = await api.uploadReceiptFiles(drops);
+  if (!uploaded.success || !uploaded.data) {
+    receiptsAtom.set({
+      ...receiptsAtom.get(),
+      status: "error",
+      message: uploaded.error ?? "Receipt upload failed",
+    });
+    return;
+  }
+  const imported = uploaded.data.filter((r) => r.id);
+  const uploadFailed = uploaded.data.filter((r) => !r.id).map((r) => `${r.name}: ${r.error}`);
+  if (imported.length === 0) {
+    receiptsAtom.set({
+      ...receiptsAtom.get(),
+      status: "error",
+      message: `No receipt was imported — ${uploadFailed.join("; ")}`,
+    });
+    return;
+  }
+  const ids = imported.map((r) => r.id as string);
+
+  // Refreshes the list without touching the banner (poll loop does the talking).
+  const refreshQuiet = async (message: string): Promise<boolean> => {
+    try {
+      const res = await api.listReceipts();
+      if (res.success && res.data) {
+        const current = receiptsAtom.get();
+        const selected = current.selectedId
+          ? res.data.find((r) => r.id === current.selectedId) ?? null
+          : null;
+        receiptsAtom.set({
+          items: res.data,
+          selectedId: selected?.id ?? null,
+          status: "saving",
+          message,
+        });
+        return true;
+      }
+    } catch {
+      // A poll failure must not kill the import; the next tick retries.
+    }
+    return false;
+  };
+
+  const deadline = Date.now() + 120_000;
+  const unresolved = new Set(ids);
+  /** Upload responses already account for every receipt; parse result is
+   *  tracked here: value = final `parseError` text when resolved, null when
+   *  the poll ran out before the OCR did. */
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  const parseOutcome = new Map<string, string | null>();
+  while (Date.now() < deadline && unresolved.size > 0) {
+    await sleep(3000);
+    const message = `Parsing ${plural(unresolved.size)}...`;
+    await refreshQuiet(message);
+    const rows = receiptsAtom.get().items;
+    for (const id of [...unresolved]) {
+      const row = rows.find((r) => r.id === id);
+      if (!row) continue;
+      if (row.parsed || row.parseError) {
+        parseOutcome.set(id, row.parseError);
+        unresolved.delete(id);
+      }
+    }
+  }
+  for (const id of unresolved) parseOutcome.set(id, null);
+
+  // A parsed receipt with no transaction yet gets its draft expense now.
+  let booked = 0;
+  const linkFailed: string[] = [];
+  const rows = receiptsAtom.get().items;
+  for (const id of ids) {
+    const row = rows.find((r) => r.id === id);
+    if (!row?.parsed || row.transactionId) continue;
+    try {
+      const res = await api.createReceiptTransaction(id);
+      if (res.success) {
+        if (res.data?.created) booked++;
+      } else {
+        linkFailed.push(res.error ?? "unknown error");
+      }
+    } catch (e) {
+      linkFailed.push(String(e));
+    }
+  }
+
+  await refreshQuiet("");
+  const parseFailed = [...parseOutcome.entries()]
+    .filter(([, err]) => err !== null)
+    .map(([id, err]) => `${idShort(id)}: ${err}`);
+  const notes = [
+    ...(parseFailed.length ? [`${plural(parseFailed.length)} did not parse (${parseFailed.join("; ")})`] : []),
+    ...(unresolvedCount(parseOutcome) > 0
+      ? [`${plural(unresolvedCount(parseOutcome))} still parsing`]
+      : []),
+    ...(uploadFailed.length ? [`uploads failed: ${uploadFailed.join("; ")}`] : []),
+    ...(linkFailed.length ? [`could not be booked: ${linkFailed.join("; ")}`] : []),
+  ];
+  receiptsAtom.set({
+    ...receiptsAtom.get(),
+    status: notes.length ? "idle" : "saved",
+    message:
+      booked > 0
+        ? `Imported ${plural(booked)} — draft expenses created${notes.length ? ` · ${notes.join(" · ")}` : ""}`
+        : notes.length
+          ? notes.join(" · ")
+          : "Receipts imported",
+  });
+};
+
+/** Short label for a receipt id in the summary line. */
+function idShort(id: string): string {
+  return id.slice(0, 8);
+}
+
+function unresolvedCount(parseOutcome: Map<string, string | null>): number {
+  return [...parseOutcome.values()].filter((v) => v === null).length;
+}
+
+/** Reads a picked file as its data URL; the upload command strips the
+ *  base64 wrapper. */
+function readReceiptFileAsDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error(`could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -223,8 +223,8 @@ async fn run_ocr(
             let json_text = serde_json::to_string(&parsed).unwrap_or_default();
             let conn = db_pool.get().unwrap();
             let _ = conn.execute(
-                "UPDATE receipts SET parsed = 1, parsed_json = ?1, parse_error = NULL, updated_at = ?2 WHERE id = ?3",
-                rusqlite::params![json_text, now, id],
+                "UPDATE receipts SET parsed = 1, parsed_json = ?1, parse_error = NULL, upload_status = ?2, updated_at = ?3 WHERE id = ?4",
+                rusqlite::params![json_text, UPLOAD_STATUS_UPLOADED, now, id],
             );
             Ok(())
         }

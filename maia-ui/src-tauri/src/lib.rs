@@ -2309,6 +2309,279 @@ fn add_statement_files(source: String, files: Vec<StatementDrop>) -> CommandResu
     }
 }
 
+/// One receipt file the import form picked, base64 as `FileReader` produced it.
+#[derive(serde::Deserialize)]
+struct ReceiptDrop {
+    name: String,
+    data: String,
+}
+
+/// Uploads one or many receipt pictures to the server's OCR endpoint.
+///
+/// One HTTP request per file — the endpoint keeps a single file part, so
+/// "many receipts" cannot ride one body. Results are per-name: a failing
+/// upload reports there (with the decode error, or the server's own message
+/// such as "ocr not configured") instead of failing the whole batch.
+#[tauri::command]
+async fn upload_receipt_files(files: Vec<ReceiptDrop>) -> CommandResult<Vec<serde_json::Value>> {
+    use base64::Engine as _;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for file in files {
+        let upload = match engine.decode(api::strip_data_url(&file.data).as_bytes()) {
+            Ok(bytes) => api::UploadFile {
+                name: file.name.clone(),
+                bytes,
+            },
+            Err(e) => {
+                results.push(serde_json::json!({
+                    "name": file.name, "id": null,
+                    "error": format!("could not decode the image: {e}"),
+                }));
+                continue;
+            }
+        };
+        match api::post_multipart::<serde_json::Value>("/receipt-pictures/upload", &[], &upload)
+            .await
+        {
+            Ok(response) => {
+                let id = response
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if id.is_some() {
+                    results.push(serde_json::json!({"name": file.name, "id": id, "error": null}));
+                } else {
+                    results.push(serde_json::json!({
+                        "name": file.name, "id": null,
+                        "error": "upload succeeded but the response carried no receipt id",
+                    }));
+                }
+            }
+            Err(error) => results.push(
+                serde_json::json!({"name": file.name, "id": null, "error": error.to_message()}),
+            ),
+        }
+    }
+    CommandResult {
+        success: true,
+        data: Some(results),
+        error: None,
+    }
+}
+
+/// Epoch-milliseconds from the OCR date text, whatever shape it came in
+/// (RFC 3339, both naive splits, or a bare date), falling back to
+/// [fallback_ms]. Noon on a bare date — a receipt is a daytime artifact.
+fn parse_receipt_date(text: &str, fallback_ms: i64) -> i64 {
+    let text = text.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
+        return dt.timestamp_millis();
+    }
+    for format in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"] {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(text, format) {
+            return dt.and_utc().timestamp_millis();
+        }
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(text, format) {
+            if let Some(dt) = date.and_hms_opt(12, 0, 0) {
+                return dt.and_utc().timestamp_millis();
+            }
+        }
+    }
+    fallback_ms
+}
+
+/// `YYYY-MM-DD` for the FX-rate lookup, on UTC days.
+fn rate_date_of(timestamp_ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(timestamp_ms)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
+}
+
+/// The newest rate of [code] against [base] on or before the receipt's day —
+/// the same rule the server's statement import applies. 1.0 when the currency
+/// is already the base, or when none is recorded: a missing rate must not
+/// block the expense from existing (matching mobile's fallback).
+fn rate_to_base(conn: &rusqlite::Connection, code: &str, base: &str, date: &str) -> f64 {
+    if code.eq_ignore_ascii_case(base) {
+        return 1.0;
+    }
+    conn.query_row(
+        "SELECT rate_to_base FROM fx_rates
+         WHERE code=?1 AND base_code=?2 AND rate_date<=?3 AND deleted_at IS NULL
+         ORDER BY rate_date DESC LIMIT 1",
+        rusqlite::params![code, base, date],
+        |r| r.get::<_, f64>(0),
+    )
+    .unwrap_or(1.0)
+}
+
+/// Creates the draft expense a parsed receipt stands for, and links the
+/// receipt to it — the same capture flow the phone performs locally
+/// (upload → OCR → draft), except the transaction is pushed through the
+/// server, the only writer.
+///
+/// Idempotent: an already-linked receipt is reported untouched, and one whose
+/// linking push failed is re-linked to the transaction the first attempt
+/// founded (found by `receipt_id`) rather than a second one being made.
+#[tauri::command]
+async fn create_receipt_transaction(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let receipt = match load_receipt(&state, &id) {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(CommandResult {
+                success: false,
+                data: None,
+                error: Some(e),
+            });
+        }
+    };
+
+    let parsed: serde_json::Value = match receipt
+        .parsed_json
+        .as_deref()
+        .filter(|_| receipt.parsed)
+        .map(serde_json::from_str)
+    {
+        Some(Ok(v)) => v,
+        Some(Err(e)) => {
+            return Ok(CommandResult {
+                success: false,
+                data: None,
+                error: Some(format!("receipt is parsed but unreadable: {e}")),
+            });
+        }
+        _ => {
+            return Ok(CommandResult {
+                success: false,
+                data: None,
+                error: Some("receipt has not been parsed yet".to_string()),
+            });
+        }
+    };
+    let total = parsed.get("total").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    // A total at or below zero is an OCR miss, not an expense; leave the
+    // linking for the user rather than book money that was never spent.
+    if total <= 0.0 {
+        return Ok(CommandResult {
+            success: true,
+            data: Some(serde_json::json!({"created": false, "reason": "no positive total"})),
+            error: None,
+        });
+    }
+    if let Some(existing) = receipt.transaction_id.as_deref() {
+        return Ok(CommandResult {
+            success: true,
+            data: Some(serde_json::json!({"created": false, "reason": "already linked", "transactionId": existing})),
+            error: None,
+        });
+    }
+
+    let currency = parsed
+        .get("currency")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_uppercase();
+    let merchant = parsed
+        .get("merchant")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Receipt")
+        .trim()
+        .to_string();
+    let date_ms = parse_receipt_date(
+        parsed.get("date").and_then(|v| v.as_str()).unwrap_or(""),
+        receipt.created_at,
+    );
+    let now = chrono::Utc::now().timestamp_millis();
+
+    // Short-lived read locks only — no guard may live across the awaits.
+    let (rate_used, base, already_created_id) = {
+        let conn = state.db.lock().map_err(|e| format!("{e}"))?;
+        let base = base_currency();
+        let code = if currency.is_empty() { base.as_str() } else { currency.as_str() };
+        let rate = rate_to_base(&conn, code, &base, &rate_date_of(date_ms));
+        // Linking that failed on the previous attempt leaves the transaction
+        // already in the ledger; re-adopt it instead of making a twin.
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT id FROM transactions WHERE receipt_id = ?1 AND deleted_at IS NULL",
+                rusqlite::params![receipt.id],
+                |r| r.get(0),
+            )
+            .ok();
+        (rate, base, existing)
+    };
+
+    let transaction_id = match already_created_id {
+        Some(found) => found,
+        None => {
+            let transaction_id = uuid::Uuid::now_v7().to_string();
+            let amount_base = total * rate_used;
+            let body = serde_json::json!({
+                "transactions": [{
+                    "id": transaction_id,
+                    "type": "expense",
+                    "amount": total,
+                    "currencyCode": if currency.is_empty() { base.as_str() } else { currency.as_str() },
+                    "amountBase": amount_base,
+                    "rateUsed": rate_used,
+                    "accountId": null,
+                    "toAccountId": null,
+                    "category": merchant,
+                    "date": date_ms,
+                    "note": "Parsed from receipt",
+                    "receiptId": receipt.id,
+                    "isDraft": true,
+                    "createdAt": now,
+                    "deletedAt": null,
+                }],
+                "deleted": [],
+            });
+            if let Err(e) = api::post::<_, serde_json::Value>("/transactions", &body).await {
+                return Ok(CommandResult {
+                    success: false,
+                    data: None,
+                    error: Some(e.to_message()),
+                });
+            }
+            transaction_id
+        }
+    };
+
+    // Client-wins receipt push, carrying every field it set so linking does
+    // not clobber the parse result: the shape is `handlers::receipts::ReceiptPush`.
+    let receipt_body = serde_json::json!({
+        "receipts": [{
+            "id": receipt.id,
+            "localPath": receipt.local_path,
+            "remotePath": receipt.remote_path,
+            "uploadStatus": receipt.upload_status,
+            "parsed": receipt.parsed,
+            "parsedJson": receipt.parsed_json,
+            "transactionId": transaction_id,
+            "createdAt": receipt.created_at,
+        }],
+        "deleted": [],
+    });
+    if let Err(e) = api::post::<_, serde_json::Value>("/receipt-pictures", &receipt_body).await {
+        return Ok(CommandResult {
+            success: false,
+            data: None,
+            error: Some(e.to_message()),
+        });
+    }
+
+    Ok(CommandResult {
+        success: true,
+        data: Some(serde_json::json!({"created": true, "transactionId": transaction_id})),
+        error: None,
+    })
+}
+
 #[tauri::command]
 async fn update_ingredient(
     state: tauri::State<'_, AppState>,
@@ -4040,6 +4313,8 @@ pub fn run() {
             list_accounts,
             list_transactions,
             get_base_currency,
+            upload_receipt_files,
+            create_receipt_transaction,
             list_fx_rates,
             exercise_progression,
             exercise_volume,

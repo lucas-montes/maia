@@ -700,6 +700,23 @@ export const api = {
     files: { name: string; data: string }[],
   ) => invoke<Envelope<string[]>>("add_statement_files", { source, files }),
 
+  /** Uploads one or many picked receipt pictures to the server's OCR
+   *  endpoint, one request per file, and reports per-file: `id` when the
+   *  server accepted it (then parse-polling takes over), else `error`. */
+  uploadReceiptFiles: (files: { name: string; data: string }[]) =>
+    invoke<Envelope<{ name: string; id: string | null; error: string | null }[]>>(
+      "upload_receipt_files",
+      { files },
+    ),
+
+  /** Creates the draft expense a parsed receipt stands for (phone-parity:
+   *  upload → OCR → draft) and links receipt → transaction. Idempotent. */
+  createReceiptTransaction: (id: string) =>
+    invoke<Envelope<{ created: boolean; reason?: string; transactionId?: string }>>(
+      "create_receipt_transaction",
+      { id },
+    ),
+
   listStatementFeeds: () =>
     invoke<Envelope<{ items: StatementFeedStatus[] }>>("list_statement_feeds"),
 

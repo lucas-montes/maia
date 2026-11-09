@@ -151,7 +151,67 @@ async fn send<R: DeserializeOwned>(
         .send()
         .await
         .map_err(|e| ApiError::Unreachable(e.to_string()))?;
+    decode_response(response).await
+}
 
+/// One file the receipt import form picked, decoded from base64 already.
+///
+/// `data` may still carry a `data:` URL prefix as `FileReader.readAsDataURL`
+/// produced it; [strip_data_url] removes it either way.
+pub struct UploadFile {
+    /// Original file name, sent as the part's filename so the server can pick
+    /// a sensible extension for where it stores the image.
+    pub name: String,
+    /// The image bytes themselves.
+    pub bytes: Vec<u8>,
+}
+
+/// Uploads [file] to [path] as a single multipart file part, optionally with
+/// extra text fields, and decodes the JSON response.
+///
+/// Receipt OCR is the only caller, one image per request: the server's
+/// handler keeps exactly one file part, a later part overwriting earlier
+/// ones, so "many receipts" is many requests.
+pub async fn post_multipart<R: DeserializeOwned>(
+    path: &str,
+    fields: &[(&str, String)],
+    file: &UploadFile,
+) -> Result<R, ApiError> {
+    let base = server_base();
+    let url = format!("{base}{path}");
+    let api_key = maia::Config::shared(None)
+        .map(|c| c.api_key.clone())
+        .unwrap_or_default();
+
+    let mut form = reqwest::multipart::Form::new();
+    for (name, value) in fields {
+        form = form.text(name.to_string(), value.clone());
+    }
+    form = form.part(
+        "picture",
+        reqwest::multipart::Part::bytes(file.bytes.clone())
+            .file_name(file.name.clone()),
+    );
+
+    let response = client()?
+        .post(&url)
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| ApiError::Unreachable(e.to_string()))?;
+    decode_response(response).await
+}
+
+/// Strips an optional `data:...;base64,` prefix from a base64 payload.
+pub fn strip_data_url(data: &str) -> &str {
+    data.split_once(";base64,").map(|(_, b)| b).unwrap_or(data)
+}
+
+/// Status/text/decode tail shared by every request shape.
+async fn decode_response<R: DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<R, ApiError> {
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
 
