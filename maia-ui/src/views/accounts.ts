@@ -414,7 +414,9 @@ export function mount(root: HTMLElement): () => void {
   root.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
     const accountRow = target.closest<HTMLElement>("[data-account-id]");
-    if (accountRow?.dataset.accountId) {
+    // A row carrying its own action (the detail page's Edit/Save buttons also
+    // carry data-account-id) is a control, not a navigation.
+    if (accountRow?.dataset.accountId && !accountRow.closest("[data-action]")) {
       selectedId = accountRow.dataset.accountId;
       render();
       return;
