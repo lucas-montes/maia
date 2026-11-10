@@ -446,7 +446,7 @@ they are carried here and that plan is superseded.
   from the frontend's `vitest` suite. Both were run.
 
 ## Evidence
-- `cargo test -p maia`: 221 passed, 1 ignored (was 184 before this plan; 37 added).
+- `cargo test -p maia`: 222 passed, 1 ignored (was 184 before this plan; 38 added).
   - T01: `parses_the_committed_fixture` (1 statement, 2026-06-15 → 2026-10-15),
     `a_multi_month_file_is_one_statement_keyed_by_its_bytes`,
     `identical_rows_in_different_months_keep_distinct_fingerprints`.

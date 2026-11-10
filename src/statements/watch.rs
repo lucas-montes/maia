@@ -585,7 +585,11 @@ pub fn reconcile_files(state: &AppState) {
 /// `(stored_path, source, destination)` for every file with statement rows.
 ///
 /// One row per distinct `stored_path`. The aggregate is what decides: a file
-/// moves on only when *every* live statement it produced is settled.
+/// moves on only when *every* live statement it produced is settled, and
+/// "settled" means every line is imported or skipped. A line left in `error`
+/// — a missing FX rate is the usual one — is neither, so its file stays in
+/// `staged/`: `parsed/` means imported, and a file whose entries all failed to
+/// import is the furthest thing from that.
 fn collect_file_states(state: &AppState) -> anyhow::Result<Vec<(String, String, Destination)>> {
     let conn = state.db.get()?;
     let mut stmt = conn.prepare(
@@ -593,7 +597,7 @@ fn collect_file_states(state: &AppState) -> anyhow::Result<Vec<(String, String, 
                 SUM(s.deleted_at IS NULL) AS live,
                 SUM(s.deleted_at IS NULL AND EXISTS (
                     SELECT 1 FROM bank_statement_lines l
-                    WHERE l.statement_id = s.id AND l.status='pending'
+                    WHERE l.statement_id = s.id AND l.status IN ('pending','error')
                 )) AS pending
          FROM bank_statements s
          WHERE s.stored_path IS NOT NULL AND s.stored_path <> ''
@@ -1055,6 +1059,33 @@ mod tests {
         assert!(
             file_names(&lifecycle.parsed).is_empty(),
             "a rejected file must not keep looking imported"
+        );
+    }
+
+    /// A line that failed to import is neither imported nor skipped, so its
+    /// file has not been dealt with. Found end-to-end: an all-USD Firstrade
+    /// export with no FX rate imported nothing, every line landed in `error`,
+    /// and the file was filed under `parsed/` as if it had worked.
+    #[test]
+    fn a_file_whose_entries_all_failed_stays_staged() {
+        let tmp = TempDir::new("reconcile-errors");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+        staged_file(
+            &state,
+            &lifecycle.staged,
+            "firstrade.csv",
+            "s1",
+            false,
+            &["error", "error", "informational"],
+        );
+
+        reconcile_files(&state);
+
+        assert_eq!(file_names(&lifecycle.staged), ["firstrade.csv"]);
+        assert!(
+            file_names(&lifecycle.parsed).is_empty(),
+            "nothing was imported, so parsed/ would be a lie"
         );
     }
 
