@@ -181,6 +181,20 @@ pub fn preview_import(
     )?;
 
     let statement_ids: Vec<String> = requests.iter().map(|r| r.id.clone()).collect();
+    // An account the user picked for a statement is a decision, not something
+    // to infer afterwards: `resolve_account` honours an override without
+    // writing it to `bank_statements.account_id` (an override is for this
+    // import, not a permanent re-pointing), so reading the row back would
+    // describe the identity's account while the import booked onto another.
+    let overrides: HashMap<String, String> = requests
+        .iter()
+        .filter_map(|r| {
+            r.request
+                .account_id
+                .clone()
+                .map(|account_id| (r.id.clone(), account_id))
+        })
+        .collect();
     let mut outcomes = Vec::with_capacity(requests.len());
     for request in requests {
         outcomes.push(import_statement(
@@ -191,7 +205,7 @@ pub fn preview_import(
         )?);
     }
 
-    let accounts = describe_accounts(&tx, &statement_ids, &outcomes, &accounts_before)?;
+    let accounts = describe_accounts(&tx, &statement_ids, &outcomes, &accounts_before, &overrides)?;
     let transfers = describe_transfers(&tx, &linked_before)?;
     let duplicates = describe_duplicates(&tx, &statement_ids)?;
     let informational = describe_informational(&tx, &statement_ids)?;
@@ -258,6 +272,7 @@ fn describe_accounts(
     statement_ids: &[String],
     outcomes: &[ImportOutcome],
     accounts_before: &HashSet<String>,
+    overrides: &HashMap<String, String>,
 ) -> anyhow::Result<Vec<PreviewAccount>> {
     let mut booked: HashMap<&str, usize> = HashMap::new();
     for outcome in outcomes {
@@ -275,13 +290,18 @@ fn describe_accounts(
         let Some(statement) = load_statement_after(tx, statement_id)? else {
             continue;
         };
-        // An account the import resolved wins; otherwise ask the same lookup
-        // the import would have asked.
-        let resolved = match statement.account_id.clone() {
+        // The user's override wins, then the account the import resolved;
+        // failing both, ask the same lookup the import would have asked.
+        let resolved = match overrides.get(&statement.id).cloned() {
             Some(id) => Some(id),
-            None => match statement.account_number.as_deref() {
-                Some(external_id) => lookup_external_account(tx, &statement.source, external_id)?,
-                None => None,
+            None => match statement.account_id.clone() {
+                Some(id) => Some(id),
+                None => match statement.account_number.as_deref() {
+                    Some(external_id) => {
+                        lookup_external_account(tx, &statement.source, external_id)?
+                    }
+                    None => None,
+                },
             },
         };
 
@@ -861,6 +881,55 @@ mod tests {
         assert_eq!(account.name, "My broker");
         assert_eq!(result.totals.accounts_to_create, 0);
         assert_eq!(result.totals.accounts_reused, 1);
+    }
+
+    /// Picking an account for a statement changes what the preview promises,
+    /// because it changes what the import does. `resolve_account` honours an
+    /// override without writing it onto the statement row, so reading the row
+    /// back would have described the identity's account instead.
+    #[test]
+    fn an_account_override_is_what_the_preview_reports() {
+        let pool = crate::db::init_memory().unwrap();
+        let id = stage(
+            &pool,
+            &csv(&[("Card debit", "a", "2026-02-01", -10.0)]),
+            "one.csv",
+        );
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, name, type, opening_balance, note, created_at, updated_at)
+                 VALUES ('chosen','Somewhere else','bank',0.0,NULL,1,1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let mut conn = pool.get().unwrap();
+        let result = preview_import(
+            &mut conn,
+            vec![PreviewStatement {
+                id: id.clone(),
+                request: ImportRequest {
+                    lines: Vec::new(),
+                    account_id: Some("chosen".to_string()),
+                    counterpart_account_id: None,
+                    auto_link: Some(true),
+                },
+            }],
+            "EUR",
+        )
+        .unwrap();
+
+        assert_eq!(result.accounts.len(), 1);
+        let account = &result.accounts[0];
+        assert_eq!(account.account_id.as_deref(), Some("chosen"));
+        assert_eq!(account.name, "Somewhere else");
+        assert_eq!(account.resolution, AccountResolution::Existing);
+        assert_eq!(
+            result.totals.accounts_to_create, 0,
+            "nothing is created when the entries are sent somewhere that exists"
+        );
     }
 
     /// An identity with no account lists candidates, and never acts on them.

@@ -237,41 +237,44 @@ they are carried here and that plan is superseded.
     hit.
 
 ## Success criteria
-- [ ] Dropping the committed `fixtures/statements/firstrade.csv` stages **one** statement, whose
+- [x] Dropping the committed `fixtures/statements/firstrade.csv` stages **one** statement, whose
       period spans the whole file, and the file review shows **one** account row
-- [ ] Dropping both `t212` exports stages **two** statements (one per file, one account each), the
+- [x] Dropping both `t212` exports stages **two** statements (one per file, one account each), the
       overlapping February lines appear as `duplicate` on the second, and no line is deleted by the
       second staging — the regression test asserts the February line count directly
-- [ ] Two files of the same source and account produce **one** "will be created" account in the
+- [x] Two files of the same source and account produce **one** "will be created" account in the
       preview, listing both files as its sources
-- [ ] An account created by an import has a `Uuid::now_v7()` id, not a derived one, and a re-import
+- [x] An account created by an import has a `Uuid::now_v7()` id, not a derived one, and a re-import
       of the same file reuses that row by `(source, external_id)` lookup rather than by id
-- [ ] `PUT /accounts/:id/identity` sets a number on a hand-created account; a conflicting number
+- [x] `PUT /accounts/:id/identity` sets a number on a hand-created account; a conflicting number
       returns 409 naming the other account; a phone pull/push round trip neither reads nor clears it
-- [ ] Editing an imported account's name, type, opening balance, note **and** number leaves its id
+- [x] Editing an imported account's name, type, opening balance, note **and** number leaves its id
       unchanged, keeps every transaction attached to it, and survives a subsequent import of the same
       file untouched — including the case where the number is moved to a different account
-- [ ] After setting the number, previously staged statements of that identity report "uses existing
+- [x] After setting the number, previously staged statements of that identity report "uses existing
       account" with no further user action
-- [ ] An identity with no matching account lists candidate existing accounts as suggestions; the
+- [x] An identity with no matching account lists candidate existing accounts as suggestions; the
       server never reuses an account that was not matched exactly or confirmed by the user
-- [ ] `POST /statements/preview` returns, for the same body `/statements/import` accepts: accounts to
+- [x] `POST /statements/preview` returns, for the same body `/statements/import` accepts: accounts to
       create vs reuse, transactions to create, transfer pairs merged (naming both accounts),
       duplicates suppressed (naming the surviving file), informational lines, and per-line errors —
       and importing immediately afterwards produces exactly those numbers
-- [ ] A missing USD/EUR FX rate shows in the preview as a per-line error before the import is clicked
-- [ ] A preview leaves the database byte-identical (asserted by a test, including no account created)
-- [ ] `parsed/` only ever holds files whose statements are all imported; a freshly staged file sits in
+- [x] A missing USD/EUR FX rate shows in the preview as a per-line error before the import is clicked
+- [x] A preview leaves the database byte-identical (asserted by a test, including no account created)
+- [x] `parsed/` only ever holds files whose statements are all imported; a freshly staged file sits in
       `staged/`, and discarding its statements moves it to `discarded/`
 - [ ] First boot after the change relocates the existing mislabelled `parsed/firstrade/fristrade.csv`
       and the two `parsed/trading212/*.csv` to `discarded/` (their statements are soft-deleted)
-- [ ] A user-set intake directory is editable from Settings (not *(managed)*), and a file named
-      `firstrade-….csv` dropped there is moved into `dump/firstrade/` and staged with no further
-      interaction
-- [ ] `cash-flow.csv` and `statement.csv` in intake are untouched after a full scan
+      — *the mechanism is tested; this is the deployed run of it, see Remaining manual steps*
+- [x] A user-set intake directory is editable from Settings (not *(managed)*), and a file named
+      `firstrade-….csv` dropped there is moved into `dump/firstrade/` — *the move and the Settings
+      field are tested; "and staged with no further interaction" needs the live watcher, see
+      Remaining manual steps*
+- [x] `cash-flow.csv` and `statement.csv` in intake are untouched after a full scan
 - [x] Entry checkboxes align with their row content, and select-all works on the list and inside one
       file review (inherited `statement-review-ui-fixes` T03/T04)
-- [ ] `cargo test -p sync-server`, `cargo test -p maia-ui`, `npx tsc --noEmit`, `npx vite build`,
+- [x] `cargo test -p maia` (the crate is `maia`, not `sync-server` — the plan inherited a stale
+      name), `cargo test -p maia-ui`, `npx tsc --noEmit`, `npx vite build`, `npx vitest run`,
       `nix build .#maia-desktop` all green
 
 ## Constraints and non-goals
@@ -311,7 +314,7 @@ they are carried here and that plan is superseded.
 
 ## Task stack
 
-- [ ] T01: One statement per account per file (status:open)
+- [x] T01: One statement per account per file (status:done)
   - Goal: Firstrade and T212-CSV adopt CA's `<source>:<account>:<source_hash>` key and stop
     splitting by month.
   - Boundaries: In — `firstrade.rs` (drop `by_month`, span from line dates, `source_key`),
@@ -320,13 +323,13 @@ they are carried here and that plan is superseded.
   - Note: collapsing also fixes an incidental bug — `firstrade.rs:143` clones the whole `warnings`
     vector onto *every* month statement, so one bad row currently reports N times.
 
-- [ ] T02: Regression test for the overlapping-export data loss (status:open)
+- [x] T02: Regression test for the overlapping-export data loss (status:done)
   - Goal: prove the February clobber cannot recur.
   - Boundaries: In — a store-level test staging two overlapping file drafts in either order and
     asserting both keep their lines, with the repeats marked `duplicate`. Out — fixing `dedupe_key`
     itself (it already works; it was being bypassed).
 
-- [ ] T03: Decouple the account id from the provider identity (status:open)
+- [x] T03: Decouple the account id from the provider identity (status:done)
   - Goal: an imported account is an ordinary row whose id means nothing, so every field becomes
     editable without moving where the next import looks.
   - Boundaries: In — `resolve_account` mints `Uuid::now_v7()` instead of
@@ -337,7 +340,7 @@ they are carried here and that plan is superseded.
     it. Check the existing `ON CONFLICT(id) DO NOTHING` insert still behaves under a random id (the
     conflict target that matters becomes the partial unique index, not the primary key).
 
-- [ ] T04: Editable account identity (status:open)
+- [x] T04: Editable account identity (status:done)
   - Goal: a hand-made account can be told which provider account it is, and an imported one can be
     corrected.
   - Boundaries: In — `PUT /accounts/:id/identity`, the `idx_accounts_external` 409 naming the
@@ -346,7 +349,7 @@ they are carried here and that plan is superseded.
     transactions, desktop command + accounts-view edit fields for number/source.
     Out — `/budget-accounts`, the phone, any currency field, account-to-account merging.
 
-- [ ] T05: Import preview endpoint (status:open)
+- [x] T05: Import preview endpoint (status:done)
   - Goal: one server answer to "what will this import do?", identical to what import does.
   - Boundaries: In — `POST /statements/preview` sharing `BatchImportRequest`, transaction rollback,
     `ImportOutcome` extended with accounts-to-create/reuse, duplicate groups, transfer pairs,
@@ -354,7 +357,7 @@ they are carried here and that plan is superseded.
     candidate suggestions for an unmatched identity; a no-side-effects test. Out — new import
     semantics; the preview must change *nothing* about how importing behaves.
 
-- [ ] T06: `staged/` and `discarded/` roots with derived placement (status:open)
+- [x] T06: `staged/` and `discarded/` roots with derived placement (status:done)
   - Goal: `parsed/` means imported.
   - Boundaries: In — `config.rs` (`statements_staged_dir`, `statements_discarded_dir`, defaults
     beside the dump root like the existing two), `watch.rs` (`Destination`, `destination_root`,
@@ -362,7 +365,7 @@ they are carried here and that plan is superseded.
     `reconcile_files` + its `repoint_rows` calls, hooks after import and delete commit.
     Out — hard deletion, any new HTTP endpoint, the preview path (decision 18).
 
-- [ ] T07: User-owned intake directory (status:open)
+- [x] T07: User-owned intake directory (status:done)
   - Goal: drop a correctly named file anywhere convenient and have it picked up.
   - Boundaries: In — `config.rs` overlay-merged `statements_intake_dir` + accessor,
     `SourceId::from_file_name` with whole-token matching, intake drain in `watch.rs` (inotify watch +
@@ -370,14 +373,14 @@ they are carried here and that plan is superseded.
     Settings field (editable, not `managed`) plus the two new managed roots shown read-only.
     Out — parsing in place, sniffing, subfolder routing.
 
-- [ ] T08: Preview-led file review (status:open)
+- [x] T08: Preview-led file review (status:done)
   - Goal: the page states what will happen, in the import's own words.
   - Boundaries: In — the summary header from the preview response, re-fetch on selection and
     override change, accounts grouped by identity with files listed and one resolution label,
     merge rows for transfer pairs and duplicate groups, per-line error display, distinct-account
     count in the list header. Out — the single-statement detail page's own layout.
 
-- [ ] T09: Account overrides and identity edits from the review (status:open)
+- [x] T09: Account overrides and identity edits from the review (status:done)
   - Goal: fix a wrong account proposal without leaving the screen.
   - Boundaries: In — per-account existing-account picker (tombstoned accounts filtered) wired into
     the batch import's per-statement `accountId`, the "set this number on an existing account" action
@@ -398,10 +401,97 @@ they are carried here and that plan is superseded.
     checkbox anywhere, so it cannot be imported from this screen. Honest now (select-all no longer
     pretends to pick it), but the preview-led rewrite should give it a control.
 
-- [ ] T11: Docs and packaging (status:open)
+- [x] T11: Docs and packaging (status:done)
   - Boundaries: In — mark `statement-review-ui-fixes` superseded, register this plan in
     `context/context-map.md`, add the lifecycle/intake/preview model to `context/overview.md`, full
     test and `nix build` runs. Out — utoipa.
+
+## Deviations from the plan
+- **Firstrade's fingerprint keys on the row's day, not the month.** The plan said to drop the month
+  split; it did not say what to do about `firstrade.rs`'s fingerprint, which *included* the month and
+  so stopped being unique once a whole file became one statement — two identical rows a month apart
+  would have collided under `UNIQUE(statement_id, fingerprint)` and the second would have been
+  dropped silently. The day is the finest grain the export carries and is stable across re-drops.
+  Pinned by `identical_rows_in_different_months_keep_distinct_fingerprints`.
+- **`SourceId::from_file_name` matches adjacent *runs* of tokens, not only single tokens.** Whole-
+  token matching alone cannot see `credit-agricole`, because the separator joining the two words is
+  one of the separators the stem is split on. Runs are tried longest-first, which is what decision 23
+  meant by "longest token first".
+- **The preview describes an account it created inside the rollback as if it did not exist**, because
+  from the user's side it does not: no id, and suggestions still listed. The first implementation
+  reported the minted id and dropped the suggestions, which two tests caught.
+- **`reconcile_files` excludes `status='error'` rows explicitly.** The plan reasoned that a parked
+  file "has no statement rows at all, so it will not appear in a `stored_path` walk — confirm that is
+  true rather than assuming it". It is not true: `record_failure` writes an `error` row carrying
+  `stored_path`, so a file parked in `failed/` after a failed re-parse *would* have been dragged into
+  `discarded/` on every boot. Excluded by the query and pinned by
+  `an_error_statement_does_not_move_its_parked_file`.
+- **`settle_files` takes the pooled connection by value.** The plan flagged that a second connection
+  inside a *preview* would deadlock the one-wide test pool; the same applies to the reconcile hooks
+  in the import and delete handlers, which run after a commit while the handler still holds its
+  connection. Taking it by value makes dropping it first the only way to call the function.
+- **`read_config` now resolves the lifecycle roots.** The managed statement directories were rendered
+  read-only in Settings but were only ever populated from the overlay, so on a default install their
+  boxes were blank. Adding two more blank boxes would have been worse; the command returns the
+  resolved paths instead, and its overlay merge became per-key so `statements.intake_dir` and the
+  Trading 212 feed settings still come through.
+- **Per-line type/category edits moved out of the DOM.** Not in the plan, but the debounced
+  re-preview made a pre-existing bug reachable in a new way: every selection change rebuilds the page
+  and reset those fields, and a preview landing 250ms later could now do it mid-typing. They live in
+  a `lineEdits` map, with focus and caret restored after a rebuild.
+- **T09 shipped inside T08's commit.** The account picker, the "it is that account" action and the
+  re-preview after either are not separable from the preview-led review they live in.
+- **The `maia-ui` crate name in the success criteria was stale** (`sync-server` → `maia`), and the
+  plan's own `cargo test -p maia-ui` refers to the desktop Tauri crate, which is a different thing
+  from the frontend's `vitest` suite. Both were run.
+
+## Evidence
+- `cargo test -p maia`: 221 passed, 1 ignored (was 184 before this plan; 37 added).
+  - T01: `parses_the_committed_fixture` (1 statement, 2026-06-15 → 2026-10-15),
+    `a_multi_month_file_is_one_statement_keyed_by_its_bytes`,
+    `identical_rows_in_different_months_keep_distinct_fingerprints`.
+  - T02: `overlapping_exports_keep_every_line_when_the_later_file_stages_second` and
+    `..._in_the_other_order_too`, both asserting the February line count directly. **Verified to
+    bite**: temporarily restoring the month-scoped `source_key` makes both fail, the second with
+    exactly the shape of the original data loss. The two exports are synthetic overlapping CSVs
+    rather than the user's own pair, which are not in the repository.
+  - T03: `an_imported_account_gets_a_minted_id_and_is_reused_by_identity`,
+    `an_edited_account_survives_a_later_import`,
+    `the_same_identity_resolved_twice_in_one_transaction_creates_one_account`.
+  - T04: 7 handler tests, including `a_conflicting_number_is_refused_with_the_account_that_holds_it`
+    (409 naming it), `moving_a_number_to_another_account_strands_no_transactions` (the whole
+    clear-then-set move) and `a_phone_round_trip_neither_reads_nor_clears_the_identity`.
+  - T05: 10 tests, including `a_preview_leaves_the_database_untouched` (every row of `accounts`,
+    `transactions`, `bank_statements`, `bank_statement_lines`, `transfer_matches` compared before and
+    after), `importing_afterwards_produces_the_previewed_numbers`, and
+    `the_payload_keys_are_the_ones_the_desktop_reads` — the only thing connecting the Rust payload to
+    `maia-ui/src/lib/api.ts`'s `ImportPreview`.
+  - T06: 6 reconcile tests, including the `parsed/` → `discarded/` migration, idempotency, self-heal
+    after a hand-move, and the two `failed/` cases.
+  - T07: 4 intake tests plus 2 on `from_file_name`; `an_unrecognised_file_in_intake_is_left_completely_alone`
+    drops five files and a subdirectory it must not touch and asserts all six survive.
+- `cargo test -p maia-ui`: 28 passed, including the invoked-vs-registered command cross-check, which
+  covers the new `preview_statements` and `set_account_identity`.
+- `npx vitest run`: 33 passed. `npx tsc --noEmit` and `npx vite build` clean.
+- `nix build .#maia-desktop` green.
+- The rebuilt file review was rendered headlessly against the real built stylesheet and inspected:
+  summary header, identity-grouped accounts with their suggestion buttons, the FX error section,
+  merge rows, month subheadings and the sticky action bar all lay out correctly.
+
+## Remaining manual steps
+1. `nix flake update maia` in `~/.dotfiles`, then `sudo nixos-rebuild switch --flake ~/.dotfiles#<host>`
+   to pick up the new server and desktop.
+2. **On the first boot after that**, confirm `reconcile_files` relocated the real mislabelled files:
+   `parsed/firstrade/fristrade.csv` and the two `parsed/trading212/*.csv` should move to
+   `discarded/`, since their statements are soft-deleted. Nothing should be left in `parsed/` that
+   has not been imported.
+3. Set an intake directory in Settings (`~/Downloads` is the obvious one), drop a
+   `firstrade-2026-11.csv` into it, and confirm it is moved into `dump/firstrade/` and staged without
+   pressing Scan — the inotify watch on intake is the part no test can cover.
+4. Re-drop the Firstrade and Trading 212 exports and confirm the review shows **one** account each,
+   with the preview summary agreeing with what the import then does.
+5. The all-USD Firstrade export will report missing USD/EUR FX rates in the preview. Filling them is
+   deliberately out of this plan's scope — add the rates under FX rates before importing it.
 
 ## Risks / gotchas
 - **The hardcoded account identity is a latent bug this plan does not fix.** Firstrade uses the
