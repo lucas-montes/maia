@@ -2,11 +2,18 @@
 //!
 //! The dump folder holds one subdirectory per source (`credit_agricole`,
 //! `trading212`, …): the subfolder name picks the parser, so nothing has to
-//! guess a file's provenance. Every regular file that appears is staged, then
-//! moved out — into the parsed tree on success, or into the failed tree beside
-//! a `<name>.log` on error — so the folder the user drops into always
-//! empties itself. The moved original is the kept raw document; no hash-named
-//! copy is written for these files.
+//! guess a file's provenance. Every regular file that appears is staged and
+//! then moved out, so the folder the user drops into always empties itself.
+//! The moved original is the kept raw document; no hash-named copy is written
+//! for these files.
+//!
+//! Where it moves to is *derived*, not decided by whichever event last touched
+//! it — see [`reconcile_files`]. A parsed file lands in `staged/`, reaches
+//! `parsed/` once every entry is imported or skipped, and `discarded/` once
+//! its statements are deleted. `parsed/` used to mean "the parser did not
+//! crash", which left rejected files sitting there looking imported. A file
+//! that never parsed is parked in `failed/` beside a `<name>.log` and has no
+//! statement rows, so the reconcile pass never sees it.
 //!
 //! inotify is the trigger, not the source of truth. A scan runs at startup,
 //! after every event batch, and on a slow sweep that catches files copied in
@@ -41,14 +48,18 @@ pub fn spawn(state: AppState) {
     if let Err(error) = create_trees(&state) {
         tracing::warn!(error = %error, "cannot create statement lifecycle directories");
     }
+    // Before anything else: files mislabelled by the old "parsed means the
+    // parser did not crash" rule move to where their statements say they
+    // belong, and a file moved by hand snaps back.
+    reconcile_files(&state);
     let events = start_inotify(&state);
     tokio::spawn(main_loop(state, events));
 }
 
-/// Creates the dump, parsed and failed roots, each with one subdirectory per
-/// known source, so the user always has somewhere obvious to drop files. The
-/// lifecyle keeps working without them (scans create directories as needed),
-/// but a fresh install should present an empty tree.
+/// Creates every lifecycle root, each with one subdirectory per known source,
+/// so the user always has somewhere obvious to drop files. The lifecyle keeps
+/// working without them (scans create directories as needed), but a fresh
+/// install should present an empty tree.
 fn create_trees(state: &AppState) -> anyhow::Result<()> {
     for root in lifecycle_roots(state) {
         std::fs::create_dir_all(&root)
@@ -65,10 +76,15 @@ fn create_trees(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn lifecycle_roots(state: &AppState) -> [PathBuf; 3] {
+/// The roots `create_trees` lays out. Only the dump root is ever *watched* —
+/// see [`start_inotify`], which builds its own list — so adding roots here
+/// cannot make the service re-ingest its own moves.
+fn lifecycle_roots(state: &AppState) -> [PathBuf; 5] {
     [
         state.config.statements_dump_dir(),
+        state.config.statements_staged_dir(),
         state.config.statements_parsed_dir(),
+        state.config.statements_discarded_dir(),
         state.config.statements_failed_dir(),
     ]
 }
@@ -277,10 +293,13 @@ async fn scan_source(
 
 /// Parse, stage, then decide where the file lives afterwards.
 ///
-/// `Ok` moves the original into the parsed tree. Anything else parks it in the
-/// failed tree with the error beside it. If the file is gone by the time we
-/// react — a concurrent scan already handled and moved it — the move is a
-/// no-op rather than an error, and the already-staged statements stand.
+/// A parsed file lands in `staged/`: it has been read, not accepted. It moves
+/// on to `parsed/` or `discarded/` when its statements say so, which
+/// [`reconcile_files`] derives rather than this function guessing. Anything
+/// else parks it in the failed tree with the error beside it. If the file is
+/// gone by the time we react — a concurrent scan already handled and moved it
+/// — the move is a no-op rather than an error, and the already-staged
+/// statements stand.
 async fn ingest_file(
     state: &AppState,
     source: SourceId,
@@ -289,9 +308,12 @@ async fn ingest_file(
     let result = super::run_file_source(source, path, false, state).await;
     match result {
         Ok(outcomes) => {
-            let moved = relocate(state, Destination::Parsed, source.as_str(), path)?;
+            let moved = relocate(state, Destination::Staged, source.as_str(), path)?;
             repoint_rows(state, source, path, &moved);
-            tracing::info!(path = %moved.display(), "statement file parsed and moved");
+            // A re-drop of bytes already imported stages nothing new, so the
+            // file belongs wherever its existing statements put it.
+            reconcile_files(state);
+            tracing::info!(path = %moved.display(), "statement file parsed and staged");
             Ok(outcomes)
         }
         Err(error) => {
@@ -304,15 +326,24 @@ async fn ingest_file(
     }
 }
 
-#[derive(Clone, Copy)]
-enum Destination {
+/// Where a file lives, derived from the state of its statements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Destination {
+    /// Parsed, with entries still awaiting review.
+    Staged,
+    /// Every entry imported or skipped.
     Parsed,
+    /// Every statement soft-deleted.
+    Discarded,
+    /// The parse never succeeded; no statement rows exist for it.
     Failed,
 }
 
 fn destination_root(state: &AppState, destination: Destination) -> PathBuf {
     match destination {
+        Destination::Staged => state.config.statements_staged_dir(),
         Destination::Parsed => state.config.statements_parsed_dir(),
+        Destination::Discarded => state.config.statements_discarded_dir(),
         Destination::Failed => state.config.statements_failed_dir(),
     }
 }
@@ -415,6 +446,119 @@ fn write_failure_log(source: &str, original: &Path, target: &Path, message: &str
     }
 }
 
+/// Put every known statement file where the database says it belongs.
+///
+/// Derived, not remembered — the same shape as `notes_mirror::reconcile()`,
+/// which this project already uses for filesystem state that is a projection
+/// of the database. A file's root follows from the state of its statements:
+///
+/// | statements for that `stored_path`      | root          |
+/// |----------------------------------------|---------------|
+/// | any live statement with pending lines  | `staged/`     |
+/// | every live statement imported/skipped  | `parsed/`     |
+/// | every statement soft-deleted           | `discarded/`  |
+///
+/// Because it derives rather than remembers, it migrates files mislabelled by
+/// the old "parsed means did not crash" rule on first boot for free, and
+/// self-heals a file someone moved by hand. A file in `failed/` has no
+/// statement rows at all, so it never appears in this walk and `park` keeps
+/// sole ownership of that root.
+///
+/// Best-effort and idempotent: a file that cannot be moved is logged and left,
+/// and the next pass tries again.
+pub fn reconcile_files(state: &AppState) {
+    let rows = match collect_file_states(state) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(error = %error, "cannot read statement file states");
+            return;
+        }
+    };
+    for (stored_path, source, destination) in rows {
+        let current = PathBuf::from(&stored_path);
+        if !current.exists() {
+            // Already moved by hand, or never written. Nothing to do: the row
+            // keeps pointing at a path the next successful move will correct.
+            continue;
+        }
+        let wanted_dir = destination_root(state, destination).join(&source);
+        if current.parent() == Some(wanted_dir.as_path()) {
+            continue;
+        }
+        match relocate(state, destination, &source, &current) {
+            Ok(moved) => {
+                repoint_stored_path(state, &stored_path, &moved);
+                tracing::info!(
+                    from = %current.display(),
+                    to = %moved.display(),
+                    "statement file moved to match its statements"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %current.display(),
+                    error = %error,
+                    "cannot move statement file to its derived root"
+                );
+            }
+        }
+    }
+}
+
+/// `(stored_path, source, destination)` for every file with statement rows.
+///
+/// One row per distinct `stored_path`. The aggregate is what decides: a file
+/// moves on only when *every* live statement it produced is settled.
+fn collect_file_states(state: &AppState) -> anyhow::Result<Vec<(String, String, Destination)>> {
+    let conn = state.db.get()?;
+    let mut stmt = conn.prepare(
+        "SELECT s.stored_path, s.source,
+                SUM(s.deleted_at IS NULL) AS live,
+                SUM(s.deleted_at IS NULL AND EXISTS (
+                    SELECT 1 FROM bank_statement_lines l
+                    WHERE l.statement_id = s.id AND l.status='pending'
+                )) AS pending
+         FROM bank_statements s
+         WHERE s.stored_path IS NOT NULL AND s.stored_path <> ''
+           AND s.status <> 'error'
+         GROUP BY s.stored_path, s.source",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            let stored_path: String = r.get(0)?;
+            let source: String = r.get(1)?;
+            let live: i64 = r.get(2)?;
+            let pending: i64 = r.get(3)?;
+            let destination = if live == 0 {
+                Destination::Discarded
+            } else if pending > 0 {
+                Destination::Staged
+            } else {
+                Destination::Parsed
+            };
+            Ok((stored_path, source, destination))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Repoint every row that referenced the file at its old path.
+fn repoint_stored_path(state: &AppState, old: &str, moved: &Path) {
+    let Ok(conn) = state.db.get() else {
+        return;
+    };
+    if let Err(error) = conn.execute(
+        "UPDATE bank_statements SET stored_path=?1, updated_at=?2 WHERE stored_path=?3",
+        rusqlite::params![
+            moved.display().to_string(),
+            crate::db::server_time_ms(),
+            old
+        ],
+    ) {
+        tracing::warn!(error = %error, "cannot repoint statement rows to their moved file");
+    }
+}
+
 /// Point the statement rows created by this parse at the file's final home.
 ///
 /// Rows written during a parse carry the dump-path as their provenance; after
@@ -461,11 +605,16 @@ mod tests {
         fn statements(&self) -> TempLifecycle {
             let root = self.0.join("statements");
             std::fs::create_dir_all(&root).unwrap();
-            let lifecycle =
-                TempLifecycle(root.join("dump"), root.join("parsed"), root.join("failed"));
-            std::fs::create_dir_all(&lifecycle.0).unwrap();
-            std::fs::create_dir_all(&lifecycle.1).unwrap();
-            std::fs::create_dir_all(&lifecycle.2).unwrap();
+            let lifecycle = TempLifecycle {
+                dump: root.join("dump"),
+                staged: root.join("staged"),
+                parsed: root.join("parsed"),
+                discarded: root.join("discarded"),
+                failed: root.join("failed"),
+            };
+            for dir in lifecycle.roots() {
+                std::fs::create_dir_all(dir).unwrap();
+            }
             lifecycle
         }
     }
@@ -475,16 +624,34 @@ mod tests {
         }
     }
 
-    /// The three roots plus an [`AppState`] they are configured for.
-    struct TempLifecycle(PathBuf, PathBuf, PathBuf);
+    /// The lifecycle roots plus an [`AppState`] they are configured for.
+    struct TempLifecycle {
+        dump: PathBuf,
+        staged: PathBuf,
+        parsed: PathBuf,
+        discarded: PathBuf,
+        failed: PathBuf,
+    }
     impl TempLifecycle {
+        fn roots(&self) -> [&PathBuf; 5] {
+            [
+                &self.dump,
+                &self.staged,
+                &self.parsed,
+                &self.discarded,
+                &self.failed,
+            ]
+        }
+
         fn state(&self, db: crate::db::DbPool) -> AppState {
             let config = Config::from_values(
                 serde_json::json!({
                     "statements": {
-                        "dump_dir": self.0.display().to_string(),
-                        "parsed_dir": self.1.display().to_string(),
-                        "failed_dir": self.2.display().to_string(),
+                        "dump_dir": self.dump.display().to_string(),
+                        "staged_dir": self.staged.display().to_string(),
+                        "parsed_dir": self.parsed.display().to_string(),
+                        "discarded_dir": self.discarded.display().to_string(),
+                        "failed_dir": self.failed.display().to_string(),
                     }
                 })
                 .as_object()
@@ -508,15 +675,15 @@ mod tests {
         let lifecycle = tmp.statements();
         let state = lifecycle.state(crate::db::init_memory().unwrap());
 
-        std::fs::create_dir_all(lifecycle.1.join("credit_agricole")).unwrap();
-        std::fs::create_dir_all(lifecycle.0.join("credit_agricole")).unwrap();
+        std::fs::create_dir_all(lifecycle.parsed.join("credit_agricole")).unwrap();
+        std::fs::create_dir_all(lifecycle.dump.join("credit_agricole")).unwrap();
         write(
-            &lifecycle.1.join("credit_agricole"),
+            &lifecycle.parsed.join("credit_agricole"),
             "export.csv",
             "already there",
         );
         let staging = write(
-            &lifecycle.0.join("credit_agricole"),
+            &lifecycle.dump.join("credit_agricole"),
             "export.csv",
             "new content",
         );
@@ -528,14 +695,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            std::fs::read_to_string(lifecycle.1.join("credit_agricole").join("export.csv"))
+            std::fs::read_to_string(lifecycle.parsed.join("credit_agricole").join("export.csv"))
                 .unwrap(),
             "already there",
             "the destination file must not be overwritten: a statement row may point at it"
         );
         assert_eq!(
             moved,
-            lifecycle.1.join("credit_agricole").join("export-2.csv")
+            lifecycle.parsed.join("credit_agricole").join("export-2.csv")
         );
         assert_eq!(std::fs::read_to_string(&moved).unwrap(), "new content");
     }
@@ -545,20 +712,20 @@ mod tests {
         let tmp = TempDir::new("failed-log");
         let lifecycle = tmp.statements();
         let state = lifecycle.state(crate::db::init_memory().unwrap());
-        std::fs::create_dir_all(lifecycle.2.join("credit_agricole")).unwrap();
-        std::fs::create_dir_all(lifecycle.0.join("credit_agricole")).unwrap();
+        std::fs::create_dir_all(lifecycle.failed.join("credit_agricole")).unwrap();
+        std::fs::create_dir_all(lifecycle.dump.join("credit_agricole")).unwrap();
 
-        let staging = write(&lifecycle.0.join("credit_agricole"), "export.csv", "broken");
+        let staging = write(&lifecycle.dump.join("credit_agricole"), "export.csv", "broken");
         // Parking is what attaches the reason log next to the moved file.
         let reason = "unrecognized column in the export";
         park(&state, "credit_agricole", &staging, Some(reason)).unwrap();
         assert_eq!(
-            std::fs::read_to_string(lifecycle.2.join("credit_agricole").join("export.csv"))
+            std::fs::read_to_string(lifecycle.failed.join("credit_agricole").join("export.csv"))
                 .unwrap(),
             "broken"
         );
         let log =
-            std::fs::read_to_string(lifecycle.2.join("credit_agricole").join("export.csv.log"))
+            std::fs::read_to_string(lifecycle.failed.join("credit_agricole").join("export.csv.log"))
                 .unwrap();
         assert!(log.contains("credit_agricole"), "{log}");
         assert!(log.contains(reason), "{log}");
@@ -568,12 +735,12 @@ mod tests {
     fn write_failure_log_carries_the_reason() {
         let tmp = TempDir::new("log-content");
         let lifecycle = tmp.statements();
-        std::fs::create_dir_all(lifecycle.2.join("firstrade")).unwrap();
+        std::fs::create_dir_all(lifecycle.failed.join("firstrade")).unwrap();
 
-        let at = write(&lifecycle.2.join("firstrade"), "orders.csv", "rows");
+        let at = write(&lifecycle.failed.join("firstrade"), "orders.csv", "rows");
         write_failure_log("firstrade", &at, &at, "unrecognized column");
         let log =
-            std::fs::read_to_string(lifecycle.2.join("firstrade").join("orders.csv.log")).unwrap();
+            std::fs::read_to_string(lifecycle.failed.join("firstrade").join("orders.csv.log")).unwrap();
         assert!(log.contains("firstrade"), "{log}");
         assert!(log.contains("unrecognized column"), "{log}");
         assert!(log.contains("orders.csv"), "{log}");
@@ -584,20 +751,20 @@ mod tests {
         let tmp = TempDir::new("sourceless");
         let lifecycle = tmp.statements();
         let state = lifecycle.state(crate::db::init_memory().unwrap());
-        std::fs::create_dir_all(lifecycle.2.join(UNKNOWN)).unwrap();
+        std::fs::create_dir_all(lifecycle.failed.join(UNKNOWN)).unwrap();
 
-        write(&lifecycle.0, "random.csv", "content");
+        write(&lifecycle.dump, "random.csv", "content");
         let outcomes = tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(scan_folder(&state));
         // Only source folders produce results; the parked file has no source.
         assert_eq!(outcomes.len(), 0);
         assert!(
-            !lifecycle.0.join("random.csv").exists(),
+            !lifecycle.dump.join("random.csv").exists(),
             "the dump root must stay empty"
         );
         assert_eq!(
-            std::fs::read_to_string(lifecycle.2.join(UNKNOWN).join("random.csv")).unwrap(),
+            std::fs::read_to_string(lifecycle.failed.join(UNKNOWN).join("random.csv")).unwrap(),
             "content"
         );
     }
@@ -654,7 +821,7 @@ mod tests {
         let state = lifecycle.state(crate::db::init_memory().unwrap());
         let pool = state.db.clone();
 
-        let original = lifecycle.0.join("credit_agricole").join("export.csv");
+        let original = lifecycle.dump.join("credit_agricole").join("export.csv");
         std::fs::create_dir_all(original.parent().unwrap()).unwrap();
         let conn = pool.get().unwrap();
         conn.execute(
@@ -668,7 +835,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let stored = lifecycle.1.join("credit_agricole").join("export.csv");
+        let stored = lifecycle.parsed.join("credit_agricole").join("export.csv");
         repoint_rows(&state, SourceId::CreditAgricole, &original, &stored);
         let conn = pool.get().unwrap();
         let path: String = conn
@@ -679,5 +846,268 @@ mod tests {
             )
             .unwrap();
         assert_eq!(path, stored.display().to_string());
+    }
+
+    // -----------------------------------------------------------------------
+    // Derived placement
+    // -----------------------------------------------------------------------
+
+    /// A file with one statement, placed wherever the caller says, with the
+    /// line statuses given. Returns the file's path.
+    fn staged_file(
+        state: &AppState,
+        root: &Path,
+        name: &str,
+        statement_id: &str,
+        deleted: bool,
+        line_statuses: &[&str],
+    ) -> PathBuf {
+        let dir = root.join("credit_agricole");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write(&dir, name, "content");
+        let conn = state.db.get().unwrap();
+        conn.execute(
+            "INSERT INTO bank_statements
+                (id, source, institution, account_name, currency_code, stored_path,
+                 source_path, source_hash, source_key, status, created_at, updated_at,
+                 deleted_at)
+             VALUES (?1, 'credit_agricole', 'Crédit Agricole', 'Eko', 'EUR', ?2,
+                     ?2, ?1, ?1, 'staged', 1, 1, ?3)",
+            rusqlite::params![
+                statement_id,
+                path.display().to_string(),
+                deleted.then_some(1_i64)
+            ],
+        )
+        .unwrap();
+        for (index, status) in line_statuses.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO bank_statement_lines
+                    (id, statement_id, posted_at, description, amount, currency_code,
+                     line_kind, metadata_json, fingerprint, dedupe_key, status,
+                     created_at, updated_at)
+                 VALUES (?1, ?2, 1, 'x', -1.0, 'EUR', 'debit', '{}', ?1, ?1, ?3, 1, 1)",
+                rusqlite::params![format!("{statement_id}-{index}"), statement_id, status],
+            )
+            .unwrap();
+        }
+        path
+    }
+
+    fn file_names(dir: &Path) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(dir.join("credit_agricole")) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_file_with_pending_entries_belongs_in_staged() {
+        let tmp = TempDir::new("reconcile-staged");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+        staged_file(
+            &state,
+            &lifecycle.parsed,
+            "export.csv",
+            "s1",
+            false,
+            &["pending", "imported"],
+        );
+
+        reconcile_files(&state);
+
+        assert_eq!(file_names(&lifecycle.staged), ["export.csv"]);
+        assert!(file_names(&lifecycle.parsed).is_empty());
+        let conn = state.db.get().unwrap();
+        let stored: String = conn
+            .query_row("SELECT stored_path FROM bank_statements", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            stored.starts_with(&lifecycle.staged.display().to_string()),
+            "the row follows the file: {stored}"
+        );
+    }
+
+    /// `parsed/` means imported — not "the parser did not crash".
+    #[test]
+    fn a_fully_imported_file_moves_to_parsed() {
+        let tmp = TempDir::new("reconcile-parsed");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+        staged_file(
+            &state,
+            &lifecycle.staged,
+            "export.csv",
+            "s1",
+            false,
+            &["imported", "skipped"],
+        );
+
+        reconcile_files(&state);
+
+        assert_eq!(file_names(&lifecycle.parsed), ["export.csv"]);
+        assert!(file_names(&lifecycle.staged).is_empty());
+    }
+
+    /// The migration this plan exists to perform: a file sitting in `parsed/`
+    /// whose statements were all discarded moves to `discarded/` on the first
+    /// boot after the change, with no migration code of its own.
+    #[test]
+    fn a_discarded_statements_file_leaves_parsed_on_the_next_pass() {
+        let tmp = TempDir::new("reconcile-discarded");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+        staged_file(
+            &state,
+            &lifecycle.parsed,
+            "fristrade.csv",
+            "s1",
+            true,
+            &["pending"],
+        );
+
+        reconcile_files(&state);
+
+        assert_eq!(file_names(&lifecycle.discarded), ["fristrade.csv"]);
+        assert!(
+            file_names(&lifecycle.parsed).is_empty(),
+            "a rejected file must not keep looking imported"
+        );
+    }
+
+    /// Two statements of one file: it only moves on when both are settled.
+    #[test]
+    fn one_pending_statement_keeps_the_whole_file_staged() {
+        let tmp = TempDir::new("reconcile-mixed");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+        let path = staged_file(
+            &state,
+            &lifecycle.staged,
+            "ca.csv",
+            "s1",
+            false,
+            &["imported"],
+        );
+        {
+            let conn = state.db.get().unwrap();
+            conn.execute(
+                "INSERT INTO bank_statements
+                    (id, source, institution, account_name, currency_code, stored_path,
+                     source_path, source_hash, source_key, status, created_at, updated_at)
+                 VALUES ('s2','credit_agricole','Crédit Agricole','Livret','EUR',?1,?1,
+                         'h2','k2','staged',1,1)",
+                rusqlite::params![path.display().to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO bank_statement_lines
+                    (id, statement_id, posted_at, description, amount, currency_code,
+                     line_kind, metadata_json, fingerprint, dedupe_key, status,
+                     created_at, updated_at)
+                 VALUES ('l2','s2',1,'x',-1.0,'EUR','debit','{}','f2','d2','pending',1,1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        reconcile_files(&state);
+        assert_eq!(file_names(&lifecycle.staged), ["ca.csv"]);
+    }
+
+    /// Deriving rather than remembering means running twice changes nothing,
+    /// and a file moved by hand snaps back where it belongs.
+    #[test]
+    fn reconcile_is_idempotent_and_self_healing() {
+        let tmp = TempDir::new("reconcile-idempotent");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+        staged_file(
+            &state,
+            &lifecycle.staged,
+            "export.csv",
+            "s1",
+            false,
+            &["imported"],
+        );
+
+        reconcile_files(&state);
+        reconcile_files(&state);
+        assert_eq!(
+            file_names(&lifecycle.parsed),
+            ["export.csv"],
+            "a second pass must not disambiguate the file into export-2.csv"
+        );
+
+        // Someone drags it back by hand; the next pass puts it right.
+        let parsed = lifecycle.parsed.join("credit_agricole").join("export.csv");
+        let by_hand = lifecycle.staged.join("credit_agricole").join("export.csv");
+        std::fs::create_dir_all(by_hand.parent().unwrap()).unwrap();
+        std::fs::rename(&parsed, &by_hand).unwrap();
+        {
+            let conn = state.db.get().unwrap();
+            conn.execute(
+                "UPDATE bank_statements SET stored_path=?1",
+                rusqlite::params![by_hand.display().to_string()],
+            )
+            .unwrap();
+        }
+        reconcile_files(&state);
+        assert_eq!(file_names(&lifecycle.parsed), ["export.csv"]);
+    }
+
+    /// A parked file has no statement rows, so the walk never sees it — the
+    /// one root the reconcile must not fight over with `park`.
+    #[test]
+    fn a_parked_file_is_left_where_park_put_it() {
+        let tmp = TempDir::new("reconcile-failed");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+        std::fs::create_dir_all(lifecycle.failed.join("credit_agricole")).unwrap();
+        write(
+            &lifecycle.failed.join("credit_agricole"),
+            "broken.csv",
+            "junk",
+        );
+
+        reconcile_files(&state);
+
+        assert_eq!(file_names(&lifecycle.failed), ["broken.csv"]);
+    }
+
+    /// An `error` statement row *does* exist for a file whose parse failed
+    /// after a previous success, and it must not drag the parked file out of
+    /// `failed/`.
+    #[test]
+    fn an_error_statement_does_not_move_its_parked_file() {
+        let tmp = TempDir::new("reconcile-error-row");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+        let dir = lifecycle.failed.join("credit_agricole");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write(&dir, "broken.csv", "junk");
+        {
+            let conn = state.db.get().unwrap();
+            conn.execute(
+                "INSERT INTO bank_statements
+                    (id, source, institution, account_name, currency_code, stored_path,
+                     source_path, source_hash, source_key, status, parse_error,
+                     created_at, updated_at)
+                 VALUES ('e1','credit_agricole','Crédit Agricole','','EUR',?1,?1,
+                         'h','k','error','boom',1,1)",
+                rusqlite::params![path.display().to_string()],
+            )
+            .unwrap();
+        }
+
+        reconcile_files(&state);
+
+        assert_eq!(file_names(&lifecycle.failed), ["broken.csv"]);
     }
 }

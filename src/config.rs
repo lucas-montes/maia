@@ -107,16 +107,26 @@ pub struct Config {
     /// Watched files do not land here — their original moves to the parsed
     /// tree — but feed documents (which have no filename to honor) still do.
     pub statements_store_dir: Option<PathBuf>,
-    /// Root of the statement lifecycle. Files are dropped into
-    /// `<dump>/<source>/`, the subfolder name picks the parser, and after a
-    /// parse the file moves to `<parsed>/<source>/` — or to
-    /// `<failed>/<source>/` beside a `<name>.log` when it errored.
+    /// Roots of the statement lifecycle. Files are dropped into
+    /// `<dump>/<source>/`, the subfolder name picks the parser, and the file
+    /// then lives wherever the state of its statements says it belongs:
+    /// `<staged>/` while entries await review, `<parsed>/` once they are all
+    /// imported or skipped, `<discarded>/` once they are all deleted, or
+    /// `<failed>/<source>/` beside a `<name>.log` when the parse never
+    /// succeeded.
     ///
-    /// All three default under the user's XDG data directory, and the
+    /// `parsed/` used to mean "did not crash", which is not the same thing as
+    /// accepted — a rejected file sat there looking imported. The placement is
+    /// derived from the database now (see `statements::watch::reconcile_files`)
+    /// rather than written by whichever event last touched the file.
+    ///
+    /// All five default under the user's XDG data directory, and the
     /// deployment file may set them explicitly so the Nix module can create
     /// and grant them.
     pub statements_dump_dir: Option<PathBuf>,
+    pub statements_staged_dir: Option<PathBuf>,
     pub statements_parsed_dir: Option<PathBuf>,
+    pub statements_discarded_dir: Option<PathBuf>,
     pub statements_failed_dir: Option<PathBuf>,
     /// Trading 212 feed. Credentials in here come from the overlay only.
     pub t212: T212FeedConfig,
@@ -137,7 +147,9 @@ impl Config {
             base_currency: "EUR".to_string(),
             statements_store_dir: None,
             statements_dump_dir: None,
+            statements_staged_dir: None,
             statements_parsed_dir: None,
+            statements_discarded_dir: None,
             statements_failed_dir: None,
             t212: T212FeedConfig::default(),
         }
@@ -233,25 +245,41 @@ impl Config {
             .unwrap_or_else(|| Self::xdg_data_home().join("maia/statements/dump"))
     }
 
-    /// Defaults beside the dump root: `<dump>/../parsed`. This keeps the
+    /// Sibling of the dump root, e.g. `<dump>/../parsed`. This keeps the
     /// lifecycle in one tree even when only the dump folder is configured.
-    pub fn statements_parsed_dir(&self) -> PathBuf {
-        self.statements_parsed_dir.clone().unwrap_or_else(|| {
+    fn statements_sibling(&self, configured: Option<&PathBuf>, name: &str) -> PathBuf {
+        configured.cloned().unwrap_or_else(|| {
             self.statements_dump_dir()
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
-                .join("parsed")
+                .join(name)
         })
     }
 
-    /// Defaults beside the dump root: `<dump>/../failed`.
+    /// Parsed, awaiting review. A file sits here while any of its statements
+    /// still has a pending entry.
+    pub fn statements_staged_dir(&self) -> PathBuf {
+        self.statements_sibling(self.statements_staged_dir.as_ref(), "staged")
+    }
+
+    /// Imported. Every statement of the file has been accepted or skipped —
+    /// `parsed/` means the entries are in the ledger, not merely that the
+    /// parser did not crash.
+    pub fn statements_parsed_dir(&self) -> PathBuf {
+        self.statements_sibling(self.statements_parsed_dir.as_ref(), "parsed")
+    }
+
+    /// Rejected. Every statement of the file was deleted without being
+    /// accepted. The file is kept, not unlinked: dropping it back in is how a
+    /// statement dismissed by mistake is recovered.
+    pub fn statements_discarded_dir(&self) -> PathBuf {
+        self.statements_sibling(self.statements_discarded_dir.as_ref(), "discarded")
+    }
+
+    /// Never parsed. Owned by `park`, and the one root with no statement rows
+    /// behind it.
     pub fn statements_failed_dir(&self) -> PathBuf {
-        self.statements_failed_dir.clone().unwrap_or_else(|| {
-            self.statements_dump_dir()
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join("failed")
-        })
+        self.statements_sibling(self.statements_failed_dir.as_ref(), "failed")
     }
 
     /// Directory holding exercise images and videos for `GET /media/*`.
@@ -378,7 +406,9 @@ impl Config {
                 .map(PathBuf::from)
         };
         cfg.statements_dump_dir = statement_path("dump_dir");
+        cfg.statements_staged_dir = statement_path("staged_dir");
         cfg.statements_parsed_dir = statement_path("parsed_dir");
+        cfg.statements_discarded_dir = statement_path("discarded_dir");
         cfg.statements_failed_dir = statement_path("failed_dir");
 
         // Feed behaviour merges from the overlay because the desktop Settings
@@ -483,7 +513,9 @@ impl Default for Config {
             base_currency: "EUR".to_string(),
             statements_store_dir: None,
             statements_dump_dir: None,
+            statements_staged_dir: None,
             statements_parsed_dir: None,
+            statements_discarded_dir: None,
             statements_failed_dir: None,
             t212: T212FeedConfig::default(),
         }

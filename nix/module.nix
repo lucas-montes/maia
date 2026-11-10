@@ -43,8 +43,14 @@
       # owned (the server moves files around inside them), and unset only when
       # the deployment has no home directory to hang them on -- the server then
       # falls back to the XDG default under the user's own data dir.
+      # A parsed file moves through these by itself: staged while its entries
+      # await review, parsed once they are imported, discarded once they are
+      # dismissed. The placement is derived from the database, so the server
+      # needs write access to all of them.
       dump_dir = mkIf (cfg.statementsRoot != null) "${cfg.statementsRoot}/dump";
+      staged_dir = mkIf (cfg.statementsRoot != null) "${cfg.statementsRoot}/staged";
       parsed_dir = mkIf (cfg.statementsRoot != null) "${cfg.statementsRoot}/parsed";
+      discarded_dir = mkIf (cfg.statementsRoot != null) "${cfg.statementsRoot}/discarded";
       failed_dir = mkIf (cfg.statementsRoot != null) "${cfg.statementsRoot}/failed";
       feeds.trading212 = {
         enabled = cfg.trading212.enable;
@@ -170,13 +176,16 @@ in
         then "${userHome}/.local/share/maia/statements"
         else null;
       description = ''
-        Root of the statement dump lifecycle: files are dropped into
-        `<root>/dump/<source>/`, staged automatically by the server, and moved
-        to `<root>/parsed/<source>/` when parsed -- or to
-        `<root>/failed/<source>/` with a reason beside them when not. Defaults
-        to the service user's XDG data directory; set it to keep the files
-        somewhere specific. Each root and subdirectory is created by the module
-        and granted to the service.
+        Root of the statement lifecycle: files are dropped into
+        `<root>/dump/<source>/` and staged automatically by the server, which
+        then keeps each file where the state of its statements says it belongs
+        -- `<root>/staged/<source>/` while entries await review,
+        `<root>/parsed/<source>/` once they are imported,
+        `<root>/discarded/<source>/` once they are dismissed, or
+        `<root>/failed/<source>/` with a reason beside them when the parse
+        never succeeded. Defaults to the service user's XDG data directory; set
+        it to keep the files somewhere specific. Each root and subdirectory is
+        created by the module and granted to the service.
       '';
     };
 
@@ -250,7 +259,9 @@ in
           lib.optionals (cfg.statementsRoot != null) [
             "d ${cfg.statementsRoot} 0750 ${cfg.user} users - -"
             "d ${cfg.statementsRoot}/dump 0750 ${cfg.user} users - -"
+            "d ${cfg.statementsRoot}/staged 0750 ${cfg.user} users - -"
             "d ${cfg.statementsRoot}/parsed 0750 ${cfg.user} users - -"
+            "d ${cfg.statementsRoot}/discarded 0750 ${cfg.user} users - -"
             "d ${cfg.statementsRoot}/failed 0750 ${cfg.user} users - -"
           ];
       in
@@ -340,7 +351,9 @@ in
           ++ lib.optionals (cfg.statementsRoot != null) [
             "${cfg.statementsRoot}"
             "${cfg.statementsRoot}/dump"
+            "${cfg.statementsRoot}/staged"
             "${cfg.statementsRoot}/parsed"
+            "${cfg.statementsRoot}/discarded"
             "${cfg.statementsRoot}/failed"
           ];
         ProtectSystem = "strict";

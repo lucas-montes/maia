@@ -365,6 +365,9 @@ pub async fn delete_statements(
         .get()
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let deleted = soft_delete_statements(&mut conn, &request.ids)?;
+    // A discarded statement's file is not imported, so it must not stay in
+    // `parsed/` looking as if it were.
+    settle_files(&state, conn);
     Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
@@ -384,7 +387,18 @@ pub async fn import_statement(
         .map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
     tx.commit()
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    settle_files(&state, conn);
     Ok(Json(outcome))
+}
+
+/// Move the statements' files to the root their new state implies.
+///
+/// Takes the connection by value to drop it first: `reconcile_files` opens its
+/// own, and the pooled test connection is one wide — holding both would
+/// deadlock rather than fail.
+fn settle_files(state: &AppState, conn: db::DbConnection) {
+    drop(conn);
+    statements::watch::reconcile_files(state);
 }
 
 #[derive(Debug, Deserialize)]
@@ -424,6 +438,7 @@ pub async fn import_statements(
     }
     tx.commit()
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    settle_files(&state, conn);
     Ok(Json(serde_json::json!({ "statements": outcomes })))
 }
 
@@ -499,6 +514,7 @@ pub async fn delete_statement(
     if changed == 0 {
         return Err(error(StatusCode::NOT_FOUND, "statement not found"));
     }
+    settle_files(&state, conn);
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

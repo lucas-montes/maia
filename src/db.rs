@@ -20,6 +20,10 @@ use rusqlite::Connection;
 /// them, and `busy_timeout` below is what turns that serialisation into a short
 /// wait rather than an immediate "database is locked".
 pub type DbPool = Pool<SqliteConnectionManager>;
+/// One checked-out connection. Named so callers can take one by value — the
+/// pool is one connection wide in tests, so a function that opens its own must
+/// be handed the caller's to drop first.
+pub type DbConnection = r2d2::PooledConnection<SqliteConnectionManager>;
 
 /// Connections held open. Enough to let every core handle a request at once
 /// without keeping idle connections around indefinitely after a burst.
