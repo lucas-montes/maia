@@ -8,7 +8,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ACCOUNT_NS, LINE_NS, STATEMENT_NS, TRANSACTION_NS, TRANSFER_NS,
+    LINE_NS, STATEMENT_NS, TRANSACTION_NS, TRANSFER_NS,
     draft::{SaveOutcome, StatementDraft, SuggestedType},
     stable_uuid,
 };
@@ -1216,8 +1216,19 @@ fn rate_for(tx: &Transaction<'_>, code: &str, base: &str, date_ms: i64) -> anyho
 
 /// Resolve the budget account for a statement, creating it on first import.
 ///
-/// The account id is deterministic so a re-import finds the same row. A
-/// tombstoned account is an error, not something to revive.
+/// Fetch, then create: the exact `(source, external_id)` lookup runs before
+/// anything is minted, so reusing an account the user already has is always
+/// the first answer. A created account is an *ordinary* account — its id is a
+/// fresh `Uuid::now_v7()` and means nothing. It used to be
+/// `stable_uuid(ACCOUNT_NS, "account:<source>:<external_id>")`, which welded
+/// the row's identity to the provider's: correcting an account number silently
+/// re-pointed the next import at a different id and stranded everything
+/// already imported onto the old one. The idempotency that derived id was
+/// providing now comes from the partial unique index `idx_accounts_external`,
+/// which is stronger — enforced by the database rather than by two call sites
+/// agreeing on a hash.
+///
+/// A tombstoned account is an error, not something to revive.
 fn resolve_account(
     tx: &Transaction<'_>,
     statement: &StatementRow,
@@ -1242,19 +1253,17 @@ fn resolve_account(
         return Ok(Some(id));
     }
 
-    let id = stable_uuid(
-        ACCOUNT_NS,
-        &format!("account:{}:{}", statement.source, external_id),
-    );
     let type_ = default_account_type(&statement.source, &statement.account_name);
     tx.execute(
         "INSERT INTO accounts
             (id, name, type, opening_balance, note, created_at, updated_at,
              deleted_at, source, external_id)
          VALUES (?1,?2,?3,0.0,NULL,?4,?4,NULL,?5,?6)
-         ON CONFLICT(id) DO NOTHING",
+         ON CONFLICT(source, external_id)
+            WHERE source IS NOT NULL AND external_id IS NOT NULL
+            DO NOTHING",
         params![
-            id,
+            uuid::Uuid::now_v7().to_string(),
             statement.account_name,
             type_,
             now,
@@ -1262,6 +1271,11 @@ fn resolve_account(
             external_id,
         ],
     )?;
+    // Read the id back rather than trusting the one just minted: on the
+    // conflict path (the same identity resolved twice inside one transaction)
+    // nothing was inserted, and the account's real id is the existing row's.
+    let id = lookup_external_account(tx, &statement.source, external_id)?
+        .with_context(|| format!("account for {} {external_id} not created", statement.source))?;
     ensure_account_live(tx, &id)?;
     tx.execute(
         "UPDATE bank_statements SET account_id=?1 WHERE id=?2",
@@ -1480,6 +1494,156 @@ mod tests {
             ["pending", "duplicate"],
         );
         assert_eq!(lines_in_month(&pool, "2026-02"), 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // Account identity
+    // -----------------------------------------------------------------------
+
+    fn import_all(pool: &crate::db::DbPool, statement_id: &str) -> ImportOutcome {
+        let mut conn = pool.get().unwrap();
+        let tx = conn.transaction().unwrap();
+        let outcome = import_statement(
+            &tx,
+            statement_id,
+            ImportRequest {
+                lines: Vec::new(),
+                account_id: None,
+                counterpart_account_id: None,
+                auto_link: Some(false),
+            },
+            "EUR",
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        outcome
+    }
+
+    /// `(id, name, type)` of every live account.
+    fn accounts_of(pool: &crate::db::DbPool) -> Vec<(String, String, String)> {
+        let conn = pool.get().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id, name, type FROM accounts WHERE deleted_at IS NULL ORDER BY name")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    }
+
+    /// An imported account is an ordinary row: its id is minted, not derived
+    /// from `(source, external_id)`, which is what makes the identity editable
+    /// later without moving where the next import looks.
+    #[test]
+    fn an_imported_account_gets_a_minted_id_and_is_reused_by_identity() {
+        let pool = crate::db::init_memory().unwrap();
+        let (early, late) = overlapping_exports();
+
+        let first = stage_export(&pool, &early, "one.csv");
+        import_all(&pool, &first);
+        let created = accounts_of(&pool);
+        assert_eq!(created.len(), 1, "one identity, one account");
+        let account_id = created[0].0.clone();
+        assert_eq!(created[0].2, "investment");
+
+        let derived = stable_uuid(
+            uuid::Uuid::from_u128(0x0a1c_2e4f_6b8d_4f01_9a3c_5e7f_9b1d_2f40),
+            "account:trading212:csv",
+        );
+        assert_ne!(
+            account_id, derived,
+            "the id must not be derived from the provider identity"
+        );
+        assert_eq!(
+            uuid::Uuid::parse_str(&account_id).unwrap().get_version_num(),
+            7,
+            "ordinary accounts are v7, the project's convention"
+        );
+
+        // A second file of the same identity reuses the row by lookup, not by
+        // recomputing an id.
+        let second = stage_export(&pool, &late, "two.csv");
+        import_all(&pool, &second);
+        let after = accounts_of(&pool);
+        assert_eq!(after.len(), 1, "still one account");
+        assert_eq!(after[0].0, account_id);
+    }
+
+    /// An import must never overwrite an edit the user made. `resolve_account`
+    /// only ever INSERTs, and `save_statement` writes the statement's own copy
+    /// of the name — this pins that rather than relying on it staying true.
+    #[test]
+    fn an_edited_account_survives_a_later_import() {
+        let pool = crate::db::init_memory().unwrap();
+        let (early, late) = overlapping_exports();
+
+        let first = stage_export(&pool, &early, "one.csv");
+        import_all(&pool, &first);
+        let account_id = accounts_of(&pool)[0].0.clone();
+
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "UPDATE accounts SET name='My broker', type='bank', opening_balance=25.0,
+                                     note='hand written' WHERE id=?1",
+                params![account_id],
+            )
+            .unwrap();
+        }
+
+        let second = stage_export(&pool, &late, "two.csv");
+        import_all(&pool, &second);
+
+        let conn = pool.get().unwrap();
+        let (id, name, type_, opening, note): (String, String, String, f64, Option<String>) = conn
+            .query_row(
+                "SELECT id, name, type, opening_balance, note FROM accounts",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(id, account_id, "the id never changes");
+        assert_eq!(name, "My broker");
+        assert_eq!(type_, "bank");
+        assert_eq!(opening, 25.0);
+        assert_eq!(note.as_deref(), Some("hand written"));
+    }
+
+    /// With a random id, the primary key can no longer be the conflict target
+    /// that matters. Resolving the same identity twice inside one transaction
+    /// must still yield one account.
+    #[test]
+    fn the_same_identity_resolved_twice_in_one_transaction_creates_one_account() {
+        let pool = crate::db::init_memory().unwrap();
+        let (early, late) = overlapping_exports();
+        let first = stage_export(&pool, &early, "one.csv");
+        let second = stage_export(&pool, &late, "two.csv");
+
+        // Scoped: the test pool is one connection wide, so the read below has
+        // to wait for this one to go back.
+        {
+            let mut conn = pool.get().unwrap();
+            let tx = conn.transaction().unwrap();
+            for id in [&first, &second] {
+                import_statement(
+                    &tx,
+                    id,
+                    ImportRequest {
+                        lines: Vec::new(),
+                        account_id: None,
+                        counterpart_account_id: None,
+                        auto_link: Some(false),
+                    },
+                    "EUR",
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        assert_eq!(accounts_of(&pool).len(), 1);
     }
 
     /// Re-dropping identical bytes stays a no-op: same key, same hash.

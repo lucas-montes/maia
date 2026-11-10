@@ -32,9 +32,16 @@ pub use draft::{LineKind, SaveOutcome, StatementDraft, StatementLineDraft, Sugge
 use crate::server::AppState;
 
 /// Stable namespace for deterministic ids. **Never change these**: changing one
-/// would make every re-import create a second account, statement or transaction
-/// instead of matching the first.
-pub const ACCOUNT_NS: Uuid = Uuid::from_u128(0x0a1c_2e4f_6b8d_4f01_9a3c_5e7f_9b1d_2f40);
+/// would make every re-import create a second statement or transaction instead
+/// of matching the first.
+///
+/// There is deliberately no account namespace. Accounts used to take a derived
+/// id too, which made the provider identity unchangeable in practice — editing
+/// an account number re-pointed the next import at a different id. A created
+/// account now gets an ordinary `Uuid::now_v7()` and is found by its
+/// `(source, external_id)` columns, which the partial unique index
+/// `idx_accounts_external` keeps unique; ids already in the database keep the
+/// v5 values they were minted with, since nothing looks them up by shape.
 pub const STATEMENT_NS: Uuid = Uuid::from_u128(0x1b2d_3f5a_7c9e_4a02_8b4d_6f80_1c3e_5a70);
 pub const LINE_NS: Uuid = Uuid::from_u128(0x2c3e_4a6b_8d0f_4b03_9c5e_7a91_2d4f_6b80);
 pub const TRANSACTION_NS: Uuid = Uuid::from_u128(0x3d4f_5b7c_9e1a_4c04_8d6f_9b12_3e5a_7c90);
