@@ -493,6 +493,10 @@ pub async fn ignore_statement(
             "statement not found or already imported",
         ));
     }
+    // Ignoring is a decision about the file too: without this its entries stay
+    // `pending` and it would sit in `staged/` awaiting a review of a statement
+    // the list no longer shows.
+    settle_files(&state, conn);
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

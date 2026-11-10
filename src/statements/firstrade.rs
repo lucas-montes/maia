@@ -79,11 +79,18 @@ impl Parser for FirstradeSource {
                 warnings.push(format!("row without a date: {}", row.raw.join(",")));
                 continue;
             };
-            // The row's own day disambiguates repeats, where the month used to:
-            // now that a whole file is one statement, two identical rows a
-            // month apart must still fingerprint differently, and a day is the
-            // finest grain the export actually carries.
-            let day = day_key(posted_at);
+            // The month stays in the fingerprint even though statements are no
+            // longer month-scoped, and that is load-bearing in both
+            // directions. It still disambiguates: `occurrences` was always
+            // file-scoped, so two identical rows a month apart differ by month
+            // and two in the same month differ by occurrence index — the
+            // uniqueness `UNIQUE(statement_id, fingerprint)` needs now that one
+            // statement holds the whole file. And it must not change, because
+            // `dedupe_key` is derived from it and the booked transaction id is
+            // `stable_uuid(TRANSACTION_NS, "line:<dedupe_key>")`: a new
+            // fingerprint would make every line of an already-imported export
+            // look new on re-drop and book a second transaction for it.
+            let month = month_key(posted_at);
             let (line_kind, suggested_type) = classify(&row.action, row.amount);
             let amount = match line_kind {
                 LineKind::Trade => 0.0,
@@ -92,7 +99,7 @@ impl Parser for FirstradeSource {
                 _ => row.amount,
             };
             let key = (
-                day.clone(),
+                month.clone(),
                 row.action.clone(),
                 row.symbol.clone(),
                 format!("{:.4}:{}", amount, row.description),
@@ -104,7 +111,7 @@ impl Parser for FirstradeSource {
             let fingerprint = sha256_hex(&[
                 SourceId::Firstrade.as_str(),
                 &self.account_number,
-                &day,
+                &month,
                 &row.action,
                 &row.symbol,
                 &format!("{amount:.4}"),
@@ -462,6 +469,14 @@ fn suggested_category(kind: LineKind) -> Option<String> {
     }
 }
 
+/// `2026-02` — the fingerprint grain, kept from before the collapse.
+fn month_key(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|dt| dt.format("%Y-%m").to_string())
+        .unwrap_or_else(|| "1970-01".to_string())
+}
+
+/// `2026-02-03` — the period span, which is about the file, not identity.
 fn day_key(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|dt| dt.format("%Y-%m-%d").to_string())
@@ -591,10 +606,10 @@ mod tests {
         assert_eq!(draft[0].source_key, "firstrade:firstrade:hash");
     }
 
-    /// Two rows that differ only by month used to be told apart by the month in
-    /// their fingerprint. Now that the whole file is one statement, the day has
-    /// to do that job -- otherwise the second row would be dropped by the
-    /// `UNIQUE(statement_id, fingerprint)` insert.
+    /// Rows that differ only by when they happened must still be told apart now
+    /// that one statement holds the whole file, or the second would be dropped
+    /// by the `UNIQUE(statement_id, fingerprint)` insert. The month does it
+    /// across months and the occurrence index within one.
     #[test]
     fn identical_rows_in_different_months_keep_distinct_fingerprints() {
         let csv = "Date,Action,Symbol,Description,Quantity,Price,Amount\n\
@@ -616,6 +631,42 @@ mod tests {
             .map(|line| line.fingerprint.as_str())
             .collect();
         assert_eq!(prints.len(), 3, "three rows, three identities");
+    }
+
+    /// A line's `dedupe_key` is its identity *across* statements, and the
+    /// transaction it books is `stable_uuid(TRANSACTION_NS, "line:<dedupe_key>")`
+    /// — so changing how it is computed makes every already-imported line of a
+    /// re-dropped export look new and book a second transaction for money
+    /// already in the ledger. Collapsing the month split deliberately did not
+    /// touch it; this pins the value so a later change has to be deliberate
+    /// too.
+    #[test]
+    fn the_dedupe_key_is_stable_across_the_month_collapse() {
+        let csv = "Date,Action,Symbol,Description,Quantity,Price,Amount\n\
+                   06/15/2026,DEPOSIT,,ACH deposit,,,100.00\n";
+        let doc = RawDocument::file(
+            DocumentKind::Csv,
+            csv.as_bytes().to_vec(),
+            PathBuf::from("x.csv"),
+        );
+        let statements = FirstradeSource::new(PathBuf::from("x.csv"))
+            .parse(&[doc], &ctx())
+            .unwrap();
+
+        // The value a month-split parse produced for this row, recomputed the
+        // way that parser did: month in the fingerprint, index 0.
+        let fingerprint = sha256_hex(&[
+            "firstrade",
+            "firstrade",
+            "2026-06",
+            "DEPOSIT",
+            "",
+            "100.0000",
+            "ACH deposit",
+            "0",
+        ]);
+        let expected = sha256_hex(&["firstrade", "firstrade", &fingerprint]);
+        assert_eq!(statements[0].lines[0].dedupe_key, expected);
     }
 
     /// An undated row never reaches a statement, and the dated ones around it

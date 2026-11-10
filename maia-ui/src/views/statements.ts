@@ -2,6 +2,7 @@ import {
   api,
   isEnvelopeFailure,
   type ImportPreview,
+  type PreviewAccount,
   type StatementDetail,
   type StatementFeedStatus,
   type StatementImportBatchEntry,
@@ -508,20 +509,45 @@ function accountGroupsHtml(
   accounts: { id: string; name: string; type: string }[],
   overrides: Record<string, string>,
 ): string {
-  if (!preview) {
-    return `<div class="rounded border border-surface-800 bg-base-100 p-4 text-sm text-ink-500">
-      ${previewing ? "Checking which accounts these entries land on…" : "Select entries to see which accounts they land on."}
-    </div>`;
+  // The panel is built from the *file's* accounts, not from the preview's.
+  //
+  // The preview only describes statements with something selected, so driving
+  // the panel off it made an account's whole row — checkbox, "Import into"
+  // picker, adopt-identity buttons — disappear the moment its entries were
+  // unticked, which is exactly when the user is most likely to want them. The
+  // rows are stable; the preview fills in what the import would do with each.
+  const groups = new Map<string, StatementDetail[]>();
+  for (const detail of statements) {
+    const s = detail.statement;
+    const key = `${s.source}:${s.accountNumber ?? s.id}`;
+    groups.set(key, [...(groups.get(key) ?? []), detail]);
   }
-  if (preview.accounts.length === 0) {
-    return `<div class="rounded border border-surface-800 bg-base-100 p-4 text-sm text-ink-500">No accounts involved.</div>`;
+  if (groups.size === 0) {
+    return `<div class="rounded border border-surface-800 bg-base-100 p-4 text-sm text-ink-500">No accounts in this file.</div>`;
   }
-  const byId = new Map(statements.map((detail) => [detail.statement.id, detail]));
-  const rows = preview.accounts
-    .map((account) => {
-      const details = account.statementIds
-        .map((id) => byId.get(id))
-        .filter((detail): detail is StatementDetail => detail !== undefined);
+  const rows = [...groups.values()]
+    .map((details) => {
+      const ids = new Set(details.map((detail) => detail.statement.id));
+      const first = details[0].statement;
+      const described = preview?.accounts.find((candidate) =>
+        candidate.statementIds.some((id) => ids.has(id)),
+      );
+      // Nothing selected from this account: say so rather than guessing what
+      // an import that excludes it would have done with it.
+      const account: PreviewAccount = described ?? {
+        accountId: null,
+        name: first.resolvedAccountName ?? first.accountName,
+        accountType: "",
+        source: first.source,
+        externalId: first.accountNumber,
+        resolution: "untouched",
+        statementIds: [...ids],
+        files: details
+          .map((detail) => detail.statement.sourcePath)
+          .filter((path): path is string => Boolean(path)),
+        transactions: 0,
+        suggestions: [],
+      };
       const lines = details.flatMap((detail) => detail.lines.filter((line) => selectable.has(line.id)));
       const allPicked = lines.length > 0 && lines.every((line) => selected.has(line.id));
       const somePicked = lines.some((line) => selected.has(line.id));
@@ -530,7 +556,7 @@ function accountGroupsHtml(
           ? `<span class="text-ink-400">uses existing account</span> <span class="text-ink-200">${escapeHtml(account.name)}</span>`
           : account.resolution === "willCreate"
             ? `<span class="badge badge-warn">will be created</span> <span class="text-ink-200">${escapeHtml(account.name)}</span> <span class="text-ink-500">(${escapeHtml(account.accountType)})</span>`
-            : `<span class="text-ink-500">nothing selected from this account</span>`;
+              : `<span class="text-ink-200">${escapeHtml(account.name)}</span> <span class="text-ink-500">— nothing selected${previewing ? ", checking…" : ""}</span>`;
       const override = details
         .map((detail) => overrides[detail.statement.id])
         .find((value) => value !== undefined);

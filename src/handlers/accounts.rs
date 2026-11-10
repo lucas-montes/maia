@@ -23,6 +23,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 
 use crate::{db, error::ErrorBody, server::AppState, statements::SourceId};
@@ -88,40 +89,57 @@ pub async fn put_account_identity(
         .transaction()
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // `.optional()?` rather than `.ok()`: a busy database must not be reported
+    // as "account not found", and below it must not be reported as "no
+    // conflict" — which would let the UPDATE fail with a raw SQLITE_CONSTRAINT
+    // as a 500, the very thing the pre-check exists to avoid.
     let existing: Option<Option<i64>> = tx
         .query_row(
             "SELECT deleted_at FROM accounts WHERE id=?1",
             rusqlite::params![id],
             |r| r.get(0),
         )
-        .ok();
+        .optional()
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     match existing {
         None => return Err(error(StatusCode::NOT_FOUND, format!("account {id} not found"))),
-        Some(Some(_)) => {
+        // Clearing is always allowed, including on a tombstone: a deleted
+        // account still holds its number against the partial unique index, so
+        // refusing here would leave that number unusable by anything, with no
+        // way back — the tombstone is invisible on the accounts screen.
+        Some(Some(_)) if identity.is_some() => {
             return Err(error(
                 StatusCode::BAD_REQUEST,
                 format!("account {id} is deleted; restore it before setting its number"),
             ));
         }
-        Some(None) => {}
+        Some(_) => {}
     }
 
     // The partial unique index would reject this anyway; checking first is what
     // turns a raw SQLITE_CONSTRAINT into an answer the user can act on.
     if let Some((source, external_id)) = identity.as_ref() {
-        let holder: Option<(String, String)> = tx
+        let holder: Option<(String, String, bool)> = tx
             .query_row(
-                "SELECT id, name FROM accounts
+                "SELECT id, name, deleted_at IS NOT NULL FROM accounts
                  WHERE source=?1 AND external_id=?2 AND id<>?3",
                 rusqlite::params![source, external_id, id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
-            .ok();
-        if let Some((other_id, other_name)) = holder {
+            .optional()
+            .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let Some((other_id, other_name, deleted)) = holder {
+            // Say when the holder is a tombstone. Otherwise the refusal names
+            // an account the user cannot find anywhere to clear it from.
+            let where_ = if deleted {
+                " (a deleted account)"
+            } else {
+                ""
+            };
             return Err(error(
                 StatusCode::CONFLICT,
                 format!(
-                    "{source} {external_id} already belongs to {other_name} ({other_id}); \
+                    "{source} {external_id} already belongs to {other_name} ({other_id}){where_}; \
                      clear it there first"
                 ),
             ));
@@ -423,6 +441,45 @@ mod tests {
             })
             .unwrap();
         assert_eq!(name, "Eko by CA (renamed on the phone)");
+    }
+
+    /// A number a *deleted* account still holds is refused to everyone else —
+    /// the partial unique index covers tombstones — so clearing it from the
+    /// tombstone has to be possible, or the number is unusable for good and
+    /// the account holding it is invisible on the accounts screen.
+    #[tokio::test]
+    async fn a_number_held_by_a_tombstone_can_be_freed() {
+        let state = state();
+        account(&state, "dead", "Old Firstrade");
+        account(&state, "live", "Firstrade");
+        put(&state, "dead", Some("firstrade"), Some("firstrade"))
+            .await
+            .unwrap();
+        {
+            let conn = state.db.get().unwrap();
+            conn.execute("UPDATE accounts SET deleted_at=1 WHERE id='dead'", [])
+                .unwrap();
+        }
+
+        let (status, Json(body)) = put(&state, "live", Some("firstrade"), Some("firstrade"))
+            .await
+            .unwrap_err();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body.message.contains("deleted account"),
+            "the refusal has to say the holder is a tombstone: {}",
+            body.message
+        );
+
+        // Clearing works on a tombstone even though setting does not.
+        put(&state, "dead", None, None).await.unwrap();
+        put(&state, "live", Some("firstrade"), Some("firstrade"))
+            .await
+            .unwrap();
+        assert_eq!(
+            identity_of(&state, "live"),
+            (Some("firstrade".into()), Some("firstrade".into()))
+        );
     }
 
     #[tokio::test]

@@ -111,11 +111,15 @@ fn start_inotify(state: &AppState) -> Option<UnboundedReceiver<Option<PathBuf>>>
     // up as promptly as one dropped in the dump tree. The lifecycle roots
     // deliberately do not: the service moves files into them itself, and
     // watching them would make it re-ingest its own work.
-    if let Some(intake) = state.config.statements_intake_dir() {
-        if intake.is_dir() {
-            dirs.push(intake);
-        }
-    }
+    //
+    // It is optional in a way the dump folders are not — a user-set path that
+    // has gone away, or one watch past the inotify limit, must not cost the
+    // dump tree its watches — so it is registered separately below and only
+    // ever downgrades itself to the sweep.
+    let intake = state
+        .config
+        .statements_intake_dir()
+        .filter(|intake| intake.is_dir());
 
     let (sender, receiver) = unbounded_channel::<Option<PathBuf>>();
     let inotify = match Inotify::init() {
@@ -142,6 +146,20 @@ fn start_inotify(state: &AppState) -> Option<UnboundedReceiver<Option<PathBuf>>>
                 tracing::warn!(path = %dir.display(), error = %error, "cannot watch statement dump folder");
                 return None;
             }
+        }
+    }
+
+    if let Some(intake) = intake {
+        match inotify
+            .watches()
+            .add(&intake, WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO)
+        {
+            Ok(descriptor) => by_descriptor.push((descriptor, intake)),
+            Err(error) => tracing::warn!(
+                path = %intake.display(),
+                error = %error,
+                "cannot watch the statement intake folder; it will be drained by the sweep"
+            ),
         }
     }
 
@@ -533,7 +551,7 @@ pub fn drain_intake(state: &AppState) -> usize {
 /// |----------------------------------------|---------------|
 /// | any live statement with pending lines  | `staged/`     |
 /// | every live statement imported/skipped  | `parsed/`     |
-/// | every statement soft-deleted           | `discarded/`  |
+/// | every statement soft-deleted or ignored| `discarded/`  |
 ///
 /// Because it derives rather than remembers, it migrates files mislabelled by
 /// the old "parsed means did not crash" rule on first boot for free, and
@@ -590,12 +608,17 @@ pub fn reconcile_files(state: &AppState) {
 /// — a missing FX rate is the usual one — is neither, so its file stays in
 /// `staged/`: `parsed/` means imported, and a file whose entries all failed to
 /// import is the furthest thing from that.
+///
+/// An `ignored` statement counts as gone rather than live. The user said "not
+/// this" without deleting it, and it leaves its lines `pending`; counting it
+/// live would pin its file in `staged/` for good, awaiting a review of a
+/// statement the list no longer shows.
 fn collect_file_states(state: &AppState) -> anyhow::Result<Vec<(String, String, Destination)>> {
     let conn = state.db.get()?;
     let mut stmt = conn.prepare(
         "SELECT s.stored_path, s.source,
-                SUM(s.deleted_at IS NULL) AS live,
-                SUM(s.deleted_at IS NULL AND EXISTS (
+                SUM(s.deleted_at IS NULL AND s.status <> 'ignored') AS live,
+                SUM(s.deleted_at IS NULL AND s.status <> 'ignored' AND EXISTS (
                     SELECT 1 FROM bank_statement_lines l
                     WHERE l.statement_id = s.id AND l.status IN ('pending','error')
                 )) AS pending
@@ -1087,6 +1110,34 @@ mod tests {
             file_names(&lifecycle.parsed).is_empty(),
             "nothing was imported, so parsed/ would be a lie"
         );
+    }
+
+    /// Ignoring a statement leaves its lines `pending` and takes it out of the
+    /// list, so counting it live would pin its file in `staged/` awaiting a
+    /// review of something no longer shown. It is a decision, like deleting.
+    #[test]
+    fn an_ignored_statement_does_not_pin_its_file_in_staged() {
+        let tmp = TempDir::new("reconcile-ignored");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+        staged_file(
+            &state,
+            &lifecycle.staged,
+            "ca.csv",
+            "s1",
+            false,
+            &["pending"],
+        );
+        {
+            let conn = state.db.get().unwrap();
+            conn.execute("UPDATE bank_statements SET status='ignored'", [])
+                .unwrap();
+        }
+
+        reconcile_files(&state);
+
+        assert_eq!(file_names(&lifecycle.discarded), ["ca.csv"]);
+        assert!(file_names(&lifecycle.staged).is_empty());
     }
 
     /// Two statements of one file: it only moves on when both are settled.
