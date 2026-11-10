@@ -13,6 +13,7 @@ use crate::{
     server::AppState,
     statements::{
         self, DocumentKind, RawDocument, SourceId, SourceSpec,
+        preview::{self, ImportPreview, PreviewStatement},
         store::{self, ImportOutcome, ImportRequest},
     },
 };
@@ -424,6 +425,35 @@ pub async fn import_statements(
     tx.commit()
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(serde_json::json!({ "statements": outcomes })))
+}
+
+/// `POST /statements/preview` — what `/statements/import` would do with the
+/// very same body.
+///
+/// It is the real import, executed and rolled back, so the number on screen is
+/// the number the button produces. The handler deliberately does nothing
+/// around the store call: no file reconcile, no notifier, no second connection
+/// — anything outside the transaction would escape the rollback and make a dry
+/// run not one.
+pub async fn preview_statements(
+    State(state): State<AppState>,
+    Json(body): Json<BatchImportRequest>,
+) -> Result<Json<ImportPreview>, ApiError> {
+    let mut conn = state
+        .db
+        .get()
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let requests = body
+        .statements
+        .into_iter()
+        .map(|statement| PreviewStatement {
+            id: statement.id,
+            request: statement.request,
+        })
+        .collect();
+    let preview = preview::preview_import(&mut conn, requests, &state.config.base_currency)
+        .map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(preview))
 }
 
 pub async fn ignore_statement(

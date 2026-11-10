@@ -12,6 +12,7 @@
 pub mod ca;
 pub mod draft;
 pub mod firstrade;
+pub mod preview;
 pub mod store;
 pub mod t212;
 pub mod t212_csv;

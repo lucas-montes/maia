@@ -125,6 +125,8 @@ pub fn create_router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_STATEMENT_BYTES)),
         )
         .route("/statements/import", post(crate::handlers::statements::import_statements))
+        // The same body as /statements/import, run and rolled back.
+        .route("/statements/preview", post(crate::handlers::statements::preview_statements))
         .route("/statements/delete", post(crate::handlers::statements::delete_statements))
         .route("/statements/file", get(crate::handlers::statements::get_statement_file))
         .route(

@@ -1330,7 +1330,7 @@ fn ensure_account_live(tx: &Transaction<'_>, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn lookup_external_account(
+pub(crate) fn lookup_external_account(
     tx: &Transaction<'_>,
     source: &str,
     external_id: &str,
@@ -1659,7 +1659,7 @@ mod tests {
     }
 }
 
-fn default_account_type(source: &str, name: &str) -> &'static str {
+pub(crate) fn default_account_type(source: &str, name: &str) -> &'static str {
     match source {
         "credit_agricole" => {
             let lower = name.to_lowercase();
