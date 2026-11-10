@@ -1330,6 +1330,171 @@ fn lookup_external_account(
     .map_err(Into::into)
 }
 
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::statements::{
+        DocumentKind, ParseContext, Parser, RawDocument, ToDatabaseRecord, hash_documents,
+        t212_csv::Trading212CsvSource,
+    };
+
+    const HEADER: &str = "Action,Time (UTC),ISIN,Ticker,Name,Notes,ID,No. of shares,Price / share,Currency (Price / share),Exchange rate,Total,Currency (Total),Currency conversion fee,Currency (Currency conversion fee),Merchant name,Merchant category";
+
+    fn row(id: &str, when: &str, amount: f64) -> String {
+        format!("Card debit,{when} 12:00:00+00:00,,,,,{id},,,,,{amount:.2},\"EUR\",,,,\n")
+    }
+
+    /// Stage one export the way the pipeline does — the file's own bytes decide
+    /// its `source_hash`, and therefore its `source_key`.
+    fn stage_export(pool: &crate::db::DbPool, csv: &str, name: &str) -> String {
+        let docs = vec![RawDocument::file(
+            DocumentKind::Csv,
+            csv.as_bytes().to_vec(),
+            PathBuf::from(name),
+        )];
+        let ctx = ParseContext {
+            source_hash: hash_documents(&docs),
+            stored_path: None,
+            source_path: Some(name.to_string()),
+            fetched_at: 0,
+        };
+        let parsed = Trading212CsvSource::new(PathBuf::from(name))
+            .parse(&docs, &ctx)
+            .expect("the fixture parses");
+        let mut conn = pool.get().unwrap();
+        let tx = conn.transaction().unwrap();
+        let outcomes = parsed.save(&tx).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(outcomes.len(), 1, "one file is one statement");
+        outcomes[0].statement_id.clone()
+    }
+
+    /// `(description, status)` of every line of a statement, by date.
+    fn lines_of(pool: &crate::db::DbPool, statement_id: &str) -> Vec<(String, String)> {
+        let conn = pool.get().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT description, status FROM bank_statement_lines
+                 WHERE statement_id=?1 ORDER BY posted_at",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map(params![statement_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    }
+
+    /// Lines posted in a given month across every live statement, whatever
+    /// their status — the count the clobber used to silently reduce.
+    fn lines_in_month(pool: &crate::db::DbPool, month: &str) -> i64 {
+        let conn = pool.get().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM bank_statement_lines l
+             JOIN bank_statements s ON s.id = l.statement_id
+             WHERE s.deleted_at IS NULL
+               AND strftime('%Y-%m', l.posted_at/1000, 'unixepoch') = ?1",
+            params![month],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Two exports whose ranges overlap. February used to be a single
+    /// `trading212:csv:csv:2026-02` bucket: whichever file staged second
+    /// deleted the other's pending February lines and repointed the bucket at
+    /// itself, losing roughly three weeks of activity with no trace. The file
+    /// is the unit now, and the overlap is resolved per line by `dedupe_key`.
+    fn overlapping_exports() -> (String, String) {
+        let early = format!(
+            "{HEADER}\n{}{}",
+            row("id-feb-01", "2026-02-01", -10.0),
+            row("id-feb-03", "2026-02-03", -20.0),
+        );
+        let late = format!(
+            "{HEADER}\n{}{}",
+            row("id-feb-03", "2026-02-03", -20.0),
+            row("id-feb-20", "2026-02-20", -30.0),
+        );
+        (early, late)
+    }
+
+    #[test]
+    fn overlapping_exports_keep_every_line_when_the_later_file_stages_second() {
+        let pool = crate::db::init_memory().unwrap();
+        let (early, late) = overlapping_exports();
+
+        let first = stage_export(&pool, &early, "from_2026-02-01_to_2026-02-03.csv");
+        let second = stage_export(&pool, &late, "from_2026-02-03_to_2026-02-20.csv");
+        assert_ne!(first, second, "two files, two statements");
+
+        assert_eq!(
+            lines_of(&pool, &first)
+                .iter()
+                .map(|(_, status)| status.as_str())
+                .collect::<Vec<_>>(),
+            ["pending", "pending"],
+            "staging the second file must not touch the first file's lines"
+        );
+        assert_eq!(
+            lines_of(&pool, &second)
+                .iter()
+                .map(|(_, status)| status.as_str())
+                .collect::<Vec<_>>(),
+            ["duplicate", "pending"],
+            "the repeated 3 February line is visible as a duplicate, not imported twice"
+        );
+        assert_eq!(
+            lines_in_month(&pool, "2026-02"),
+            4,
+            "three distinct days plus the duplicate; nothing was deleted"
+        );
+    }
+
+    #[test]
+    fn overlapping_exports_keep_every_line_in_the_other_order_too() {
+        let pool = crate::db::init_memory().unwrap();
+        let (early, late) = overlapping_exports();
+
+        let first = stage_export(&pool, &late, "from_2026-02-03_to_2026-02-20.csv");
+        let second = stage_export(&pool, &early, "from_2026-02-01_to_2026-02-03.csv");
+
+        assert_eq!(
+            lines_of(&pool, &first)
+                .iter()
+                .map(|(_, status)| status.as_str())
+                .collect::<Vec<_>>(),
+            ["pending", "pending"],
+        );
+        // Whichever file stages first owns the shared line; the other reports
+        // it as a duplicate. The pair of assertions is deliberately symmetric
+        // with the test above.
+        assert_eq!(
+            lines_of(&pool, &second)
+                .iter()
+                .map(|(_, status)| status.as_str())
+                .collect::<Vec<_>>(),
+            ["pending", "duplicate"],
+        );
+        assert_eq!(lines_in_month(&pool, "2026-02"), 4);
+    }
+
+    /// Re-dropping identical bytes stays a no-op: same key, same hash.
+    #[test]
+    fn re_dropping_the_same_export_changes_nothing() {
+        let pool = crate::db::init_memory().unwrap();
+        let (early, _) = overlapping_exports();
+
+        let first = stage_export(&pool, &early, "export.csv");
+        let again = stage_export(&pool, &early, "export-renamed.csv");
+        assert_eq!(first, again, "the bytes identify the statement, not the name");
+        assert_eq!(lines_in_month(&pool, "2026-02"), 2);
+    }
+}
+
 fn default_account_type(source: &str, name: &str) -> &'static str {
     match source {
         "credit_agricole" => {

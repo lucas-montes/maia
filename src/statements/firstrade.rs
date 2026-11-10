@@ -5,6 +5,14 @@
 //! name and falls back to the common `Date,Action,Symbol,Description,Quantity,
 //! Price,Amount` order. Trades are informational; cash movements become
 //! importable lines with the same mapping as Trading 212.
+//!
+//! **One file is one statement.** An export used to be split into one
+//! statement per month, which the review screen reads as one account each --
+//! a single file offered to create 34 accounts when the right answer was one.
+//! The file is the unit instead, keyed `firstrade:<account>:<source_hash>` the
+//! way a Crédit Agricole section already was, and the period is the span of
+//! the rows actually in the file. Overlapping exports are resolved per line by
+//! `dedupe_key`, not by replacing a month's bucket.
 
 use std::{collections::BTreeMap, future::Future, path::PathBuf};
 
@@ -62,7 +70,7 @@ impl Parser for FirstradeSource {
         let (text, _, _) = encoding_rs::UTF_8.decode(&doc.bytes);
         let rows = parse_csv(&text)?;
 
-        let mut by_month: BTreeMap<String, Vec<StatementLineDraft>> = BTreeMap::new();
+        let mut lines: Vec<StatementLineDraft> = Vec::new();
         let mut occurrences: BTreeMap<(String, String, String, String), usize> = BTreeMap::new();
         let mut warnings = Vec::new();
 
@@ -71,7 +79,11 @@ impl Parser for FirstradeSource {
                 warnings.push(format!("row without a date: {}", row.raw.join(",")));
                 continue;
             };
-            let month = month_key(posted_at);
+            // The row's own day disambiguates repeats, where the month used to:
+            // now that a whole file is one statement, two identical rows a
+            // month apart must still fingerprint differently, and a day is the
+            // finest grain the export actually carries.
+            let day = day_key(posted_at);
             let (line_kind, suggested_type) = classify(&row.action, row.amount);
             let amount = match line_kind {
                 LineKind::Trade => 0.0,
@@ -80,7 +92,7 @@ impl Parser for FirstradeSource {
                 _ => row.amount,
             };
             let key = (
-                month.clone(),
+                day.clone(),
                 row.action.clone(),
                 row.symbol.clone(),
                 format!("{:.4}:{}", amount, row.description),
@@ -92,7 +104,7 @@ impl Parser for FirstradeSource {
             let fingerprint = sha256_hex(&[
                 SourceId::Firstrade.as_str(),
                 &self.account_number,
-                &month,
+                &day,
                 &row.action,
                 &row.symbol,
                 &format!("{amount:.4}"),
@@ -105,7 +117,7 @@ impl Parser for FirstradeSource {
                 &fingerprint,
             ]);
             let category = suggested_category(line_kind);
-            by_month.entry(month).or_default().push(StatementLineDraft {
+            lines.push(StatementLineDraft {
                 source_ref: row.reference.clone(),
                 posted_at,
                 description: if row.description.is_empty() {
@@ -133,37 +145,39 @@ impl Parser for FirstradeSource {
             });
         }
 
-        Ok(by_month
-            .into_iter()
-            .map(|(month, lines)| {
-                let (period_start, period_end) = month_bounds(&month);
-                FirstradeStatement {
-                    month,
-                    account_number: self.account_number.clone(),
-                    period_start,
-                    period_end,
-                    source_hash: ctx.source_hash.clone(),
-                    stored_path: ctx.stored_path.clone(),
-                    source_path: ctx.source_path.clone(),
-                    lines,
-                    warnings: warnings.clone(),
-                }
-            })
-            .collect())
+        let (period_start, period_end) = span(&lines);
+        Ok(vec![FirstradeStatement {
+            account_number: self.account_number.clone(),
+            period_start,
+            period_end,
+            source_hash: ctx.source_hash.clone(),
+            stored_path: ctx.stored_path.clone(),
+            source_path: ctx.source_path.clone(),
+            lines,
+            warnings,
+        }])
     }
+}
+
+/// The real span of a file: the first and last day it actually posts, rather
+/// than the calendar bounds of a month it happens to touch.
+fn span(lines: &[StatementLineDraft]) -> (Option<String>, Option<String>) {
+    let first = lines.iter().map(|line| line.posted_at).min();
+    let last = lines.iter().map(|line| line.posted_at).max();
+    (first.map(day_key), last.map(day_key))
 }
 
 #[derive(Debug, Clone)]
 pub struct FirstradeStatement {
-    pub month: String,
     pub account_number: String,
-    pub period_start: String,
-    pub period_end: String,
+    /// The span of the rows in the file, `None` for a file whose every row was
+    /// unreadable (its warnings are still worth showing).
+    pub period_start: Option<String>,
+    pub period_end: Option<String>,
     pub source_hash: String,
     pub stored_path: Option<String>,
-    /// The dropped file's own path, shared by every month this file
-    /// produced; carried through so the list endpoint can group them back
-    /// into one file (see [`ParseContext::source_path`]).
+    /// The dropped file's own path, carried through so the list endpoint can
+    /// group a file's statements (see [`ParseContext::source_path`]).
     pub source_path: Option<String>,
     pub lines: Vec<StatementLineDraft>,
     pub warnings: Vec<String>,
@@ -185,22 +199,27 @@ impl FirstradeStatement {
             account_name: "Firstrade".to_string(),
             account_number: Some(self.account_number.clone()),
             currency_code: "USD".to_string(),
-            period_start: Some(self.period_start.clone()),
-            period_end: Some(self.period_end.clone()),
+            period_start: self.period_start.clone(),
+            period_end: self.period_end.clone(),
             opening_balance: None,
             closing_balance: None,
             source_path: self.source_path,
             stored_path: self.stored_path,
-            source_hash: self.source_hash,
+            // The file is the unit, so the key is the bytes: re-dropping the
+            // same export is a no-op, and a second export that overlaps it
+            // stages beside it with its repeats marked `duplicate` rather
+            // than replacing a shared month bucket.
             source_key: format!(
                 "{}:{}:{}",
                 SourceId::Firstrade.as_str(),
                 self.account_number,
-                self.month
+                self.source_hash
             ),
+            source_hash: self.source_hash,
             parsed: serde_json::json!({
-                "month": self.month,
                 "lines": self.lines.len(),
+                "periodStart": self.period_start,
+                "periodEnd": self.period_end,
             }),
             warnings: self.warnings,
             lines: self.lines,
@@ -443,32 +462,10 @@ fn suggested_category(kind: LineKind) -> Option<String> {
     }
 }
 
-fn month_key(ms: i64) -> String {
+fn day_key(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
-        .map(|dt| dt.format("%Y-%m").to_string())
-        .unwrap_or_else(|| "1970-01".to_string())
-}
-
-fn month_bounds(month: &str) -> (String, String) {
-    let mut parts = month.split('-');
-    let year = parts
-        .next()
-        .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(1970);
-    let month_number = parts
-        .next()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(1);
-    let first = NaiveDate::from_ymd_opt(year, month_number, 1)
-        .unwrap_or_else(|| NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
-    let next = first
-        .checked_add_months(chrono::Months::new(1))
-        .unwrap_or(first);
-    let last = next.pred_opt().unwrap_or(first);
-    (
-        first.format("%Y-%m-%d").to_string(),
-        last.format("%Y-%m-%d").to_string(),
-    )
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "1970-01-01".to_string())
 }
 
 #[cfg(test)]
@@ -533,7 +530,7 @@ mod tests {
 
         let total_lines: usize = statements.iter().map(|s| s.lines.len()).sum();
         assert_eq!(total_lines, 10, "every data row stages");
-        assert_eq!(statements.len(), 5, "one statement per month");
+        assert_eq!(statements.len(), 1, "one file is one statement");
         assert!(
             statements.iter().all(|s| s.warnings.is_empty()),
             "unexpected warnings: {:?}",
@@ -559,13 +556,24 @@ mod tests {
         assert_eq!(deposit.line_kind, LineKind::TransferIn);
         assert_eq!(deposit.amount, 500.0);
 
-        let dividend = statements
+        // Every dividend of the file stages, in one statement. Asserted as a
+        // set rather than "the first one": with the months collapsed, line
+        // order is the file's order and no longer carries meaning.
+        let mut dividends: Vec<f64> = statements
             .iter()
             .flat_map(|s| &s.lines)
-            .find(|l| l.line_kind == LineKind::Dividend)
-            .unwrap();
-        assert_eq!(dividend.amount, 28.05);
-        assert_eq!(dividend.suggested_type, Some(SuggestedType::Income));
+            .filter(|l| l.line_kind == LineKind::Dividend)
+            .map(|l| l.amount)
+            .collect();
+        dividends.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(dividends, [12.60, 28.05, 29.50]);
+        assert!(
+            statements
+                .iter()
+                .flat_map(|s| &s.lines)
+                .filter(|l| l.line_kind == LineKind::Dividend)
+                .all(|l| l.suggested_type == Some(SuggestedType::Income))
+        );
 
         let interest = statements
             .iter()
@@ -574,11 +582,59 @@ mod tests {
             .unwrap();
         assert_eq!(interest.currency_code, "USD");
 
-        let mut months: Vec<&str> = statements.iter().map(|s| s.month.as_str()).collect();
-        months.sort_unstable();
-        assert_eq!(
-            months,
-            ["2026-06", "2026-07", "2026-08", "2026-09", "2026-10"]
+        // The period is the file's real span, not a month's calendar bounds.
+        assert_eq!(statements[0].period_start.as_deref(), Some("2026-06-15"));
+        assert_eq!(statements[0].period_end.as_deref(), Some("2026-10-15"));
+
+        let draft = statements.clone().into_drafts();
+        assert_eq!(draft.len(), 1);
+        assert_eq!(draft[0].source_key, "firstrade:firstrade:hash");
+    }
+
+    /// Two rows that differ only by month used to be told apart by the month in
+    /// their fingerprint. Now that the whole file is one statement, the day has
+    /// to do that job -- otherwise the second row would be dropped by the
+    /// `UNIQUE(statement_id, fingerprint)` insert.
+    #[test]
+    fn identical_rows_in_different_months_keep_distinct_fingerprints() {
+        let csv = "Date,Action,Symbol,Description,Quantity,Price,Amount\n\
+                   06/15/2026,DEPOSIT,,ACH deposit,,,100.00\n\
+                   07/15/2026,DEPOSIT,,ACH deposit,,,100.00\n\
+                   07/15/2026,DEPOSIT,,ACH deposit,,,100.00\n";
+        let doc = RawDocument::file(
+            DocumentKind::Csv,
+            csv.as_bytes().to_vec(),
+            PathBuf::from("x.csv"),
         );
+        let statements = FirstradeSource::new(PathBuf::from("x.csv"))
+            .parse(&[doc], &ctx())
+            .unwrap();
+        assert_eq!(statements.len(), 1);
+        let prints: std::collections::HashSet<&str> = statements[0]
+            .lines
+            .iter()
+            .map(|line| line.fingerprint.as_str())
+            .collect();
+        assert_eq!(prints.len(), 3, "three rows, three identities");
+    }
+
+    /// An undated row never reaches a statement, and the dated ones around it
+    /// still do.
+    #[test]
+    fn a_row_without_a_readable_date_is_skipped() {
+        let csv = "Date,Action,Symbol,Description,Quantity,Price,Amount\n\
+                   06/15/2026,DEPOSIT,,ACH deposit,,,100.00\n\
+                   not-a-date,DEPOSIT,,ACH deposit,,,100.00\n";
+        let doc = RawDocument::file(
+            DocumentKind::Csv,
+            csv.as_bytes().to_vec(),
+            PathBuf::from("x.csv"),
+        );
+        let statements = FirstradeSource::new(PathBuf::from("x.csv"))
+            .parse(&[doc], &ctx())
+            .unwrap();
+        let warnings: usize = statements.iter().map(|s| s.warnings.len()).sum();
+        assert_eq!(warnings, 0, "an undated row is dropped by the CSV reader");
+        assert_eq!(statements[0].lines.len(), 1);
     }
 }

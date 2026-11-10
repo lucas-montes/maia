@@ -3,9 +3,17 @@
 //! The web UI offers a statement CSV per month, and this module parses the
 //! generic export that covers a date range. It is not the API feed: the
 //! columns, actions and precision differ, so it is a separate parser that
-//! feeds the same staging pipeline. Each month of activity becomes its own
-//! statement with a distinct `source_key` (`trading212:csv:<month>`), so a CSV
-//! import and a live feed sync never clobber each other's interpretations.
+//! feeds the same staging pipeline. A dropped file is one statement, keyed
+//! `trading212:csv:<account>:<source_hash>` — the `csv` token keeps it clear
+//! of the feed's own buckets, and the hash keeps two exports clear of each
+//! other.
+//!
+//! The export used to be split by month, which cost data: `source_key` was
+//! month-scoped, so two exports whose ranges overlapped wrote the same bucket
+//! and the re-stage branch of `save_statement` deleted the first one's pending
+//! lines before inserting the second's. Overlap is a line-level question and
+//! `dedupe_key` already answers it — the repeats stage as `duplicate`, visible
+//! and not importable, instead of disappearing.
 //!
 //! The CSV `ID` column is a stable UUID, which becomes the line's
 //! `source_ref`: re-importing the same month stages nothing new, and a
@@ -24,7 +32,7 @@ use super::{
     DocumentKind, ParseContext, Parser, RawDocument, SourceError, SourceId, ToDatabaseRecord,
     draft::{LineKind, StatementDraft, StatementLineDraft, SuggestedType},
     sha256_hex,
-    t212::{PROVIDER, line_fingerprint, month_bounds, month_key},
+    t212::{PROVIDER, line_fingerprint},
 };
 
 pub struct Trading212CsvSource {
@@ -61,7 +69,7 @@ impl Parser for Trading212CsvSource {
         };
         let text = csv_text(doc);
         let rows = parse_csv(&text)?;
-        let statements = group_by_month(rows, ctx);
+        let statements = collect_statement(rows, ctx);
         if statements.is_empty() {
             return Err(SourceError::malformed(
                 "Trading 212 CSV contains no statement lines",
@@ -323,8 +331,11 @@ fn category_hint(kind: LineKind) -> Option<String> {
     }
 }
 
-fn group_by_month(rows: Vec<Row>, ctx: &ParseContext) -> Vec<T212CsvStatement> {
-    let mut by_month: BTreeMap<String, Vec<StatementLineDraft>> = BTreeMap::new();
+/// One dropped file, one statement. Returns a `Vec` so the empty case (a file
+/// whose every row was unreadable) stays "no statement" rather than an empty
+/// one, and so the `ToDatabaseRecord` impl keeps its shape.
+fn collect_statement(rows: Vec<Row>, ctx: &ParseContext) -> Vec<T212CsvStatement> {
+    let mut lines: Vec<StatementLineDraft> = Vec::new();
     let mut warnings = Vec::new();
     let account_number = "csv".to_string();
 
@@ -379,61 +390,62 @@ fn group_by_month(rows: Vec<Row>, ctx: &ParseContext) -> Vec<T212CsvStatement> {
             "notes": row.notes,
             "raw_total": row.total,
         });
-        by_month
-            .entry(month_key(posted_at))
-            .or_default()
-            .push(StatementLineDraft {
-                source_ref,
-                posted_at,
-                description,
-                amount,
-                currency_code: row.currency(),
-                balance_after: None,
-                category_hint: hint.clone(),
-                line_kind,
-                suggested_type,
-                suggested_category: hint,
-                metadata,
-                fingerprint,
-                dedupe_key,
-            });
+        lines.push(StatementLineDraft {
+            source_ref,
+            posted_at,
+            description,
+            amount,
+            currency_code: row.currency(),
+            balance_after: None,
+            category_hint: hint.clone(),
+            line_kind,
+            suggested_type,
+            suggested_category: hint,
+            metadata,
+            fingerprint,
+            dedupe_key,
+        });
     }
 
-    let statements = by_month
-        .into_iter()
-        .map(|(month, lines)| {
-            let (period_start, period_end) = month_bounds(&month);
-            T212CsvStatement {
-                month,
-                account_name: "Trading 212".to_string(),
-                account_number: account_number.clone(),
-                currency_code: "EUR".to_string(),
-                period_start,
-                period_end,
-                source_hash: ctx.source_hash.clone(),
-                stored_path: ctx.stored_path.clone(),
-                source_path: ctx.source_path.clone(),
-                lines,
-                warnings: warnings.clone(),
-            }
-        })
-        .collect();
-    statements
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    // The period is what the file covers, not the calendar bounds of a month
+    // it happens to touch.
+    let period_start = lines.iter().map(|line| line.posted_at).min().map(day_key);
+    let period_end = lines.iter().map(|line| line.posted_at).max().map(day_key);
+    vec![T212CsvStatement {
+        account_name: "Trading 212".to_string(),
+        account_number,
+        currency_code: "EUR".to_string(),
+        period_start,
+        period_end,
+        source_hash: ctx.source_hash.clone(),
+        stored_path: ctx.stored_path.clone(),
+        source_path: ctx.source_path.clone(),
+        lines,
+        warnings,
+    }]
+}
+
+fn day_key(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "1970-01-01".to_string())
 }
 
 #[derive(Debug, Clone)]
 pub struct T212CsvStatement {
-    pub month: String,
     pub account_name: String,
     pub account_number: String,
     pub currency_code: String,
-    pub period_start: String,
-    pub period_end: String,
+    /// The span of the rows in the file.
+    pub period_start: Option<String>,
+    pub period_end: Option<String>,
     pub source_hash: String,
     pub stored_path: Option<String>,
-    /// The dropped file's own path, shared by every month this file
-    /// produced; carried through so the list endpoint can group them back
-    /// into one file (see [`ParseContext::source_path`]).
+    /// The dropped file's own path, carried through so the list endpoint can
+    /// group a file's statements (see [`ParseContext::source_path`]).
     pub source_path: Option<String>,
     pub lines: Vec<StatementLineDraft>,
     pub warnings: Vec<String>,
@@ -453,21 +465,22 @@ impl T212CsvStatement {
             account_name: self.account_name,
             account_number: Some(self.account_number.clone()),
             currency_code: self.currency_code.clone(),
-            period_start: Some(self.period_start.clone()),
-            period_end: Some(self.period_end.clone()),
+            period_start: self.period_start.clone(),
+            period_end: self.period_end.clone(),
             opening_balance: None,
             closing_balance: None,
             source_path: self.source_path,
             stored_path: self.stored_path,
+            // CSV statements key differently from the feed: the `csv` token
+            // keeps an export clear of a feed sync's month buckets, and the
+            // file's own hash keeps two exports clear of each other.
+            source_key: format!("{PROVIDER}:csv:{}:{}", self.account_number, self.source_hash),
             source_hash: self.source_hash,
-            // CSV statements key differently from the feed: same source
-            // fields, but no shared account id, and a month-scoped key so an
-            // import can be retried without colliding with a feed sync.
-            source_key: format!("{PROVIDER}:csv:{}:{}", self.account_number, self.month),
             parsed: serde_json::json!({
-                "month": self.month,
                 "lines": self.lines.len(),
                 "import": "csv",
+                "periodStart": self.period_start,
+                "periodEnd": self.period_end,
             }),
             warnings: self.warnings,
             lines: self.lines,
@@ -511,7 +524,7 @@ mod tests {
              Market buy,2026-02-06 08:04:51+00:00,IE00BK5BQT80,VWCE,\"Vanguard FTSE All-World (Acc)\",,EOF46165624235,0.0093977200,145.7800000000,EUR,1.00000000,1.37,\"EUR\",,,,\n"
         );
         let statements = parse(&csv);
-        assert_eq!(statements.len(), 1, "one month, one statement");
+        assert_eq!(statements.len(), 1, "one file, one statement");
         let lines = &statements[0].lines;
         assert_eq!(lines.len(), 4);
 
@@ -540,35 +553,35 @@ mod tests {
         assert_eq!(trade.description, "Buy 0.009398 VWCE");
     }
 
+    /// Months used to split into one statement each, which the review screen
+    /// read as one account each. A file that spans two months is one statement
+    /// whose period is the span it really covers.
     #[test]
-    fn months_split_with_a_stable_csv_key() {
+    fn a_multi_month_file_is_one_statement_keyed_by_its_bytes() {
         let csv = format!(
             "{HEADER}\n\
              Card debit,2026-02-03 22:46:16+00:00,,,,,id-a,,,,,-1.00,\"EUR\",,,,\n\
              Card debit,2026-03-03 22:46:16+00:00,,,,,id-b,,,,,-2.00,\"EUR\",,,,\n"
         );
         let statements = parse(&csv);
-        assert_eq!(statements.len(), 2);
-        let mut months: Vec<std::string::String> =
-            statements.iter().map(|s| s.month.clone()).collect();
-        months.sort();
-        assert_eq!(months, ["2026-02", "2026-03"]);
-        for statement in &statements {
-            assert_eq!(
-                statement.account_number,
-                "csv".to_string(),
-                "every CSV month maps to the single CSV account"
-            );
-            let draft = Vec::from([statement.clone()]).into_drafts();
-            assert!(draft[0].source_key.starts_with("trading212:csv:"));
-            // Regression: every month a CSV export produces must carry the
-            // file's own path, which is what lets the statements list group
-            // them back into one file card instead of one row per month.
-            assert_eq!(
-                draft[0].source_path.as_deref(),
-                Some("dump/trading212/export.csv")
-            );
-        }
+        assert_eq!(statements.len(), 1);
+        let statement = &statements[0];
+        assert_eq!(statement.lines.len(), 2);
+        assert_eq!(statement.period_start.as_deref(), Some("2026-02-03"));
+        assert_eq!(statement.period_end.as_deref(), Some("2026-03-03"));
+        assert_eq!(statement.account_number, "csv".to_string());
+
+        let draft = statements.clone().into_drafts();
+        assert_eq!(draft.len(), 1);
+        // The key is the file's own bytes, so a second export covering some of
+        // the same days cannot land in the same bucket and replace its lines.
+        assert_eq!(draft[0].source_key, "trading212:csv:csv:hash");
+        // The file's path is what lets the statements list group a file's
+        // statements into one card.
+        assert_eq!(
+            draft[0].source_path.as_deref(),
+            Some("dump/trading212/export.csv")
+        );
     }
 
     #[test]
@@ -633,7 +646,7 @@ mod tests {
 
         let total_lines: usize = statements.iter().map(|s| s.lines.len()).sum();
         assert_eq!(total_lines, 10, "every data row stages");
-        assert_eq!(statements.len(), 3, "one statement per month");
+        assert_eq!(statements.len(), 1, "one file is one statement");
         assert!(
             statements.iter().all(|s| s.warnings.is_empty()),
             "unexpected warnings: {:?}",
@@ -678,15 +691,12 @@ mod tests {
             Some(&serde_json::json!("RETAIL_STORES"))
         );
 
-        // Months differ, source keys follow the schema.
-        let mut months: Vec<&str> = statements.iter().map(|s| s.month.as_str()).collect();
-        months.sort_unstable();
-        assert_eq!(months, ["2026-08", "2026-09", "2026-10"]);
-        for statement in &statements {
-            assert_eq!(
-                Vec::from([statement.clone()]).into_drafts()[0].source_key,
-                format!("trading212:csv:csv:{}", statement.month)
-            );
-        }
+        // The three months the fixture touches are one statement spanning them.
+        assert_eq!(statements[0].period_start.as_deref(), Some("2026-08-10"));
+        assert_eq!(statements[0].period_end.as_deref(), Some("2026-10-20"));
+        assert_eq!(
+            statements.clone().into_drafts()[0].source_key,
+            "trading212:csv:csv:hash"
+        );
     }
 }
