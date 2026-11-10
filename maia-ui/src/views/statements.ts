@@ -10,6 +10,12 @@ import {
 } from "../lib/api";
 import { escapeHtml, formatEpoch, setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
+import {
+  liveMatches,
+  localMatchSide,
+  matchedLineIds,
+  selectableLineIds,
+} from "../lib/statementReview";
 import { statementsAtom } from "../lib/stores";
 import { backToDashboard, panelClose, panelOpen, statusBanner } from "./shared";
 
@@ -121,9 +127,12 @@ function listHtml(
     const rows = statements
       .map((s) => {
         const period = s.periodStart && s.periodEnd ? `${s.periodStart} → ${s.periodEnd}` : "";
+        // The checkbox sits outside the row button (an input cannot nest in
+        // one), so it is offset by hand: mt-3 matches .list-row's own p-3,
+        // which is what puts the row's first line where it is.
         return `
         <div class="flex items-start gap-2">
-          <input type="checkbox" class="checkbox checkbox-sm mt-2" data-statement-check="${escapeHtml(s.id)}" ${picked.has(s.id) ? "checked" : ""} title="Select for bulk actions" />
+          <input type="checkbox" class="checkbox checkbox-sm mt-3" data-statement-check="${escapeHtml(s.id)}" ${picked.has(s.id) ? "checked" : ""} title="Select for bulk actions" />
           <button class="list-row w-full text-left ${selectedId === s.id ? "active" : ""}" type="button" data-statement-id="${escapeHtml(s.id)}">
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2">
@@ -158,8 +167,10 @@ function listHtml(
     <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">${groups.join("")}</div>`;
 }
 
-function lineRow(line: StatementLine, checked: boolean): string {
-  const selectable = line.status === "pending";
+/** One entry row. [selectable] comes from `selectableLineIds` rather than from
+ *  the line's own status, so the checkbox a row shows and the set select-all
+ *  picks can never disagree. */
+function lineRow(line: StatementLine, checked: boolean, selectable: boolean): string {
   const type = line.suggestedType ?? (line.amount < 0 ? "expense" : "income");
   return `
     <tr data-line-row="${escapeHtml(line.id)}" class="${checked ? "bg-surface-800/40" : ""}">
@@ -201,6 +212,7 @@ function transferRowsHtml(
   localIds: Set<string>,
   selected: Set<string>,
   accounts: { id: string; name: string; type: string }[],
+  selectableIds: Set<string>,
 ): string {
   const live = matches.filter((m) => m.status !== "dismissed");
   if (live.length === 0) return "";
@@ -208,9 +220,9 @@ function transferRowsHtml(
     .map((match: TransferMatch) => {
       const debit = match.debit;
       const credit = match.credit;
-      const localId = localIds.has(debit.id) ? debit.id : localIds.has(credit.id) ? credit.id : null;
+      const localId = localMatchSide(match, localIds);
       const checked = localId !== null && selected.has(localId);
-      const selectable = localId !== null && debit.status === "pending" && credit.status === "pending";
+      const selectable = localId !== null && selectableIds.has(localId);
       const confidence = Math.round(match.confidence * 100);
       const badge =
         match.status === "auto"
@@ -270,17 +282,12 @@ function detailHtml(
   accounts: { id: string; name: string; type: string }[],
 ): string {
   const s = detail.statement;
-  const matched = new Set<string>();
-  for (const match of detail.matches) {
-    if (match.status !== "dismissed") {
-      matched.add(match.debitLineId);
-      matched.add(match.creditLineId);
-    }
-  }
+  const matched = matchedLineIds(liveMatches([detail]));
   const trades = detail.lines.filter((line) => line.lineKind === "trade");
   const ordinary = detail.lines.filter(
     (line) => line.lineKind !== "trade" && !matched.has(line.id),
   );
+  const selectable = selectableLineIds([detail]);
   const pending = detail.lines.filter((line) => line.status === "pending").length;
 
   const tradeRows = trades
@@ -316,7 +323,7 @@ function detailHtml(
         ${s.warnings.length > 0 ? `<div class="mt-3 rounded border border-surface-800 bg-base-100 p-2 text-xs text-warn-400">${s.warnings.map((w) => escapeHtml(w)).join("<br />")}</div>` : ""}
       </div>
 
-      ${transferRowsHtml(detail.matches, new Set(detail.lines.map((line) => line.id)), selected, accounts)}
+      ${transferRowsHtml(detail.matches, new Set(detail.lines.map((line) => line.id)), selected, accounts, selectable)}
 
       ${trades.length > 0 ? `<div class="rounded border border-surface-800 bg-base-100 p-4">
         <h3 class="mb-2 text-sm font-medium text-ink-200">Trades <span class="font-normal text-ink-500">(informational, never imported)</span></h3>
@@ -330,8 +337,8 @@ function detailHtml(
         <div class="mb-2 flex items-center justify-between">
           <h3 class="text-sm font-medium text-ink-200">Entries to add</h3>
           <div class="flex items-center gap-2">
-            <button class="btn btn-ghost btn-xs" type="button" data-action="select-all">Select pending</button>
-            <button class="btn btn-ghost btn-xs" type="button" data-action="select-none">Clear</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="select-all" ${selectable.size === 0 ? "disabled" : ""}>Select pending</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="select-none" ${selected.size === 0 ? "disabled" : ""}>Clear</button>
           </div>
         </div>
         <table class="table table-sm w-full">
@@ -342,7 +349,7 @@ function detailHtml(
             </tr>
           </thead>
           <tbody>
-            ${ordinary.map((line) => lineRow(line, selected.has(line.id))).join("") || `<tr><td colspan="7" class="text-center text-sm text-ink-500">No importable lines.</td></tr>`}
+            ${ordinary.map((line) => lineRow(line, selected.has(line.id), selectable.has(line.id))).join("") || `<tr><td colspan="7" class="text-center text-sm text-ink-500">No importable lines.</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -370,66 +377,60 @@ function fileHtml(
   accounts: { id: string; name: string; type: string }[],
 ): string {
   const localIds = new Set<string>();
-  const matches: TransferMatch[] = [];
   const trades: StatementLine[] = [];
-  const seenMatches = new Set<string>();
   for (const detail of statements) {
     for (const line of detail.lines) localIds.add(line.id);
-    for (const match of detail.matches) {
-      if (!seenMatches.has(match.id)) {
-        seenMatches.add(match.id);
-        matches.push(match);
-      }
-    }
     trades.push(...detail.lines.filter((line) => line.lineKind === "trade"));
   }
+  const matches: TransferMatch[] = liveMatches(statements);
+  const selectable = selectableLineIds(statements);
 
   const pending = statements.reduce(
     (sum, detail) => sum + detail.lines.filter((line) => line.status === "pending").length,
     0,
   );
 
+  // Every cell of an account row is top-aligned: the account cell is two lines
+  // tall whenever a number is known, and a cell left on the table's default
+  // `vertical-align: middle` centres its checkbox against both of them -- which
+  // is what left the checkbox column sitting a line below its account name.
   const accountRows = statements
     .map((detail) => {
       const s = detail.statement;
+      const accountSelectable = detail.lines.filter((line) => selectable.has(line.id));
       const accountPending = detail.lines.filter((line) => line.status === "pending");
-      const allPicked = accountPending.length > 0 && accountPending.every((line) => selected.has(line.id));
-      const somePicked = accountPending.some((line) => selected.has(line.id));
+      const allPicked =
+        accountSelectable.length > 0 && accountSelectable.every((line) => selected.has(line.id));
+      const somePicked = accountSelectable.some((line) => selected.has(line.id));
       return `
         <tr>
-          <td class="w-8">
-            <input type="checkbox" class="checkbox checkbox-sm" data-account-check="${escapeHtml(s.id)}"
+          <td class="w-8 align-top">
+            <input type="checkbox" class="checkbox checkbox-sm align-top" data-account-check="${escapeHtml(s.id)}"
               ${allPicked ? "checked" : ""} ${somePicked && !allPicked ? "data-indeterminate" : ""}
-              title="Select every pending entry of this account" ${accountPending.length === 0 ? "disabled" : ""} />
+              title="Select every pending entry of this account" ${accountSelectable.length === 0 ? "disabled" : ""} />
           </td>
-          <td>
+          <td class="align-top">
             <button class="text-left text-sm font-medium text-ink-200 hover:underline" type="button" data-statement-id="${escapeHtml(s.id)}">${escapeHtml(statementTitle(s))}</button>
             ${s.accountNumber ? `<div class="font-mono text-xs text-ink-500">${escapeHtml(s.accountNumber)}</div>` : ""}
           </td>
-          <td class="text-xs text-ink-400">${escapeHtml(s.currencyCode)}</td>
-          <td class="text-xs">
+          <td class="align-top text-xs text-ink-400">${escapeHtml(s.currencyCode)}</td>
+          <td class="align-top text-xs">
             ${s.resolvedAccountName
               ? `<span class="text-ink-400">uses existing account</span> <span class="text-ink-200">${escapeHtml(s.resolvedAccountName)}</span>`
               : `<span class="badge badge-warn">will be created on import</span> <span class="text-ink-200">${escapeHtml(s.accountName)}</span>`}
           </td>
-          <td class="text-right text-xs text-ink-400">${accountPending.length}</td>
-          <td class="text-right">
+          <td class="text-right align-top text-xs text-ink-400">${accountPending.length}</td>
+          <td class="text-right align-top">
             <button class="btn btn-ghost btn-xs text-err-400" type="button" data-action="delete-account" data-statement-id="${escapeHtml(s.id)}">Delete</button>
           </td>
         </tr>`;
     })
     .join("");
 
+  const matched = matchedLineIds(matches);
   const entrySections = statements
     .map((detail) => {
       const s = detail.statement;
-      const matched = new Set<string>();
-      for (const match of detail.matches) {
-        if (match.status !== "dismissed") {
-          matched.add(match.debitLineId);
-          matched.add(match.creditLineId);
-        }
-      }
       const ordinary = detail.lines.filter(
         (line) => line.lineKind !== "trade" && !matched.has(line.id),
       );
@@ -448,7 +449,7 @@ function fileHtml(
               </tr>
             </thead>
             <tbody>
-              ${ordinary.map((line) => lineRow(line, selected.has(line.id))).join("")}
+              ${ordinary.map((line) => lineRow(line, selected.has(line.id), selectable.has(line.id))).join("")}
             </tbody>
           </table>
         </div>`;
@@ -473,8 +474,8 @@ function fileHtml(
           <h3 class="text-sm font-medium text-ink-200">Accounts</h3>
           <div class="flex items-center gap-2">
             <span class="text-xs text-ink-500">${statements.length} account${statements.length !== 1 ? "s" : ""} · ${pending} entr${pending !== 1 ? "ies" : "y"} pending</span>
-            <button class="btn btn-ghost btn-xs" type="button" data-action="select-all" ${pending === 0 ? "disabled" : ""}>Select pending</button>
-            <button class="btn btn-ghost btn-xs" type="button" data-action="select-none">Clear</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="select-all" ${selectable.size === 0 ? "disabled" : ""}>Select pending</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="select-none" ${selected.size === 0 ? "disabled" : ""}>Clear</button>
           </div>
         </div>
         <table class="table table-sm w-full">
@@ -485,7 +486,7 @@ function fileHtml(
 
       ${entrySections || `<div class="rounded border border-surface-800 bg-base-100 p-4 text-sm text-ink-500">No importable entries in this file.</div>`}
 
-      ${transferRowsHtml(matches, localIds, selected, accounts)}
+      ${transferRowsHtml(matches, localIds, selected, accounts, selectable)}
 
       ${trades.length > 0 ? `<div class="rounded border border-surface-800 bg-base-100 p-4">
         <h3 class="mb-2 text-sm font-medium text-ink-200">Trades <span class="font-normal text-ink-500">(informational, never imported)</span></h3>
@@ -753,9 +754,10 @@ export function mount(root: HTMLElement): () => void {
       const res = await api.getStatement(id);
       if (!res.success || !res.data) throw new Error(res.error ?? "Could not load statement");
       const detail = res.data;
-      const pending = detail.lines
-        .filter((line: StatementLine) => line.status === "pending")
-        .map((line: StatementLine) => line.id);
+      // Opening a statement pre-selects what it offers a checkbox for, for the
+      // same reason select-all does: a selection the page cannot show as
+      // ticked is one the user cannot undo.
+      const pending = [...selectableLineIds([detail])];
       statementsAtom.set({
         ...statementsAtom.get(),
         detail,
@@ -1110,11 +1112,14 @@ export function mount(root: HTMLElement): () => void {
       const checkbox = target as HTMLInputElement;
       const statementId = checkbox.dataset.accountCheck as string;
       const state = statementsAtom.get();
-      const detail = (state.fileReview?.statements as StatementDetail[] | undefined)?.find(
-        (candidate) => candidate.statement.id === statementId,
-      );
+      const review = (state.fileReview?.statements as StatementDetail[] | undefined) ?? [];
+      const detail = review.find((candidate) => candidate.statement.id === statementId);
       if (!detail) return;
-      const pending = detail.lines.filter((line) => line.status === "pending").map((line) => line.id);
+      // Selectability is a property of the whole file (a transfer pair can
+      // straddle two of its accounts), so the set is computed over every
+      // statement and then narrowed to this one's lines.
+      const selectable = selectableLineIds(review);
+      const pending = detail.lines.filter((line) => selectable.has(line.id)).map((line) => line.id);
       const next = new Set(state.selectedLines);
       for (const id of pending) {
         if (checkbox.checked) next.add(id);
@@ -1266,23 +1271,19 @@ export function mount(root: HTMLElement): () => void {
         return;
       }
       case "select-all": {
+        // Selects every entry the page offers a checkbox for -- not every
+        // pending line. The two differ: a trade is informational, and a
+        // transfer whose counterpart is already settled has no checkbox, so
+        // selecting those would inflate "Import selected (N)" past the ticks
+        // actually on screen.
         const state = statementsAtom.get();
-        if (state.fileReview) {
-          const pending = (state.fileReview.statements as StatementDetail[]).flatMap((detail) =>
-            detail.lines.filter((line) => line.status === "pending").map((line) => line.id),
-          );
-          statementsAtom.set({ ...state, selectedLines: pending });
-          render();
-          return;
-        }
-        const detail = state.detail as StatementDetail | null;
-        if (!detail) return;
-        statementsAtom.set({
-          ...state,
-          selectedLines: detail.lines
-            .filter((line) => line.status === "pending")
-            .map((line) => line.id),
-        });
+        const review = state.fileReview
+          ? (state.fileReview.statements as StatementDetail[])
+          : state.detail
+            ? [state.detail as StatementDetail]
+            : null;
+        if (!review) return;
+        statementsAtom.set({ ...state, selectedLines: [...selectableLineIds(review)] });
         render();
         return;
       }

@@ -1,0 +1,166 @@
+import { describe, expect, test } from "vitest";
+import type { StatementDetail, StatementLine, TransferMatch } from "./api";
+import { liveMatches, matchedLineIds, selectableLineIds } from "./statementReview";
+
+function line(id: string, over: Partial<StatementLine> = {}): StatementLine {
+  return {
+    id,
+    sourceRef: null,
+    postedAt: 1_770_000_000_000,
+    description: id,
+    amount: -10,
+    currencyCode: "EUR",
+    balanceAfter: null,
+    categoryHint: null,
+    lineKind: "debit",
+    suggestedType: null,
+    suggestedCategory: null,
+    metadata: null,
+    status: "pending",
+    transactionId: null,
+    importError: null,
+    duplicateOf: null,
+    ...over,
+  };
+}
+
+/** A match as the detail endpoint returns it: both sides inlined, so the
+ *  counterpart is known even when it belongs to another statement. */
+function match(
+  id: string,
+  debit: StatementLine,
+  credit: StatementLine,
+  over: Partial<TransferMatch> = {},
+): TransferMatch {
+  const side = (l: StatementLine) => ({
+    id: l.id,
+    description: l.description,
+    amount: l.amount,
+    currencyCode: l.currencyCode,
+    postedAt: l.postedAt,
+    status: l.status,
+  });
+  return {
+    id,
+    debitLineId: debit.id,
+    creditLineId: credit.id,
+    transactionId: null,
+    confidence: 0.98,
+    reason: null,
+    status: "auto",
+    debit: side(debit),
+    credit: side(credit),
+    ...over,
+  };
+}
+
+function detail(id: string, lines: StatementLine[], matches: TransferMatch[] = []): StatementDetail {
+  return {
+    statement: {
+      id,
+      source: "credit_agricole",
+      institution: "Crédit Agricole",
+      accountName: id,
+      accountNumber: null,
+      accountId: null,
+      currencyCode: "EUR",
+      periodStart: null,
+      periodEnd: null,
+      openingBalance: null,
+      closingBalance: null,
+      status: "staged",
+      resolvedAccountName: null,
+      parseError: null,
+      warnings: [],
+      createdAt: 0,
+      updatedAt: 0,
+      sourcePath: "/dump/ca/ca.csv",
+      storedPath: null,
+      parsed: null,
+    },
+    lines,
+    matches,
+  };
+}
+
+describe("selectableLineIds", () => {
+  test("offers pending entries and skips settled ones", () => {
+    const d = detail("s1", [
+      line("a"),
+      line("b", { status: "imported" }),
+      line("c", { status: "duplicate" }),
+      line("d", { status: "skipped" }),
+    ]);
+    expect([...selectableLineIds([d])]).toEqual(["a"]);
+  });
+
+  test("never offers an informational trade, pending or not", () => {
+    const d = detail("s1", [
+      line("trade", { lineKind: "trade", status: "pending" }),
+      line("cash"),
+    ]);
+    expect([...selectableLineIds([d])]).toEqual(["cash"]);
+  });
+
+  test("a matched pair is offered once, through the side staged here", () => {
+    const out = line("out", { amount: -50 });
+    const inn = line("in", { amount: 50, lineKind: "credit" });
+    const d = detail("s1", [out, inn], [match("m1", out, inn)]);
+    // Both sides are local, so the transfer row selects the debit side and the
+    // credit side is not offered separately.
+    expect([...selectableLineIds([d])]).toEqual(["out"]);
+  });
+
+  test("a pair whose counterpart is already settled is offered by neither path", () => {
+    // The transfer row renders without a checkbox (one side is no longer
+    // pending) and the entry table leaves the line out, so select-all must not
+    // pick it either -- otherwise "Import selected (N)" counts a line the user
+    // cannot see ticked.
+    const out = line("out");
+    const settled = line("foreign", { status: "imported" });
+    const d = detail("s1", [out], [match("m1", out, settled)]);
+    expect([...selectableLineIds([d])]).toEqual([]);
+  });
+
+  test("a counterpart in another file still offers the local side", () => {
+    const out = line("out");
+    const foreign = line("foreign"); // pending, but not among this review's lines
+    const d = detail("s1", [out], [match("m1", out, foreign)]);
+    expect([...selectableLineIds([d])]).toEqual(["out"]);
+  });
+
+  test("a dismissed match falls back to two ordinary entries", () => {
+    const out = line("out");
+    const inn = line("in");
+    const d = detail("s1", [out, inn], [match("m1", out, inn, { status: "dismissed" })]);
+    expect([...selectableLineIds([d])].sort()).toEqual(["in", "out"]);
+  });
+
+  test("a file review spans its statements and counts a shared pair once", () => {
+    const out = line("out");
+    const inn = line("in");
+    const m = match("m1", out, inn);
+    // Both statements of the file report the pair (the endpoint selects a
+    // match when either side belongs to the statement).
+    const a = detail("s1", [out, line("fee")], [m]);
+    const b = detail("s2", [inn, line("rent")], [m]);
+    expect([...selectableLineIds([a, b])].sort()).toEqual(["fee", "out", "rent"]);
+  });
+});
+
+describe("liveMatches / matchedLineIds", () => {
+  test("deduplicates a pair reported by both of its statements", () => {
+    const out = line("out");
+    const inn = line("in");
+    const m = match("m1", out, inn);
+    expect(liveMatches([detail("s1", [out], [m]), detail("s2", [inn], [m])])).toHaveLength(1);
+  });
+
+  test("drops dismissed matches, so their lines stay ordinary entries", () => {
+    const out = line("out");
+    const inn = line("in");
+    const d = detail("s1", [out, inn], [match("m1", out, inn, { status: "dismissed" })]);
+    expect(liveMatches([d])).toEqual([]);
+    expect(matchedLineIds(liveMatches([d])).size).toBe(0);
+  });
+});
