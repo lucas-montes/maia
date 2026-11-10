@@ -2151,6 +2151,21 @@ async fn import_statements(statements: Vec<serde_json::Value>) -> CommandResult<
     )
 }
 
+/// What importing the same body would do, without doing it.
+///
+/// The server runs the real import in a transaction and rolls it back, so the
+/// numbers this returns are the numbers the import button produces.
+#[tauri::command]
+async fn preview_statements(statements: Vec<serde_json::Value>) -> CommandResult<serde_json::Value> {
+    json_result(
+        api::post(
+            "/statements/preview",
+            &serde_json::json!({ "statements": statements }),
+        )
+        .await,
+    )
+}
+
 /// Soft-deletes several statements in one server transaction.
 #[tauri::command]
 async fn delete_statements(ids: Vec<String>) -> CommandResult<serde_json::Value> {
@@ -4493,6 +4508,7 @@ pub fn run() {
             get_statement_file,
             import_statement,
             import_statements,
+            preview_statements,
             delete_statements,
             ignore_statement,
             delete_statement,

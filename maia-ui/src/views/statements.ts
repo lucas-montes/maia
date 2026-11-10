@@ -1,8 +1,10 @@
 import {
   api,
   isEnvelopeFailure,
+  type ImportPreview,
   type StatementDetail,
   type StatementFeedStatus,
+  type StatementImportBatchEntry,
   type StatementImportLine,
   type StatementLine,
   type StatementSummary,
@@ -73,6 +75,12 @@ function basename(path: string): string {
   return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? path;
 }
 
+/** `2026-02` for an entry's date, for the month subheadings. */
+function monthOf(postedAt: number): string {
+  const date = new Date(postedAt);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
 const AWAITING_STATUSES = new Set(["staged", "partial", "error"]);
 
 /** Groups statements by the file they were staged from.
@@ -98,6 +106,15 @@ function groupStatements(items: StatementSummary[]): { key: string; label: strin
 
 function groupPending(statements: StatementSummary[]): number {
   return statements.reduce((sum, s) => sum + s.pendingCount, 0);
+}
+
+/** How many *accounts* a group covers, not how many statements.
+ *
+ *  They are the same thing for a dropped file — one statement per account —
+ *  but a feed stages one statement per month, and counting those as accounts
+ *  is the mistake that made a single export read as 34 of them. */
+function groupAccounts(statements: StatementSummary[]): number {
+  return new Set(statements.map((s) => s.accountId ?? s.accountNumber ?? s.id)).size;
 }
 
 function bulkBar(label: string, actions: { import?: boolean; skip?: boolean; "delete"?: boolean }): string {
@@ -155,7 +172,7 @@ function listHtml(
           <input type="checkbox" class="checkbox checkbox-sm" data-file-check="${escapeHtml(key)}" ${allPicked ? "checked" : ""} ${somePicked && !allPicked ? "data-indeterminate" : ""} title="Select all accounts of this file" />
           <button class="min-w-0 flex-1 text-left" type="button" data-action="open-file" data-file-path="${escapeHtml(key.startsWith("~") ? "" : key)}">
             <span class="text-sm font-medium text-ink-200 underline decoration-base-300 underline-offset-2">${escapeHtml(label)}</span>
-            <span class="ml-2 text-xs text-ink-500">${statements.length} account${statements.length !== 1 ? "s" : ""} · ${groupPending(statements)} entr${groupPending(statements) !== 1 ? "ies" : "y"} pending</span>
+            <span class="ml-2 text-xs text-ink-500">${groupAccounts(statements)} account${groupAccounts(statements) !== 1 ? "s" : ""} · ${groupPending(statements)} entr${groupPending(statements) !== 1 ? "ies" : "y"} pending</span>
           </button>
           ${key.startsWith("~") ? "" : `<button class="btn btn-ghost btn-xs" type="button" data-action="open-file" data-file-path="${escapeHtml(key)}">Review file</button>`}
         </div>
@@ -365,16 +382,232 @@ function detailHtml(
     </div>`;
 }
 
+/** The headline: what this import will do, in the import's own words.
+ *
+ *  Every number here comes from `POST /statements/preview`, which is the real
+ *  import run in a rolled-back transaction — so the summary on screen is the
+ *  summary the button produces. The page used to render its own reading of the
+ *  statement rows instead, which is how it came to promise 34 accounts for a
+ *  file that would create one. */
+function summaryHtml(preview: ImportPreview | null, previewing: boolean, selected: number): string {
+  if (selected === 0) {
+    return `
+      <div class="rounded border border-surface-800 bg-base-100 p-4 text-sm text-ink-500">
+        Nothing selected. Tick the entries to import — the summary here is the import's own answer,
+        not an estimate of it.
+      </div>`;
+  }
+  if (!preview) {
+    return `
+      <div class="rounded border border-surface-800 bg-base-100 p-4 text-sm text-ink-500">
+        Working out what this import would do…
+      </div>`;
+  }
+  const t = preview.totals;
+  const part = (count: number, text: string, cls = "text-ink-200") =>
+    count > 0 ? `<span class="${cls}">${count} ${text}</span>` : "";
+  const parts = [
+    part(t.files, `file${t.files !== 1 ? "s" : ""}`, "text-ink-400"),
+    part(t.accountsToCreate, `account${t.accountsToCreate !== 1 ? "s" : ""} to create`, "text-warn-400"),
+    part(t.accountsReused, `existing account${t.accountsReused !== 1 ? "s" : ""}`, "text-ink-400"),
+    part(t.transactions, `transaction${t.transactions !== 1 ? "s" : ""}`),
+    part(t.transferPairs, `transfer pair${t.transferPairs !== 1 ? "s" : ""} merged`),
+    part(t.duplicates, "duplicates suppressed", "text-warn-400"),
+    part(t.informational, "informational", "text-ink-500"),
+    part(t.errors, `error${t.errors !== 1 ? "s" : ""}`, "text-err-400"),
+  ].filter(Boolean);
+  return `
+    <div class="rounded border ${t.errors > 0 ? "border-err-700" : "border-surface-800"} bg-base-100 p-4">
+      <div class="flex flex-wrap items-center gap-2">
+        <h3 class="text-sm font-medium text-ink-200">Importing will</h3>
+        ${previewing ? `<span class="badge badge-muted">updating…</span>` : ""}
+      </div>
+      <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+        ${parts.join(`<span class="text-ink-600">·</span>`) || `<span class="text-ink-500">do nothing</span>`}
+      </div>
+    </div>`;
+}
+
+/** Per-line failures, before the click rather than after it. */
+function previewErrorsHtml(preview: ImportPreview | null): string {
+  if (!preview || preview.errors.length === 0) return "";
+  const rows = preview.errors
+    .map(
+      (error) => `
+        <tr>
+          <td class="whitespace-nowrap align-top text-xs text-ink-400">${escapeHtml(formatEpoch(error.postedAt))}</td>
+          <td class="align-top text-sm text-ink-200">${escapeHtml(error.description)}</td>
+          <td class="whitespace-nowrap text-right align-top font-mono text-sm text-ink-300">${escapeHtml(money(error.amount, error.currencyCode))}</td>
+          <td class="align-top text-xs text-err-400">${escapeHtml(error.error)}</td>
+        </tr>`,
+    )
+    .join("");
+  return `
+    <div class="rounded border border-err-700 bg-base-100 p-4">
+      <h3 class="text-sm font-medium text-err-400">These entries cannot be imported yet</h3>
+      <p class="mt-1 mb-2 text-xs text-ink-500">Reported by the import itself, so the problem is visible before the button rather than after it. A missing exchange rate is the common one — add it under FX rates and re-check.</p>
+      <table class="table table-sm w-full">
+        <thead><tr><th>Date</th><th>Description</th><th class="text-right">Amount</th><th>Why</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+/** Merges, shown as merges: one row per collapse, with what it collapsed. */
+function mergesHtml(preview: ImportPreview | null): string {
+  if (!preview) return "";
+  const transfers = preview.transfers
+    .map(
+      (transfer) => `
+        <tr>
+          <td class="whitespace-nowrap align-top text-xs text-ink-400">${escapeHtml(formatEpoch(transfer.postedAt))}</td>
+          <td class="align-top text-sm">
+            <span class="text-ink-200">${escapeHtml(transfer.fromAccount)}</span>
+            <span class="text-ink-500"> → </span>
+            <span class="text-ink-200">${escapeHtml(transfer.toAccount)}</span>
+            <div class="text-xs text-ink-500">${escapeHtml(transfer.description)}</div>
+          </td>
+          <td class="whitespace-nowrap text-right align-top font-mono text-sm text-ink-300">${escapeHtml(money(transfer.amount, transfer.currencyCode))}</td>
+          <td class="align-top text-xs text-ink-500">two entries, one transfer</td>
+        </tr>`,
+    )
+    .join("");
+  const duplicates = preview.duplicates
+    .map(
+      (duplicate) => `
+        <tr>
+          <td class="whitespace-nowrap align-top text-xs text-ink-400">${escapeHtml(formatEpoch(duplicate.postedAt))}</td>
+          <td class="align-top text-sm text-ink-200">${escapeHtml(duplicate.description)}</td>
+          <td class="whitespace-nowrap text-right align-top font-mono text-sm text-ink-300">${escapeHtml(money(duplicate.amount, duplicate.currencyCode))}</td>
+          <td class="align-top text-xs text-ink-500">${duplicate.keptFrom ? `already imported from ${escapeHtml(basename(duplicate.keptFrom))}` : "already staged elsewhere"}</td>
+        </tr>`,
+    )
+    .join("");
+  if (!transfers && !duplicates) return "";
+  return `
+    <div class="rounded border border-surface-800 bg-base-100 p-4">
+      <h3 class="text-sm font-medium text-ink-200">Entries that merge</h3>
+      <p class="mt-1 mb-2 text-xs text-ink-500">Shown as one row each, so a collapse is explained rather than leaving two entries to reconcile by eye.</p>
+      <table class="table table-sm w-full">
+        <thead><tr><th>Date</th><th>What</th><th class="text-right">Amount</th><th>Becomes</th></tr></thead>
+        <tbody>${transfers}${duplicates}</tbody>
+      </table>
+    </div>`;
+}
+
+/** The target accounts, grouped by identity and stated once each.
+ *
+ *  A group is an account, not a statement: two files of the same Firstrade
+ *  export are one row listing both files, rather than one proposal each. */
+function accountGroupsHtml(
+  preview: ImportPreview | null,
+  previewing: boolean,
+  statements: StatementDetail[],
+  selected: Set<string>,
+  selectable: Set<string>,
+  accounts: { id: string; name: string; type: string }[],
+  overrides: Record<string, string>,
+): string {
+  if (!preview) {
+    return `<div class="rounded border border-surface-800 bg-base-100 p-4 text-sm text-ink-500">
+      ${previewing ? "Checking which accounts these entries land on…" : "Select entries to see which accounts they land on."}
+    </div>`;
+  }
+  if (preview.accounts.length === 0) {
+    return `<div class="rounded border border-surface-800 bg-base-100 p-4 text-sm text-ink-500">No accounts involved.</div>`;
+  }
+  const byId = new Map(statements.map((detail) => [detail.statement.id, detail]));
+  const rows = preview.accounts
+    .map((account) => {
+      const details = account.statementIds
+        .map((id) => byId.get(id))
+        .filter((detail): detail is StatementDetail => detail !== undefined);
+      const lines = details.flatMap((detail) => detail.lines.filter((line) => selectable.has(line.id)));
+      const allPicked = lines.length > 0 && lines.every((line) => selected.has(line.id));
+      const somePicked = lines.some((line) => selected.has(line.id));
+      const resolution =
+        account.resolution === "existing"
+          ? `<span class="text-ink-400">uses existing account</span> <span class="text-ink-200">${escapeHtml(account.name)}</span>`
+          : account.resolution === "willCreate"
+            ? `<span class="badge badge-warn">will be created</span> <span class="text-ink-200">${escapeHtml(account.name)}</span> <span class="text-ink-500">(${escapeHtml(account.accountType)})</span>`
+            : `<span class="text-ink-500">nothing selected from this account</span>`;
+      const override = details
+        .map((detail) => overrides[detail.statement.id])
+        .find((value) => value !== undefined);
+      const options = accounts
+        .map(
+          (candidate) =>
+            `<option value="${escapeHtml(candidate.id)}" ${candidate.id === override ? "selected" : ""}>${escapeHtml(candidate.name)} (${escapeHtml(candidate.type)})</option>`,
+        )
+        .join("");
+      // Accepting a suggestion writes the number onto the chosen account, so a
+      // guess becomes an exact match from then on and never has to be trusted
+      // twice.
+      const suggestions =
+        account.resolution === "willCreate" && account.externalId
+          ? account.suggestions
+              .map(
+                (suggestion) => `
+                  <button class="btn btn-ghost btn-xs" type="button"
+                    data-action="adopt-identity"
+                    data-account-id="${escapeHtml(suggestion.id)}"
+                    data-source="${escapeHtml(account.source)}"
+                    data-external-id="${escapeHtml(account.externalId ?? "")}"
+                    title="${escapeHtml(suggestion.reason)}">
+                    It is ${escapeHtml(suggestion.name)}
+                  </button>`,
+              )
+              .join("")
+          : "";
+      return `
+        <div class="rounded border border-surface-800 bg-base-200/40 p-3" data-account-group>
+          <div class="flex flex-wrap items-start gap-2">
+            <input type="checkbox" class="checkbox checkbox-sm mt-0.5" data-group-check="${escapeHtml(details.map((d) => d.statement.id).join(","))}"
+              ${allPicked ? "checked" : ""} ${somePicked && !allPicked ? "data-indeterminate" : ""}
+              ${lines.length === 0 ? "disabled" : ""} title="Select every entry of this account" />
+            <div class="min-w-0 flex-1">
+              <div class="text-sm">${resolution}</div>
+              <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-500">
+                ${account.externalId ? `<span class="font-mono">${escapeHtml(account.externalId)}</span>` : ""}
+                <span>${account.transactions} entr${account.transactions !== 1 ? "ies" : "y"} to import</span>
+                <span>from ${account.files.map((file) => escapeHtml(basename(file))).join(", ")}</span>
+              </div>
+              ${suggestions ? `<div class="mt-2 flex flex-wrap items-center gap-2"><span class="text-xs text-ink-500">Already have it?</span>${suggestions}</div>` : ""}
+            </div>
+            <label class="flex items-center gap-2 text-xs text-ink-500">
+              Import into
+              <select class="select select-xs select-bordered w-48" data-account-override="${escapeHtml(details.map((d) => d.statement.id).join(","))}">
+                <option value="">${account.resolution === "willCreate" ? "— a new account —" : "— the account above —"}</option>
+                ${options}
+              </select>
+            </label>
+          </div>
+        </div>`;
+    })
+    .join("");
+  return `
+    <div class="rounded border border-surface-800 bg-base-100 p-4">
+      <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h3 class="text-sm font-medium text-ink-200">Accounts</h3>
+        <span class="text-xs text-ink-500">grouped by account number, across every file</span>
+      </div>
+      <div class="space-y-2">${rows}</div>
+    </div>`;
+}
+
 /** The file review page: every account and entry one dropped file produced.
  *
- *  This is the screen that answers "what will this import create?" -- the
- *  accounts first, then the entries grouped by account, then transfers and
- *  informational trades. Selection is shared across all accounts, so one
- *  import call can cover the whole file. */
+ *  It leads with what the import will do — the preview, which is the import
+ *  itself — and the per-account and per-entry detail sits underneath.
+ *  Selection is shared across all accounts, so one import call covers the
+ *  whole file. */
 function fileHtml(
   statements: StatementDetail[],
   selected: Set<string>,
   accounts: { id: string; name: string; type: string }[],
+  preview: ImportPreview | null,
+  previewing: boolean,
+  overrides: Record<string, string>,
 ): string {
   const localIds = new Set<string>();
   const trades: StatementLine[] = [];
@@ -390,43 +623,6 @@ function fileHtml(
     0,
   );
 
-  // Every cell of an account row is top-aligned: the account cell is two lines
-  // tall whenever a number is known, and a cell left on the table's default
-  // `vertical-align: middle` centres its checkbox against both of them -- which
-  // is what left the checkbox column sitting a line below its account name.
-  const accountRows = statements
-    .map((detail) => {
-      const s = detail.statement;
-      const accountSelectable = detail.lines.filter((line) => selectable.has(line.id));
-      const accountPending = detail.lines.filter((line) => line.status === "pending");
-      const allPicked =
-        accountSelectable.length > 0 && accountSelectable.every((line) => selected.has(line.id));
-      const somePicked = accountSelectable.some((line) => selected.has(line.id));
-      return `
-        <tr>
-          <td class="w-8 align-top">
-            <input type="checkbox" class="checkbox checkbox-sm align-top" data-account-check="${escapeHtml(s.id)}"
-              ${allPicked ? "checked" : ""} ${somePicked && !allPicked ? "data-indeterminate" : ""}
-              title="Select every pending entry of this account" ${accountSelectable.length === 0 ? "disabled" : ""} />
-          </td>
-          <td class="align-top">
-            <button class="text-left text-sm font-medium text-ink-200 hover:underline" type="button" data-statement-id="${escapeHtml(s.id)}">${escapeHtml(statementTitle(s))}</button>
-            ${s.accountNumber ? `<div class="font-mono text-xs text-ink-500">${escapeHtml(s.accountNumber)}</div>` : ""}
-          </td>
-          <td class="align-top text-xs text-ink-400">${escapeHtml(s.currencyCode)}</td>
-          <td class="align-top text-xs">
-            ${s.resolvedAccountName
-              ? `<span class="text-ink-400">uses existing account</span> <span class="text-ink-200">${escapeHtml(s.resolvedAccountName)}</span>`
-              : `<span class="badge badge-warn">will be created on import</span> <span class="text-ink-200">${escapeHtml(s.accountName)}</span>`}
-          </td>
-          <td class="text-right align-top text-xs text-ink-400">${accountPending.length}</td>
-          <td class="text-right align-top">
-            <button class="btn btn-ghost btn-xs text-err-400" type="button" data-action="delete-account" data-statement-id="${escapeHtml(s.id)}">Delete</button>
-          </td>
-        </tr>`;
-    })
-    .join("");
-
   const matched = matchedLineIds(matches);
   const entrySections = statements
     .map((detail) => {
@@ -436,10 +632,33 @@ function fileHtml(
       );
       if (ordinary.length === 0) return "";
       const accountPending = ordinary.filter((line) => line.status === "pending").length;
+      // Month subheadings when the account spans months. A file used to be
+      // split into one statement per month, which the review read as one
+      // account each; the months were real information, so they are kept —
+      // as presentation, which is where they belonged.
+      const byMonth = new Map<string, StatementLine[]>();
+      for (const line of ordinary) {
+        const month = monthOf(line.postedAt);
+        byMonth.set(month, [...(byMonth.get(month) ?? []), line]);
+      }
+      const months = [...byMonth.keys()].sort();
+      const body = months
+        .map((month) => {
+          const rows = (byMonth.get(month) ?? [])
+            .map((line) => lineRow(line, selected.has(line.id), selectable.has(line.id)))
+            .join("");
+          const heading =
+            months.length > 1
+              ? `<tr><td colspan="7" class="bg-surface-800/30 text-xs font-medium text-ink-400">${escapeHtml(month)}</td></tr>`
+              : "";
+          return heading + rows;
+        })
+        .join("");
       return `
         <div class="rounded border border-surface-800 bg-base-100 p-4">
           <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
             <h3 class="text-sm font-medium text-ink-200">${escapeHtml(statementTitle(s))} <span class="font-normal text-ink-500">· ${accountPending} entr${accountPending !== 1 ? "ies" : "y"} to add</span></h3>
+            ${s.periodStart && s.periodEnd ? `<span class="text-xs text-ink-500">${escapeHtml(s.periodStart)} → ${escapeHtml(s.periodEnd)}</span>` : ""}
           </div>
           <table class="table table-sm w-full">
             <thead>
@@ -448,9 +667,7 @@ function fileHtml(
                 <th>Type</th><th>Category</th><th>Status</th>
               </tr>
             </thead>
-            <tbody>
-              ${ordinary.map((line) => lineRow(line, selected.has(line.id), selectable.has(line.id))).join("")}
-            </tbody>
+            <tbody>${body}</tbody>
           </table>
         </div>`;
     })
@@ -469,20 +686,20 @@ function fileHtml(
 
   return `
     <div class="min-h-0 flex-1 space-y-4 overflow-auto">
-      <div class="rounded border border-surface-800 bg-base-100 p-4">
-        <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <h3 class="text-sm font-medium text-ink-200">Accounts</h3>
-          <div class="flex items-center gap-2">
-            <span class="text-xs text-ink-500">${statements.length} account${statements.length !== 1 ? "s" : ""} · ${pending} entr${pending !== 1 ? "ies" : "y"} pending</span>
-            <button class="btn btn-ghost btn-xs" type="button" data-action="select-all" ${selectable.size === 0 ? "disabled" : ""}>Select pending</button>
-            <button class="btn btn-ghost btn-xs" type="button" data-action="select-none" ${selected.size === 0 ? "disabled" : ""}>Clear</button>
-          </div>
-        </div>
-        <table class="table table-sm w-full">
-          <thead><tr><th></th><th>Account</th><th>Currency</th><th>Status</th><th class="text-right">Pending</th><th></th></tr></thead>
-          <tbody>${accountRows}</tbody>
-        </table>
+      ${summaryHtml(preview, previewing, selected.size)}
+
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="text-xs text-ink-500">${pending} entr${pending !== 1 ? "ies" : "y"} pending in this file</span>
+        <span class="flex-1"></span>
+        <button class="btn btn-ghost btn-xs" type="button" data-action="select-all" ${selectable.size === 0 ? "disabled" : ""}>Select pending</button>
+        <button class="btn btn-ghost btn-xs" type="button" data-action="select-none" ${selected.size === 0 ? "disabled" : ""}>Clear</button>
       </div>
+
+      ${accountGroupsHtml(preview, previewing, statements, selected, selectable, accounts, overrides)}
+
+      ${previewErrorsHtml(preview)}
+
+      ${mergesHtml(preview)}
 
       ${entrySections || `<div class="rounded border border-surface-800 bg-base-100 p-4 text-sm text-ink-500">No importable entries in this file.</div>`}
 
@@ -496,10 +713,13 @@ function fileHtml(
         </table>
       </div>` : ""}
 
-      <div class="flex flex-wrap items-center gap-3">
+      <div class="sticky bottom-0 flex flex-wrap items-center gap-3 border-t border-surface-800 bg-base-200/95 py-2 backdrop-blur">
         <button class="btn btn-ghost btn-sm" type="button" data-action="file-back">← Back to list</button>
-        <button class="btn btn-primary btn-sm" type="button" data-action="file-import" ${selected.size === 0 ? "disabled" : ""}>Import selected (${selected.size})</button>
+        <button class="btn btn-primary btn-sm" type="button" data-action="file-import" ${selected.size === 0 ? "disabled" : ""}>
+          ${preview ? `Import ${preview.totals.transactions} transaction${preview.totals.transactions !== 1 ? "s" : ""}` : `Import selected (${selected.size})`}
+        </button>
         <button class="btn btn-ghost btn-sm" type="button" data-action="file-skip" ${selected.size === 0 ? "disabled" : ""}>Skip selected</button>
+        ${preview && preview.totals.errors > 0 ? `<span class="text-xs text-err-400">${preview.totals.errors} entr${preview.totals.errors !== 1 ? "ies" : "y"} will fail — see above</span>` : ""}
       </div>
     </div>`;
 }
@@ -623,7 +843,49 @@ export function mount(root: HTMLElement): () => void {
     }
   };
 
+  /** Per-line type/category/counterpart edits, kept here rather than only in
+   *  the DOM.
+   *
+   *  Every selection change rebuilds the page from the atom, and now a landing
+   *  preview can rebuild it again a moment later — so a category typed into a
+   *  row has to survive a re-render that happens while it is being typed. The
+   *  same reason `pickedFiles` and `syncDropForm` exist. */
+  const lineEdits: Record<string, { type?: string; category?: string; counterpart?: string }> = {};
+
+  /** Re-applies those edits, plus focus and caret, after a rebuild. */
+  const syncLineEdits = (): void => {
+    const field = (attribute: string, id: string) =>
+      content.querySelector<HTMLInputElement | HTMLSelectElement>(
+        `[${attribute}="${CSS.escape(id)}"]`,
+      );
+    for (const [id, edit] of Object.entries(lineEdits)) {
+      const type = field("data-type-for", id);
+      if (type && edit.type !== undefined) type.value = edit.type;
+      const category = field("data-category-for", id);
+      if (category && edit.category !== undefined) category.value = edit.category;
+      const counterpart = field("data-counterpart-for", id);
+      if (counterpart && edit.counterpart !== undefined) counterpart.value = edit.counterpart;
+    }
+  };
+
+  /** What the user is typing into, so a rebuild does not take the cursor. */
+  const focusMark = (): { selector: string; start: number | null } | null => {
+    const active = document.activeElement as HTMLInputElement | HTMLSelectElement | null;
+    if (!active || !content.contains(active)) return null;
+    for (const attribute of ["data-category-for", "data-type-for", "data-counterpart-for"]) {
+      const value = active.getAttribute(attribute);
+      if (value) {
+        return {
+          selector: `[${attribute}="${CSS.escape(value)}"]`,
+          start: active instanceof HTMLInputElement ? active.selectionStart : null,
+        };
+      }
+    }
+    return null;
+  };
+
   const render = (): void => {
+    const focused = focusMark();
     const state = statementsAtom.get();
     const accountOptions = accounts.map((a) => ({ id: a.id, name: a.name, type: a.type }));
     if (state.selectedId && state.detail) {
@@ -639,7 +901,14 @@ export function mount(root: HTMLElement): () => void {
         content,
         `${panelOpen("File review", basename(state.fileReview.path), "panel-fit")}
           ${statusBanner(state)}
-          ${fileHtml(state.fileReview.statements as StatementDetail[], selectedSet(), accountOptions)}
+          ${fileHtml(
+            state.fileReview.statements as StatementDetail[],
+            selectedSet(),
+            accountOptions,
+            state.preview as ImportPreview | null,
+            state.previewing,
+            state.accountOverrides,
+          )}
         ${panelClose}`,
       );
     } else {
@@ -693,6 +962,14 @@ export function mount(root: HTMLElement): () => void {
     content.querySelectorAll<HTMLInputElement>("[data-indeterminate]").forEach((el) => {
       el.indeterminate = true;
     });
+    syncLineEdits();
+    if (focused) {
+      const el = content.querySelector<HTMLInputElement | HTMLSelectElement>(focused.selector);
+      el?.focus();
+      if (el instanceof HTMLInputElement && focused.start !== null) {
+        el.setSelectionRange(focused.start, focused.start);
+      }
+    }
     refreshIcons(content);
   };
 
@@ -793,16 +1070,27 @@ export function mount(root: HTMLElement): () => void {
     try {
       const res = await api.getStatementFile(path);
       if (!res.success || !res.data) throw new Error(res.error ?? "Could not load the file");
+      const statements = res.data.statements as StatementDetail[];
       statementsAtom.set({
         ...statementsAtom.get(),
         status: "idle",
         message: "",
-        fileReview: { path, statements: res.data.statements },
+        fileReview: { path, statements },
+        // Opening a file pre-selects everything it offers, which is also what
+        // the first preview describes.
+        selectedLines: [...selectableLineIds(statements)],
       });
+      void runPreview();
     } catch (e) {
       statementsAtom.set({
         ...statementsAtom.get(),
         fileReview: null,
+
+        preview: null,
+
+        previewing: false,
+
+        accountOverrides: {},
         status: "error",
         message: `Failed to load the file: ${e}`,
       });
@@ -810,10 +1098,12 @@ export function mount(root: HTMLElement): () => void {
     rerender();
   };
 
-  /** Imports or skips the selected entries across every account of a file. */
-  const runFileImport = async (action: "import" | "skip"): Promise<void> => {
-    const review = statementsAtom.get().fileReview;
-    if (!review || selectedSet().size === 0) return;
+  /** The batch body for one file review: the same object the preview and the
+   *  import are both given, so what is previewed is literally what is sent. */
+  const fileBatch = (action: "import" | "skip"): StatementImportBatchEntry[] => {
+    const state = statementsAtom.get();
+    const review = state.fileReview;
+    if (!review) return [];
     const lines = importLines(action);
     const byStatement = new Map<string, StatementImportLine[]>();
     for (const line of lines) {
@@ -825,8 +1115,114 @@ export function mount(root: HTMLElement): () => void {
       list.push(line);
       byStatement.set(owner.statement.id, list);
     }
-    if (byStatement.size === 0) return;
-    const count = lines.length;
+    return [...byStatement.entries()].map(([id, lines]) => ({
+      id,
+      lines,
+      autoLink: true,
+      // An override picked in the review wins over whatever the import would
+      // otherwise resolve, and the server honours it as the statement's
+      // account for every line of it.
+      ...(state.accountOverrides[id] ? { accountId: state.accountOverrides[id] } : {}),
+    }));
+  };
+
+  /** Re-asks the server what the current selection would do.
+   *
+   *  Debounced: a preview loads every line of a statement to expand transfer
+   *  pairs, and a 700-line T212 export re-previewed on every checkbox click
+   *  would be wasteful. The request is also scoped to the file being reviewed
+   *  rather than everything staged.
+   *
+   *  Out-of-order replies are dropped by token: ticking quickly starts several
+   *  previews, and the last one asked for is the only one that describes what
+   *  is on screen. */
+  let previewToken = 0;
+  let previewTimer: ReturnType<typeof setTimeout> | null = null;
+  const schedulePreview = (): void => {
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = setTimeout(() => void runPreview(), 250);
+  };
+
+  const runPreview = async (): Promise<void> => {
+    const state = statementsAtom.get();
+    if (!state.fileReview) return;
+    const batch = fileBatch("import");
+    if (batch.length === 0) {
+      statementsAtom.set({ ...statementsAtom.get(), preview: null, previewing: false });
+      render();
+      return;
+    }
+    const token = ++previewToken;
+    statementsAtom.set({ ...statementsAtom.get(), previewing: true });
+    render();
+    try {
+      const res = await api.previewStatements(batch);
+      if (token !== previewToken) return;
+      if (!res.success || !res.data) throw new Error(res.error ?? "Could not preview the import");
+      statementsAtom.set({ ...statementsAtom.get(), preview: res.data, previewing: false });
+      render();
+    } catch (e) {
+      if (token !== previewToken) return;
+      // The page still works without a preview: the entries and their
+      // checkboxes are local. Say what failed rather than showing stale
+      // numbers as if they were current.
+      statementsAtom.set({
+        ...statementsAtom.get(),
+        preview: null,
+        previewing: false,
+        status: "error",
+        message: `Could not work out what this import would do: ${e}`,
+      });
+      render();
+    }
+  };
+
+  /** "It is that account": writes this file's number onto an existing account.
+   *
+   *  The shortest way out of the state that prompted all this — an import
+   *  about to create an account the user already has. Once the number is on
+   *  it, the match is exact from then on and the suggestion machinery never
+   *  has to be trusted again. */
+  const adoptIdentity = async (
+    accountId: string,
+    source: string,
+    externalId: string,
+  ): Promise<void> => {
+    const review = statementsAtom.get().fileReview;
+    if (!review || !accountId || !source || !externalId) return;
+    statementsAtom.set({ ...statementsAtom.get(), status: "saving", message: "" });
+    rerender();
+    try {
+      const res = await api.setAccountIdentity({ id: accountId, source, externalId });
+      if (!res.success) throw new Error(res.error ?? "Could not set the account number");
+      await loadAccounts();
+      // Re-open the file so the statements come back with their new
+      // `resolvedAccountName`, then re-preview: the import's answer has
+      // changed, so the summary must be asked again rather than patched.
+      await openFileReview(review.path);
+      statementsAtom.set({
+        ...statementsAtom.get(),
+        status: "saved",
+        message: `${externalId} now belongs to that account; this import will use it.`,
+      });
+      rerender();
+    } catch (e) {
+      statementsAtom.set({
+        ...statementsAtom.get(),
+        status: "error",
+        message: String(e),
+      });
+      rerender();
+    }
+  };
+
+  /** Imports or skips the selected entries across every account of a file. */
+  const runFileImport = async (action: "import" | "skip"): Promise<void> => {
+    const review = statementsAtom.get().fileReview;
+    if (!review || selectedSet().size === 0) return;
+    const batch = fileBatch(action);
+    if (batch.length === 0) return;
+    const count = batch.reduce((sum, entry) => sum + entry.lines.length, 0);
     const message =
       action === "import"
         ? `${count} entr${count !== 1 ? "ies" : "y"} imported.`
@@ -834,9 +1230,7 @@ export function mount(root: HTMLElement): () => void {
     statementsAtom.set({ ...statementsAtom.get(), status: "saving", message: "" });
     rerender();
     try {
-      const res = await api.importStatements(
-        [...byStatement.entries()].map(([id, lines]) => ({ id, lines, autoLink: true })),
-      );
+      const res = await api.importStatements(batch);
       if (!res.success) throw new Error(res.error ?? "Import failed");
       statementsAtom.set({ ...statementsAtom.get(), selectedLines: [] });
       await openFileReview(review.path);
@@ -872,6 +1266,12 @@ export function mount(root: HTMLElement): () => void {
           statementsAtom.set({
             ...statementsAtom.get(),
             fileReview: null,
+
+            preview: null,
+
+            previewing: false,
+
+            accountOverrides: {},
             selectedLines: [],
           });
           await loadList();
@@ -1059,6 +1459,12 @@ export function mount(root: HTMLElement): () => void {
         // from a file review; that snapshot is stale now, so return to the
         // list rather than showing a ghost account.
         fileReview: null,
+
+        preview: null,
+
+        previewing: false,
+
+        accountOverrides: {},
         selectedLines: [],
         status: "saved",
         message: kind === "ignore" ? "Statement ignored." : "Statement deleted.",
@@ -1074,8 +1480,28 @@ export function mount(root: HTMLElement): () => void {
     }
   };
 
+  // Record per-line edits as they are made, so a rebuild cannot lose them.
+  // `input` rather than `change`: a category half-typed when a preview lands
+  // is exactly the case that used to be dropped.
+  const recordLineEdit = (target: HTMLElement): void => {
+    const el = target as HTMLInputElement | HTMLSelectElement;
+    const pairs: [string, "type" | "category" | "counterpart"][] = [
+      ["data-type-for", "type"],
+      ["data-category-for", "category"],
+      ["data-counterpart-for", "counterpart"],
+    ];
+    for (const [attribute, field] of pairs) {
+      const id = el.getAttribute(attribute);
+      if (!id) continue;
+      lineEdits[id] = { ...lineEdits[id], [field]: el.value };
+      return;
+    }
+  };
+  root.addEventListener("input", (event) => recordLineEdit(event.target as HTMLElement));
+
   root.addEventListener("change", (event) => {
     const target = event.target as HTMLElement;
+    recordLineEdit(target);
     if (target.matches("[data-drop-input]")) {
       const input = target as HTMLInputElement;
       pickedFiles = [...(input.files ?? [])];
@@ -1108,25 +1534,46 @@ export function mount(root: HTMLElement): () => void {
       render();
       return;
     }
-    if (target.matches("[data-account-check]")) {
+    // One account group's checkbox covers every statement feeding it, which is
+    // more than one when two files share an account number.
+    if (target.matches("[data-group-check]")) {
       const checkbox = target as HTMLInputElement;
-      const statementId = checkbox.dataset.accountCheck as string;
+      const ids = new Set((checkbox.dataset.groupCheck ?? "").split(",").filter(Boolean));
       const state = statementsAtom.get();
       const review = (state.fileReview?.statements as StatementDetail[] | undefined) ?? [];
-      const detail = review.find((candidate) => candidate.statement.id === statementId);
-      if (!detail) return;
       // Selectability is a property of the whole file (a transfer pair can
       // straddle two of its accounts), so the set is computed over every
-      // statement and then narrowed to this one's lines.
+      // statement and then narrowed to this group's.
       const selectable = selectableLineIds(review);
-      const pending = detail.lines.filter((line) => selectable.has(line.id)).map((line) => line.id);
       const next = new Set(state.selectedLines);
-      for (const id of pending) {
-        if (checkbox.checked) next.add(id);
-        else next.delete(id);
+      for (const detail of review) {
+        if (!ids.has(detail.statement.id)) continue;
+        for (const line of detail.lines) {
+          if (!selectable.has(line.id)) continue;
+          if (checkbox.checked) next.add(line.id);
+          else next.delete(line.id);
+        }
       }
       statementsAtom.set({ ...state, selectedLines: [...next] });
       render();
+      schedulePreview();
+      return;
+    }
+    // The account an account group's entries are booked onto, overriding what
+    // the import would otherwise resolve. Applies to every statement of the
+    // group, and re-previews so the summary catches up.
+    if (target.matches("[data-account-override]")) {
+      const select = target as HTMLSelectElement;
+      const ids = (select.dataset.accountOverride ?? "").split(",").filter(Boolean);
+      const state = statementsAtom.get();
+      const overrides = { ...state.accountOverrides };
+      for (const id of ids) {
+        if (select.value) overrides[id] = select.value;
+        else delete overrides[id];
+      }
+      statementsAtom.set({ ...state, accountOverrides: overrides });
+      render();
+      schedulePreview();
       return;
     }
     if (target.matches("[data-filter='status']")) {
@@ -1172,6 +1619,7 @@ export function mount(root: HTMLElement): () => void {
 
       statementsAtom.set({ ...state, selectedLines: [...next] });
       render();
+      schedulePreview();
     }
   });
 
@@ -1203,6 +1651,12 @@ export function mount(root: HTMLElement): () => void {
         statementsAtom.set({
           ...statementsAtom.get(),
           fileReview: null,
+
+          preview: null,
+
+          previewing: false,
+
+          accountOverrides: {},
           selectedId: null,
           detail: null,
           selectedLines: [],
@@ -1214,6 +1668,13 @@ export function mount(root: HTMLElement): () => void {
         return;
       case "open-file":
         void openFileReview(actionEl?.dataset.filePath ?? "");
+        return;
+      case "adopt-identity":
+        void adoptIdentity(
+          actionEl?.dataset.accountId ?? "",
+          actionEl?.dataset.source ?? "",
+          actionEl?.dataset.externalId ?? "",
+        );
         return;
       case "file-import":
         void runFileImport("import");
@@ -1285,11 +1746,13 @@ export function mount(root: HTMLElement): () => void {
         if (!review) return;
         statementsAtom.set({ ...state, selectedLines: [...selectableLineIds(review)] });
         render();
+        schedulePreview();
         return;
       }
       case "select-none":
         statementsAtom.set({ ...statementsAtom.get(), selectedLines: [] });
         render();
+        schedulePreview();
         return;
       case "import-selected":
         void runImport(importLines("import"));

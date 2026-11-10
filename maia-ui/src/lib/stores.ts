@@ -229,6 +229,17 @@ export const statementsAtom = atom<
     selectedLines: string[];
     /** Statements of one dropped file, when the file review page is open. */
     fileReview: { path: string; statements: any[] } | null;
+    /** What importing the current selection would do, from the server. `null`
+     *  while the first preview is in flight; it is re-fetched whenever the
+     *  selection or an account override changes, so the summary on screen is
+     *  always the summary the button will produce. */
+    preview: any | null;
+    /** True while a re-preview is in flight, so the summary can say it is
+     *  catching up rather than silently showing stale numbers. */
+    previewing: boolean;
+    /** Per-statement account override picked in the review, keyed by statement
+     *  id — sent as `accountId` with the import and the preview alike. */
+    accountOverrides: Record<string, string>;
     /** Statement ids picked on the list page for bulk import/delete. */
     selectedStatements: string[];
     /** Last source the drop form placed files under, so the dropdown stays on it. */
@@ -242,6 +253,9 @@ export const statementsAtom = atom<
   source: "",
   selectedLines: [],
   fileReview: null,
+  preview: null,
+  previewing: false,
+  accountOverrides: {},
   selectedStatements: [],
   lastDropSource: localStorage.getItem("maia.statements.lastDropSource") ?? "credit_agricole",
 });

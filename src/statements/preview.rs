@@ -1032,6 +1032,64 @@ mod tests {
         assert_eq!(result.errors[0].currency_code, "EUR");
     }
 
+    /// The desktop reads these field names directly (`maia-ui/src/lib/api.ts`,
+    /// `ImportPreview`), and nothing but this test connects the two sides.
+    #[test]
+    fn the_payload_keys_are_the_ones_the_desktop_reads() {
+        let pool = crate::db::init_memory().unwrap();
+        let id = stage(
+            &pool,
+            &csv(&[("Card debit", "a", "2026-02-01", -10.0)]),
+            "one.csv",
+        );
+        let json = serde_json::to_value(preview(&pool, &[&id])).unwrap();
+
+        for key in [
+            "statements",
+            "accounts",
+            "transfers",
+            "duplicates",
+            "informational",
+            "errors",
+            "totals",
+        ] {
+            assert!(json.get(key).is_some(), "missing {key}: {json}");
+        }
+        for key in [
+            "transactions",
+            "skipped",
+            "errors",
+            "accountsToCreate",
+            "accountsReused",
+            "transferPairs",
+            "duplicates",
+            "informational",
+            "files",
+        ] {
+            assert!(json["totals"].get(key).is_some(), "missing totals.{key}");
+        }
+        let account = &json["accounts"][0];
+        for key in [
+            "accountId",
+            "name",
+            "accountType",
+            "source",
+            "externalId",
+            "resolution",
+            "statementIds",
+            "files",
+            "transactions",
+            "suggestions",
+        ] {
+            assert!(account.get(key).is_some(), "missing accounts[].{key}");
+        }
+        assert_eq!(
+            account["resolution"], "willCreate",
+            "the resolution is a camelCase string, as the desktop's union expects"
+        );
+        assert_eq!(json["statements"][0]["statementId"], serde_json::json!(id));
+    }
+
     /// Lines the user skipped are not counted as transactions.
     #[test]
     fn a_skipped_line_is_not_promised_as_a_transaction() {

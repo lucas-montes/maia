@@ -176,6 +176,88 @@ export interface StatementImportLine {
   counterpartAccountId?: string | null;
 }
 
+/** One statement's decisions, as both `/statements/import` and
+ *  `/statements/preview` accept them. */
+export interface StatementImportBatchEntry {
+  id: string;
+  lines: StatementImportLine[];
+  autoLink?: boolean;
+  /** The account to book this statement's entries onto, overriding whatever
+   *  the import would otherwise resolve. */
+  accountId?: string;
+}
+
+/** What an import would do, reported by the import itself. */
+export interface ImportPreview {
+  statements: { statementId: string; created: number; skipped: number; errors: number }[];
+  accounts: PreviewAccount[];
+  transfers: PreviewTransfer[];
+  duplicates: PreviewDuplicate[];
+  informational: PreviewLine[];
+  errors: PreviewError[];
+  totals: {
+    transactions: number;
+    skipped: number;
+    errors: number;
+    accountsToCreate: number;
+    accountsReused: number;
+    transferPairs: number;
+    duplicates: number;
+    informational: number;
+    files: number;
+  };
+}
+
+export interface PreviewAccount {
+  /** `null` until the account exists: a to-be-created account is described,
+   *  not promised an id. */
+  accountId: string | null;
+  name: string;
+  accountType: string;
+  source: string;
+  externalId: string | null;
+  resolution: "existing" | "willCreate" | "untouched";
+  statementIds: string[];
+  files: string[];
+  transactions: number;
+  suggestions: { id: string; name: string; accountType: string; reason: string }[];
+}
+
+export interface PreviewTransfer {
+  matchId: string;
+  postedAt: number;
+  description: string;
+  amount: number;
+  currencyCode: string;
+  fromAccount: string;
+  toAccount: string;
+  debitLineId: string;
+  creditLineId: string;
+}
+
+export interface PreviewDuplicate {
+  lineId: string;
+  postedAt: number;
+  description: string;
+  amount: number;
+  currencyCode: string;
+  /** The file whose copy of the line survives. */
+  keptFrom: string | null;
+  keptLineId: string | null;
+}
+
+export interface PreviewLine {
+  lineId: string;
+  postedAt: number;
+  description: string;
+  amount: number;
+  currencyCode: string;
+}
+
+export interface PreviewError extends PreviewLine {
+  error: string;
+}
+
 export interface StatementFeedStatus {
   provider: string;
   enabled: boolean;
@@ -677,9 +759,15 @@ export const api = {
   }) => invoke<Envelope<unknown>>("import_statement", args),
 
   /** Imports pending lines of several statements in one server transaction. */
-  importStatements: (
-    statements: { id: string; lines: StatementImportLine[]; autoLink?: boolean }[],
-  ) => invoke<Envelope<unknown>>("import_statements", { statements }),
+  importStatements: (statements: StatementImportBatchEntry[]) =>
+    invoke<Envelope<unknown>>("import_statements", { statements }),
+
+  /** What the identical `importStatements` call would do, without doing it.
+   *
+   *  The server runs the real import in a transaction and rolls it back, so
+   *  what this returns is what the button produces — not a second guess at it. */
+  previewStatements: (statements: StatementImportBatchEntry[]) =>
+    invoke<Envelope<ImportPreview>>("preview_statements", { statements }),
 
   /** Soft-deletes several statements in one server transaction. */
   deleteStatements: (ids: string[]) =>
