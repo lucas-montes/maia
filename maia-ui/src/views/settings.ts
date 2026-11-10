@@ -13,11 +13,20 @@ const CONFIG_FIELD_DEFS: { key: string; label: string; placeholder: string; mana
   { key: "nutriments_path", label: "Nutriments Path", placeholder: "" },
   { key: "model_api", label: "Model API Key", placeholder: "", managed: true },
   { key: "receipts.archived_dir", label: "Receipts Archive Directory", placeholder: "receipts_archive" },
+  // The intake folder is yours: name an export for its source
+  // (`firstrade-2026-11.csv`, `t212_feb_aug.csv`, `ca-20261027.csv`) and drop
+  // it anywhere convenient. The service only ever moves recognised files *out*
+  // of here into the dump tree and leaves everything else alone, which is why
+  // this one is safe to point at a directory used for other things — and why
+  // it is editable while the lifecycle roots below are not.
+  { key: "statements.intake_dir", label: "Statements Intake Directory", placeholder: "~/Downloads" },
   // Statement lifecycle folders: the service alone moves files through them,
-  // so they are deployment-owned and shown read-only. Dropping a file in the
-  // dump folder stages it; results land in the parsed or failed folder.
+  // so they are deployment-owned and shown read-only. A dropped file is staged
+  // and then lives wherever the state of its entries says it belongs.
   { key: "statements.dump_dir", label: "Statements Dump Directory (managed)", placeholder: "~/.local/share/maia/statements/dump", managed: true },
+  { key: "statements.staged_dir", label: "Statements Staged Directory (managed)", placeholder: "~/.local/share/maia/statements/staged", managed: true },
   { key: "statements.parsed_dir", label: "Statements Parsed Directory (managed)", placeholder: "~/.local/share/maia/statements/parsed", managed: true },
+  { key: "statements.discarded_dir", label: "Statements Discarded Directory (managed)", placeholder: "~/.local/share/maia/statements/discarded", managed: true },
   { key: "statements.failed_dir", label: "Statements Failed Directory (managed)", placeholder: "~/.local/share/maia/statements/failed", managed: true },
 ];
 

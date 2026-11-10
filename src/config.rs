@@ -128,6 +128,14 @@ pub struct Config {
     pub statements_parsed_dir: Option<PathBuf>,
     pub statements_discarded_dir: Option<PathBuf>,
     pub statements_failed_dir: Option<PathBuf>,
+    /// A directory of the user's own that the service drains into the dump
+    /// tree — `~/Downloads`, say, where exports actually land.
+    ///
+    /// Unlike the four lifecycle roots this one is **overlay-owned**: the
+    /// service only ever reads and moves *out of* it and never parses in
+    /// place, so pointing it at a directory the user also uses for other
+    /// things stays safe. `None` disables the drain.
+    pub statements_intake_dir: Option<PathBuf>,
     /// Trading 212 feed. Credentials in here come from the overlay only.
     pub t212: T212FeedConfig,
 }
@@ -151,6 +159,7 @@ impl Config {
             statements_parsed_dir: None,
             statements_discarded_dir: None,
             statements_failed_dir: None,
+            statements_intake_dir: None,
             t212: T212FeedConfig::default(),
         }
     }
@@ -282,6 +291,13 @@ impl Config {
         self.statements_sibling(self.statements_failed_dir.as_ref(), "failed")
     }
 
+    /// The user's own drop folder, drained into the dump tree. No default:
+    /// unset means the feature is off, because guessing a directory the
+    /// service would then move files out of is not a guess to make.
+    pub fn statements_intake_dir(&self) -> Option<PathBuf> {
+        self.statements_intake_dir.clone()
+    }
+
     /// Directory holding exercise images and videos for `GET /media/*`.
     ///
     /// Defaults to `<db_dir>/exercise_media`.
@@ -411,6 +427,19 @@ impl Config {
         cfg.statements_discarded_dir = statement_path("discarded_dir");
         cfg.statements_failed_dir = statement_path("failed_dir");
 
+        // Intake is the exception: overlay-first, because it is the user's own
+        // directory and the Settings form owns it. The service only reads and
+        // moves out of it, so a per-user value cannot redirect anything the
+        // service is responsible for the way a lifecycle root would.
+        let overlay_statements = overlay.get("statements").and_then(Value::as_object);
+        cfg.statements_intake_dir = overlay_statements
+            .and_then(|statements| statements.get("intake_dir"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| statement_path("intake_dir"));
+
         // Feed behaviour merges from the overlay because the desktop Settings
         // form owns it. Credentials come from the overlay only: the deployment
         // file is readable by the service manager and the whole system.
@@ -517,6 +546,7 @@ impl Default for Config {
             statements_parsed_dir: None,
             statements_discarded_dir: None,
             statements_failed_dir: None,
+            statements_intake_dir: None,
             t212: T212FeedConfig::default(),
         }
     }

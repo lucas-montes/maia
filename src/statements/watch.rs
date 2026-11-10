@@ -94,7 +94,7 @@ fn lifecycle_roots(state: &AppState) -> [PathBuf; 5] {
 /// overflow). The watcher degrades to sweep-only when inotify is unavailable.
 fn start_inotify(state: &AppState) -> Option<UnboundedReceiver<Option<PathBuf>>> {
     let dump = state.config.statements_dump_dir();
-    let dirs: Vec<PathBuf> = SourceId::all()
+    let mut dirs: Vec<PathBuf> = SourceId::all()
         .iter()
         .map(|source| dump.join(source.as_str()))
         .collect();
@@ -105,6 +105,15 @@ fn start_inotify(state: &AppState) -> Option<UnboundedReceiver<Option<PathBuf>>>
                 "statement dump subfolder missing; relying on the sweep"
             );
             return None;
+        }
+    }
+    // The intake folder joins the watch set so a file dropped there is picked
+    // up as promptly as one dropped in the dump tree. The lifecycle roots
+    // deliberately do not: the service moves files into them itself, and
+    // watching them would make it re-ingest its own work.
+    if let Some(intake) = state.config.statements_intake_dir() {
+        if intake.is_dir() {
+            dirs.push(intake);
         }
     }
 
@@ -218,6 +227,9 @@ async fn main_loop(state: AppState, mut stream: Option<UnboundedReceiver<Option<
 /// Returns the outcomes for `POST /statements/scan`, which triggers an extra
 /// pass on demand; the background watcher discards them.
 pub async fn scan_folder(state: &AppState) -> Vec<anyhow::Result<Vec<SaveOutcome>>> {
+    // Intake feeds the dump tree, so it drains first and this one pass picks
+    // up what it moved.
+    drain_intake(state);
     let dump = state.config.statements_dump_dir();
     let entries = match std::fs::read_dir(&dump) {
         Ok(entries) => entries,
@@ -444,6 +456,71 @@ fn write_failure_log(source: &str, original: &Path, target: &Path, message: &str
     if let Err(error) = std::fs::write(&log, text) {
         tracing::warn!(path = %log.display(), error = %error, "cannot write failure log");
     }
+}
+
+/// Move recognised files out of the user's intake folder into the dump tree.
+///
+/// Intake is shared space — `~/Downloads`, typically — so the licence here is
+/// narrow: pick up files whose *name* says which source they are, move them,
+/// and touch nothing else. An unrecognised name, an ambiguous one, a
+/// subdirectory, a file with no extension a parser understands: all left
+/// exactly as they were, not parked and not logged as an error.
+///
+/// Moving rather than copying is what makes intake self-clearing, which is the
+/// point of the feature. Intake will usually be on a different mount than the
+/// state directory, so [`move_file`]'s `EXDEV` copy-then-unlink fallback is
+/// the normal path here rather than the exotic one.
+pub fn drain_intake(state: &AppState) -> usize {
+    let Some(intake) = state.config.statements_intake_dir() else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(&intake) else {
+        // Not an error worth logging on every sweep: the user may simply not
+        // have created it yet.
+        return 0;
+    };
+    let dump = state.config.statements_dump_dir();
+    let mut moved = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || !is_statement_file(&path) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(source) = SourceId::from_file_name(name) else {
+            continue;
+        };
+        let dir = dump.join(source.as_str());
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(path = %dir.display(), error = %error, "cannot create the dump folder");
+            continue;
+        }
+        // Never overwrite: a name already in the dump folder belongs to a file
+        // waiting to be parsed.
+        let mut target = dir.join(name);
+        let mut suffix = 1;
+        while target.exists() {
+            suffix += 1;
+            target = dir.join(disambiguate(name, suffix));
+        }
+        match move_file(&path, &target) {
+            Ok(()) => {
+                moved += 1;
+                tracing::info!(
+                    from = %path.display(),
+                    to = %target.display(),
+                    source = source.as_str(),
+                    "statement file taken from intake"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(path = %path.display(), error = %error, "cannot take file from intake");
+            }
+        }
+    }
+    moved
 }
 
 /// Put every known statement file where the database says it belongs.
@@ -1079,6 +1156,149 @@ mod tests {
         reconcile_files(&state);
 
         assert_eq!(file_names(&lifecycle.failed), ["broken.csv"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Intake
+    // -----------------------------------------------------------------------
+
+    /// An [`AppState`] whose intake folder is `<tmp>/intake`.
+    fn with_intake(lifecycle: &TempLifecycle, intake: &Path) -> AppState {
+        let config = Config::from_values(
+            serde_json::json!({
+                "statements": {
+                    "dump_dir": lifecycle.dump.display().to_string(),
+                    "staged_dir": lifecycle.staged.display().to_string(),
+                    "parsed_dir": lifecycle.parsed.display().to_string(),
+                    "discarded_dir": lifecycle.discarded.display().to_string(),
+                    "failed_dir": lifecycle.failed.display().to_string(),
+                }
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+            serde_json::json!({
+                "statements": { "intake_dir": intake.display().to_string() }
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        AppState::new(config, crate::db::init_memory().unwrap())
+    }
+
+    #[test]
+    fn a_named_file_is_moved_from_intake_into_its_dump_folder() {
+        let tmp = TempDir::new("intake");
+        let lifecycle = tmp.statements();
+        let intake = tmp.0.join("intake");
+        std::fs::create_dir_all(&intake).unwrap();
+        let state = with_intake(&lifecycle, &intake);
+
+        write(&intake, "firstrade-2026-11.csv", "rows");
+        write(&intake, "t212_feb_aug.csv", "rows");
+        write(&intake, "ca-20261027.csv", "rows");
+
+        assert_eq!(drain_intake(&state), 3);
+
+        assert_eq!(
+            file_names_in(&lifecycle.dump.join("firstrade")),
+            ["firstrade-2026-11.csv"]
+        );
+        assert_eq!(
+            file_names_in(&lifecycle.dump.join("trading212")),
+            ["t212_feb_aug.csv"]
+        );
+        assert_eq!(
+            file_names_in(&lifecycle.dump.join("credit_agricole")),
+            ["ca-20261027.csv"]
+        );
+        assert!(
+            file_names_in(&intake).is_empty(),
+            "moved, not copied: intake clears itself"
+        );
+    }
+
+    /// Intake is shared space. Anything the service cannot name with certainty
+    /// is left exactly where it is — not parked, not logged as an error, not
+    /// moved.
+    #[test]
+    fn an_unrecognised_file_in_intake_is_left_completely_alone() {
+        let tmp = TempDir::new("intake-untouched");
+        let lifecycle = tmp.statements();
+        let intake = tmp.0.join("intake");
+        std::fs::create_dir_all(&intake).unwrap();
+        let state = with_intake(&lifecycle, &intake);
+
+        write(&intake, "cash-flow.csv", "mine");
+        write(&intake, "statement.csv", "mine");
+        write(&intake, "ca-and-t212.csv", "ambiguous");
+        write(&intake, "firstrade-2026-11.txt", "right name, wrong kind");
+        write(&intake, "holiday.jpg", "mine");
+        std::fs::create_dir_all(intake.join("subfolder")).unwrap();
+
+        assert_eq!(drain_intake(&state), 0);
+
+        assert_eq!(
+            file_names_in(&intake),
+            [
+                "ca-and-t212.csv",
+                "cash-flow.csv",
+                "firstrade-2026-11.txt",
+                "holiday.jpg",
+                "statement.csv",
+            ],
+            "every one of them is still there"
+        );
+        assert!(intake.join("subfolder").is_dir());
+    }
+
+    /// A name already taken in the dump folder is a file still waiting to be
+    /// parsed, so the newcomer is renamed rather than overwriting it.
+    #[test]
+    fn intake_never_overwrites_a_file_waiting_in_the_dump_folder() {
+        let tmp = TempDir::new("intake-collision");
+        let lifecycle = tmp.statements();
+        let intake = tmp.0.join("intake");
+        std::fs::create_dir_all(&intake).unwrap();
+        let state = with_intake(&lifecycle, &intake);
+
+        let dump = lifecycle.dump.join("firstrade");
+        std::fs::create_dir_all(&dump).unwrap();
+        write(&dump, "firstrade.csv", "first");
+        write(&intake, "firstrade.csv", "second");
+
+        assert_eq!(drain_intake(&state), 1);
+        assert_eq!(
+            file_names_in(&dump),
+            ["firstrade-2.csv", "firstrade.csv"],
+            "the waiting file keeps its name and its content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dump.join("firstrade.csv")).unwrap(),
+            "first"
+        );
+    }
+
+    #[test]
+    fn no_intake_configured_is_a_no_op() {
+        let tmp = TempDir::new("intake-off");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+        assert_eq!(drain_intake(&state), 0);
+    }
+
+    fn file_names_in(dir: &Path) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter(|entry| entry.path().is_file())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
     }
 
     /// An `error` statement row *does* exist for a file whose parse failed

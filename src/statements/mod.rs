@@ -74,6 +74,48 @@ impl SourceId {
         }
     }
 
+    /// The source a file name declares, for the intake folder.
+    ///
+    /// The user renames an export to carry its source (`firstrade-2026-11.csv`,
+    /// `t212_feb_aug.csv`, `ca-20261027.csv`) instead of dragging it into a
+    /// `<source>/` subfolder. The stem is split on `[-_. ]` and **whole tokens**
+    /// are matched against the aliases [`SourceId::parse`] already accepts —
+    /// which is the point: `cash-flow.csv` must not read as Crédit Agricole
+    /// because it happens to start with `ca`.
+    ///
+    /// `None` when nothing matches, and also when two different sources do: an
+    /// ambiguous name is not a guess worth making. Intake is shared space, so
+    /// the only licence here is to pick up files it can name with certainty.
+    pub fn from_file_name(name: &str) -> Option<Self> {
+        let stem = Path::new(name)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(name);
+        let tokens: Vec<String> = stem
+            .split(['-', '_', '.', ' '])
+            .filter(|token| !token.is_empty())
+            .map(|token| token.to_ascii_lowercase())
+            .collect();
+
+        // Runs of adjacent tokens, longest first, because two of the aliases
+        // are themselves two words (`credit_agricole`, `trading_212`) and the
+        // separators that join them are the ones the name was split on.
+        let mut found: Option<Self> = None;
+        for width in (1..=tokens.len()).rev() {
+            for window in tokens.windows(width) {
+                let source = Self::parse(&window.join("_")).or_else(|| Self::parse(&window.join("-")));
+                let Some(source) = source else { continue };
+                match found {
+                    // Two different sources in one name: not a guess worth
+                    // making, so the file is left alone.
+                    Some(existing) if existing != source => return None,
+                    _ => found = Some(source),
+                }
+            }
+        }
+        found
+    }
+
     pub fn institution(self) -> &'static str {
         match self {
             Self::CreditAgricole => "Crédit Agricole",
@@ -604,6 +646,45 @@ mod tests {
             PathBuf::from("/tmp/two.csv"),
         );
         assert_eq!(hash_documents(&[one]), hash_documents(&[two]));
+    }
+
+    #[test]
+    fn a_file_name_names_its_source_by_whole_tokens() {
+        let case = |name: &str| SourceId::from_file_name(name);
+        assert_eq!(case("firstrade-2026-11.csv"), Some(SourceId::Firstrade));
+        assert_eq!(case("t212_feb_aug.csv"), Some(SourceId::Trading212));
+        assert_eq!(case("ca-20261027.csv"), Some(SourceId::CreditAgricole));
+        assert_eq!(case("2026 11 CA.csv"), Some(SourceId::CreditAgricole));
+        assert_eq!(
+            case("export.credit-agricole.csv"),
+            Some(SourceId::CreditAgricole),
+            "a dotted name still splits into tokens"
+        );
+        assert_eq!(
+            case("FIRSTRADE.CSV"),
+            Some(SourceId::Firstrade),
+            "matching is case-insensitive"
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_or_ambiguous_name_claims_nothing() {
+        let case = |name: &str| SourceId::from_file_name(name);
+        // The reason whole-token matching is the rule and not a preference.
+        assert_eq!(case("cash-flow.csv"), None);
+        assert_eq!(case("statement.csv"), None);
+        assert_eq!(case("casa.csv"), None);
+        assert_eq!(case("firstraders.csv"), None);
+        assert_eq!(
+            case("ca-and-t212.csv"),
+            None,
+            "two sources in one name is not a guess worth making"
+        );
+        assert_eq!(
+            case("ca-credit_agricole.csv"),
+            Some(SourceId::CreditAgricole),
+            "...but two aliases of the same source agree"
+        );
     }
 
     #[test]

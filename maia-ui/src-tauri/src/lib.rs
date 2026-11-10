@@ -4268,11 +4268,40 @@ fn read_config() -> ConfigResponse {
     );
     merged.insert("model_api".into(), serde_json::json!(cfg.model_api_key));
     merged.insert("model_name".into(), serde_json::json!(cfg.model_name));
+    // The lifecycle roots are resolved rather than read back: they are
+    // deployment-owned and may be defaulted, so showing the configured value
+    // would leave the form's read-only boxes blank for every default install.
+    // The intake folder is not here — it is the user's, and comes from the
+    // overlay below.
+    merged.insert(
+        "statements".into(),
+        serde_json::json!({
+            "dump_dir": cfg.statements_dump_dir().display().to_string(),
+            "staged_dir": cfg.statements_staged_dir().display().to_string(),
+            "parsed_dir": cfg.statements_parsed_dir().display().to_string(),
+            "discarded_dir": cfg.statements_discarded_dir().display().to_string(),
+            "failed_dir": cfg.statements_failed_dir().display().to_string(),
+        }),
+    );
     for (key, value) in read_overlay() {
         if DEPLOYMENT_OWNED.contains(&key.as_str()) {
             continue;
         }
-        merged.entry(key).or_insert(value);
+        // Merge one level rather than `or_insert`, so the overlay's
+        // `statements.intake_dir` (and the feed settings beside it) survive
+        // the resolved roots inserted above, while a deployment value still
+        // wins key by key.
+        match (merged.get_mut(&key), value) {
+            (Some(serde_json::Value::Object(existing)), serde_json::Value::Object(incoming)) => {
+                for (inner, value) in incoming {
+                    existing.entry(inner).or_insert(value);
+                }
+            }
+            (Some(_), _) => {}
+            (None, value) => {
+                merged.insert(key, value);
+            }
+        }
     }
     ConfigResponse {
         success: true,
