@@ -715,6 +715,23 @@ export const api = {
     args,
   ),
 
+  /** Sets (or clears, with empty strings) which provider account an account is.
+   *
+   *  Its own endpoint rather than part of `saveAccount`: the identity columns
+   *  are server-only and stay off `/budget-accounts`, the surface the phone
+   *  pushes to. A number already taken comes back as a failure naming the
+   *  account that holds it. */
+  setAccountIdentity: (args: { id: string; source: string; externalId: string }) =>
+    invoke<
+      Envelope<{
+        id: string;
+        source: string | null;
+        externalId: string | null;
+        /** Staged statements of that identity that snapped onto the account. */
+        statementsResolved: number;
+      }>
+    >("set_account_identity", args),
+
   /** Uploads one or many picked receipt pictures to the server's OCR
    *  endpoint, one request per file, and reports per-file: `id` when the
    *  server accepted it (then parse-polling takes over), else `error`. */

@@ -223,8 +223,25 @@ export function mount(root: HTMLElement): () => void {
             <span class="text-xs text-ink-500">Note</span>
             <input class="input input-bordered input-sm w-full" data-edit-field="note" value="${escapeHtml(ac.note ?? "")}" />
           </label>
+          <label class="space-y-1">
+            <span class="text-xs text-ink-500">Statement source</span>
+            <select class="select select-bordered select-sm w-full" data-edit-field="source">
+              <option value="" ${!ac.source ? "selected" : ""}>— none —</option>
+              ${Object.entries(SOURCE_LABELS)
+                .map(
+                  ([value, label]) =>
+                    `<option value="${escapeHtml(value)}" ${value === ac.source ? "selected" : ""}>${escapeHtml(label)}</option>`,
+                )
+                .join("")}
+            </select>
+          </label>
+          <label class="space-y-1">
+            <span class="text-xs text-ink-500">Account number at that source</span>
+            <input class="input input-bordered input-sm w-full font-mono" data-edit-field="externalId" value="${escapeHtml(ac.externalId ?? "")}" placeholder="e.g. 84890097587" />
+          </label>
         </div>
         <p class="text-xs text-ink-500">You set what the account holds today; the opening balance is derived from it and the net of this account's transactions.</p>
+        <p class="text-xs text-ink-500">The source and number say which provider account this is, so dropped statements land here instead of creating a new account. Changing them keeps this account's id and every transaction on it — only where the next import looks changes. Clear both to unlink.</p>
         <div class="flex justify-end gap-2">
           <button class="btn btn-ghost btn-sm" type="button" data-action="account-edit-cancel">Cancel</button>
           <button class="btn btn-primary btn-sm" type="button" data-action="account-edit-save" data-account-id="${escapeHtml(ac.id)}">Save</button>
@@ -467,6 +484,21 @@ export function mount(root: HTMLElement): () => void {
     }
     const typeEl = root.querySelector<HTMLSelectElement>("[data-edit-field='type']");
     const noteEl = root.querySelector<HTMLInputElement>("[data-edit-field='note']");
+    const sourceEl = root.querySelector<HTMLSelectElement>("[data-edit-field='source']");
+    const externalIdEl = root.querySelector<HTMLInputElement>("[data-edit-field='externalId']");
+    const before = accountById(id);
+    const source = sourceEl?.value.trim() ?? "";
+    const externalId = externalIdEl?.value.trim() ?? "";
+    // Half an identity matches nothing, so say so here rather than letting the
+    // server refuse a save the user believes went through.
+    if ((source === "") !== (externalId === "")) {
+      accountsAtom.set({
+        ...accountsAtom.get(),
+        status: "error",
+        message: "A statement source needs an account number, and vice versa — set both, or clear both.",
+      });
+      return;
+    }
     accountsAtom.set({ ...accountsAtom.get(), status: "saving", message: "" });
     try {
       const res = await api.saveAccount({
@@ -479,6 +511,32 @@ export function mount(root: HTMLElement): () => void {
       if (!res.success) {
         accountsAtom.set({ ...accountsAtom.get(), status: "error", message: res.error ?? "Could not save the account" });
         return;
+      }
+      // The identity goes through its own endpoint, and only when it changed:
+      // it is server-only state that `/budget-accounts` deliberately cannot
+      // carry.
+      if (source !== (before?.source ?? "") || externalId !== (before?.externalId ?? "")) {
+        const identity = await api.setAccountIdentity({ id, source, externalId });
+        if (!identity.success) {
+          await load();
+          accountsAtom.set({
+            ...accountsAtom.get(),
+            status: "error",
+            message: identity.error ?? "Could not set the account number",
+          });
+          return;
+        }
+        const resolved = identity.data?.statementsResolved ?? 0;
+        if (resolved > 0) {
+          editingAccountId = null;
+          await load();
+          accountsAtom.set({
+            ...accountsAtom.get(),
+            status: "saved",
+            message: `Account saved — ${resolved} staged statement${resolved !== 1 ? "s" : ""} now point here.`,
+          });
+          return;
+        }
       }
       editingAccountId = null;
       // `load()` re-renders with its own status; the confirmation lands

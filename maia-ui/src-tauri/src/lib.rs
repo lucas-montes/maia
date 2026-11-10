@@ -2470,6 +2470,41 @@ async fn save_account(
     })
 }
 
+/// Sets (or clears) which provider account an account *is*.
+///
+/// Deliberately its own endpoint rather than part of `save_account`: the
+/// identity columns are server-only and must stay off `/budget-accounts`, the
+/// sync surface a phone pushes to. Empty strings mean "clear it".
+///
+/// The server's refusal text is passed through verbatim — a 409 names the
+/// account that already holds the number, which is the only useful thing to
+/// show here.
+#[tauri::command]
+async fn set_account_identity(
+    id: String,
+    source: String,
+    external_id: String,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let source = source.trim();
+    let external_id = external_id.trim();
+    let body = serde_json::json!({
+        "source": if source.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(source.to_string()) },
+        "externalId": if external_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(external_id.to_string()) },
+    });
+    match api::put::<_, serde_json::Value>(&format!("/accounts/{id}/identity"), &body).await {
+        Ok(data) => Ok(CommandResult {
+            success: true,
+            data: Some(data),
+            error: None,
+        }),
+        Err(error) => Ok(CommandResult {
+            success: false,
+            data: None,
+            error: Some(error.to_message()),
+        }),
+    }
+}
+
 /// Epoch-milliseconds from the OCR date text, whatever shape it came in
 /// (RFC 3339, both naive splits, or a bare date), falling back to
 /// [fallback_ms]. Noon on a bare date — a receipt is a daytime artifact.
@@ -4416,6 +4451,7 @@ pub fn run() {
             upload_receipt_files,
             create_receipt_transaction,
             save_account,
+            set_account_identity,
             list_fx_rates,
             exercise_progression,
             exercise_volume,

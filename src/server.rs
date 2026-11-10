@@ -111,6 +111,12 @@ pub fn create_router(state: AppState) -> Router {
         .route("/body-metrics", get(crate::handlers::read::pull_body_metrics).post(crate::handlers::push::push_body_metrics))
         .route("/transactions", get(crate::handlers::pull::pull_transactions).post(crate::handlers::push::push_transactions))
         .route("/budget-accounts", get(crate::handlers::pull::pull_accounts).post(crate::handlers::push::push_budget_accounts))
+        // Desktop-only, and deliberately not part of /budget-accounts: the
+        // provider identity must stay off the phone sync surface.
+        .route(
+            "/accounts/:id/identity",
+            axum::routing::put(crate::handlers::accounts::put_account_identity),
+        )
         .route("/statements", get(crate::handlers::statements::list_statements))
         .route("/statements/scan", post(crate::handlers::statements::scan_statements))
         .route(

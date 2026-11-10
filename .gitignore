@@ -40,3 +40,8 @@ exercise_media
 /statements/credit_agricole/
 /statements/firstrade/
 /statements/trading212/
+
+# Tooling scratch: pnpm installs at the repo root for the desktop UI, and
+# agent worktrees live under .claude/.
+/node_modules/
+/.claude/worktrees/
