@@ -2,8 +2,9 @@ import { api } from "../lib/api";
 import { addDaysMs, buildOccurrences, startOfDayMs, type CalendarOccurrence } from "../lib/recurrence";
 import { escapeHtml, setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
-import { calendarAtom, type CalendarGranularity } from "../lib/stores";
+import { calendarAtom, taskDetailAtom, type CalendarGranularity } from "../lib/stores";
 import { backToDashboard, emptyState, panelClose, panelOpen, statusBanner } from "./shared";
+import { closeTaskDetail, openTaskDetail, taskDetailHtml } from "./taskDetail";
 
 /**
  * Read-only month-grid calendar with week/day drill-down, plus an "up next"
@@ -116,12 +117,15 @@ const UP_NEXT_LOOKAHEAD_DAYS = 60;
 function occurrenceBadge(occ: CalendarOccurrence, compact: boolean): string {
   const doneClass = occ.done ? "opacity-50 line-through" : "";
   const time = timeLabel(occ);
+  // The whole entry opens the task: `taskId` is the row the occurrence came
+  // from, which for a synthesized occurrence is the series anchor.
+  const open = `data-occurrence-task-id="${escapeHtml(occ.taskId)}" data-occurrence-date="${occ.date}" data-occurrence-virtual="${occ.isVirtual}"`;
   if (compact) {
-    return `<div class="truncate rounded px-1.5 py-0.5 text-xs ${occ.done ? "bg-base-300/50" : "bg-primary/15"} ${doneClass}" title="${escapeHtml(occ.title)}">
+    return `<div class="cursor-pointer truncate rounded px-1.5 py-0.5 text-xs hover:bg-base-300 ${occ.done ? "bg-base-300/50" : "bg-primary/15"} ${doneClass}" title="${escapeHtml(occ.title)}" ${open}>
       ${occ.startTimeMinutes != null ? `<span class="font-mono opacity-70">${escapeHtml(minutesToClock(occ.startTimeMinutes))}</span> ` : ""}${escapeHtml(occ.title)}
     </div>`;
   }
-  return `<div class="list-row items-start">
+  return `<button class="list-row w-full items-start text-left" type="button" ${open}>
     <span class="mt-1 flex h-4 w-4 items-center justify-center text-sm ${occ.done ? "text-ok-400" : "text-ink-600"}">${occ.done ? "✓" : "○"}</span>
     <div class="min-w-0 flex-1">
       <div class="flex items-center gap-2">
@@ -133,11 +137,13 @@ function occurrenceBadge(occ: CalendarOccurrence, compact: boolean): string {
         ${occ.notes ? `<span class="truncate">${escapeHtml(occ.notes)}</span>` : ""}
       </div>
     </div>
-  </div>`;
+  </button>`;
 }
 
 export function mount(root: HTMLElement): () => void {
   root.innerHTML = `
+    <div data-slot="task-detail" class="hidden"></div>
+    <div data-slot="calendar">
     ${panelOpen("Calendar", "Month and week view of your tasks — read-only; edit from Tasks")}
       <div data-slot="status"></div>
       <div class="flex flex-wrap items-center gap-3">
@@ -159,12 +165,38 @@ export function mount(root: HTMLElement): () => void {
       </div>
       <div>${backToDashboard()}</div>
     ${panelClose}
+    </div>
   `;
 
   const statusEl = root.querySelector("[data-slot='status']") as HTMLElement;
   const headingEl = root.querySelector("[data-slot='heading']") as HTMLElement;
   const gridEl = root.querySelector("[data-slot='grid']") as HTMLElement;
   const upNextEl = root.querySelector("[data-slot='upnext']") as HTMLElement;
+  const calendarEl = root.querySelector("[data-slot='calendar']") as HTMLElement;
+  const detailEl = root.querySelector("[data-slot='task-detail']") as HTMLElement;
+
+  /** The task detail replaces the calendar while a task is open; the
+   *  calendar keeps its own state, so going back returns to the same
+   *  granularity and day. */
+  function renderTaskDetail(): void {
+    const d = taskDetailAtom.get();
+    const open = d.taskId != null;
+    detailEl.classList.toggle("hidden", !open);
+    calendarEl.classList.toggle("hidden", open);
+    if (!open) return;
+    setHtml(
+      detailEl,
+      `
+      ${panelOpen(d.detail?.title || "Task", "Read-only — managed on mobile", "panel-fit")}
+        ${statusBanner(d)}
+        <button class="btn btn-ghost btn-sm self-start" type="button" data-action="task-back">← Back to calendar</button>
+        <div class="min-h-0 flex-1 overflow-auto">
+          ${d.detail ? taskDetailHtml(d.detail, { occurrenceDate: d.occurrenceDate, occurrenceVirtual: d.occurrenceVirtual }) : ""}
+        </div>
+      ${panelClose}`,
+    );
+    refreshIcons(detailEl);
+  }
 
   // ---- Grid rendering ----
 
@@ -346,6 +378,23 @@ export function mount(root: HTMLElement): () => void {
   const onClick = (event: MouseEvent): void => {
     const target = event.target as HTMLElement;
 
+    if (target.closest<HTMLElement>("[data-action='task-back']")) {
+      closeTaskDetail();
+      return;
+    }
+
+    // An entry opens its task. This is checked before the day cell, because a
+    // month-grid entry sits inside the cell button and would otherwise drill
+    // into the day instead.
+    const occurrence = target.closest<HTMLElement>("[data-occurrence-task-id]");
+    if (occurrence?.dataset.occurrenceTaskId) {
+      void openTaskDetail(occurrence.dataset.occurrenceTaskId, {
+        occurrenceDate: Number(occurrence.dataset.occurrenceDate),
+        occurrenceVirtual: occurrence.dataset.occurrenceVirtual === "true",
+      });
+      return;
+    }
+
     const navBtn = target.closest<HTMLElement>("[data-cal-nav]");
     if (navBtn?.dataset.calNav) {
       const s = calendarAtom.get();
@@ -385,12 +434,15 @@ export function mount(root: HTMLElement): () => void {
 
   root.addEventListener("click", onClick);
   render();
+  renderTaskDetail();
   loadRange();
   loadUpNext();
 
   const unsub = calendarAtom.subscribe(render);
+  const unsubDetail = taskDetailAtom.subscribe(renderTaskDetail);
   return () => {
     root.removeEventListener("click", onClick);
     unsub();
+    unsubDetail();
   };
 }

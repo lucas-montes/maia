@@ -95,6 +95,57 @@ export function parseRecurrence(json: string | null | undefined): RecurrenceRule
   }
 }
 
+/** Monday-first weekday abbreviations, indexed by `weekday - 1`. */
+const WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+/** "2026-12-31" for an epoch-ms day, in local time. */
+function isoDay(ms: number): string {
+  const { y, m, d } = toYMD(ms);
+  return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
+/** "1st", "2nd", "3rd", "11th"… */
+function ordinal(n: number): string {
+  const mod100 = n % 100;
+  const suffix = mod100 >= 11 && mod100 <= 13 ? "th" : n % 10 === 1 ? "st" : n % 10 === 2 ? "nd" : n % 10 === 3 ? "rd" : "th";
+  return `${n}${suffix}`;
+}
+
+/**
+ * A one-line, human summary of a recurrence rule — "Every week on Mon, Wed ·
+ * until 2026-12-31". Mirrors what the mobile task detail shows, plus the
+ * number of excluded dates (the mobile keeps those in the editor only).
+ *
+ * The end date is rendered as an ISO day rather than a localized one so the
+ * summary stays stable whatever locale the app runs in.
+ */
+export function describeRecurrence(rule: RecurrenceRule): string {
+  const parts: string[] = [];
+  switch (rule.type) {
+    case "daily":
+      parts.push("Every day");
+      break;
+    case "interval": {
+      const days = rule.intervalDays ?? 1;
+      parts.push(`Every ${days} day${days === 1 ? "" : "s"}`);
+      break;
+    }
+    case "weekly": {
+      const days = (rule.weekdays ?? []).filter((d) => d >= 1 && d <= 7).sort((a, b) => a - b);
+      parts.push(days.length ? `Every week on ${days.map((d) => WEEKDAY_NAMES[d - 1]).join(", ")}` : "Every week");
+      break;
+    }
+    case "monthly":
+      parts.push(`Monthly on the ${ordinal(rule.monthDay ?? 1)}`);
+      break;
+  }
+  if (rule.endDate != null) parts.push(`until ${isoDay(rule.endDate)}`);
+  else if (rule.count != null) parts.push(`${rule.count} occurrence${rule.count === 1 ? "" : "s"}`);
+  const excluded = rule.excludedDates?.length ?? 0;
+  if (excluded > 0) parts.push(`${excluded} excluded date${excluded === 1 ? "" : "s"}`);
+  return parts.join(" · ");
+}
+
 interface YMD {
   y: number;
   m: number; // 1..12

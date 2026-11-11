@@ -325,6 +325,70 @@ export interface CalendarTask {
   updatedAt: number;
 }
 
+/** One tag attached to a task, as `task_tags` joins it to `tags`. */
+export interface TaskTag {
+  id: string;
+  name: string;
+  /** ARGB colour as stored, or null when the tag has none. */
+  color: number | null;
+}
+
+/** A goal linked to a task through `task_goals`. */
+export interface TaskGoal {
+  id: string;
+  title: string;
+  status: string | null;
+}
+
+/** A note linked to a task through `task_notes`. */
+export interface TaskNoteLink {
+  id: string;
+  title: string;
+}
+
+/** One materialized occurrence of a repeating task (a sibling row sharing
+ *  the same `series_id`). */
+export interface TaskSeriesEntry {
+  id: string;
+  date: number;
+  done: number;
+  taskStatus: number | null;
+}
+
+/** Everything the database knows about one task — the full `tasks` row plus
+ *  the rows that point at it. Returned by `get_task`. */
+export interface TaskDetail {
+  id: string;
+  /** The task's own day (epoch ms, local start-of-day). */
+  date: number;
+  title: string;
+  done: number;
+  /** 0 pending, 1 done, 2 cancelled — null on rows written before v25. */
+  taskStatus: number | null;
+  carryOver: boolean;
+  sortOrder: number;
+  dueDate: number | null;
+  dueTimeMinutes: number | null;
+  startTimeMinutes: number | null;
+  endTimeMinutes: number | null;
+  notes: string | null;
+  workoutId: string | null;
+  workoutTemplateId: string | null;
+  /** Raw JSON TEXT column; parse with `parseRecurrence` from `recurrence.ts`. */
+  recurrence: string | null;
+  seriesId: string | null;
+  createdAt: number;
+  updatedAt: number;
+  /** Name of the linked workout, when one is linked and not deleted. */
+  workoutName: string | null;
+  /** Name of the linked workout template, when one is linked. */
+  workoutTemplateName: string | null;
+  tags: TaskTag[];
+  linkedGoals: TaskGoal[];
+  linkedNotes: TaskNoteLink[];
+  series: TaskSeriesEntry[];
+}
+
 export interface Workout {
   id: string;
   name: string;
@@ -530,6 +594,11 @@ export const api = {
   restoreReceipt: (id: string) => invoke<Envelope<void>>("restore_receipt", { id }),
 
   listTasks: () => invoke<Envelope<Todo[]>>("list_tasks"),
+
+  /** One task with everything attached to it: the full row, its tags, the
+   *  goals and notes linked to it, and the occurrences of a repeating
+   *  series. Read-only — the desktop app never writes to the database. */
+  getTask: (id: string) => invoke<Envelope<TaskDetail>>("get_task", { id }),
 
   /** Tasks for the calendar view: everything due/dated within `[start, end]`
    *  (epoch ms, inclusive), plus every recurring anchor for client-side

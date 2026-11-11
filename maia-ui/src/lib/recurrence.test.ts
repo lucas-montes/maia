@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   addDaysMs,
   buildOccurrences,
+  describeRecurrence,
   expandRecurrence,
   isOccurrenceOn,
   occurrenceIndex,
@@ -274,5 +275,47 @@ describe("buildOccurrences", () => {
     expect(occ).toHaveLength(3);
     const dayOne = occ.find((o) => o.date === addDaysMs(start, 1));
     expect(dayOne).toMatchObject({ id: "materialized-1", title: "Standup (moved to afternoon)", done: true, isVirtual: false });
+  });
+});
+
+describe("describeRecurrence", () => {
+  test("daily", () => {
+    expect(describeRecurrence({ type: "daily" })).toBe("Every day");
+  });
+
+  test("interval spells out the step", () => {
+    expect(describeRecurrence({ type: "interval", intervalDays: 1 })).toBe("Every 1 day");
+    expect(describeRecurrence({ type: "interval", intervalDays: 3 })).toBe("Every 3 days");
+  });
+
+  test("weekly lists its weekdays, Monday first", () => {
+    expect(describeRecurrence({ type: "weekly", weekdays: [1, 3, 5] })).toBe("Every week on Mon, Wed, Fri");
+    expect(describeRecurrence({ type: "weekly", weekdays: [7] })).toBe("Every week on Sun");
+    expect(describeRecurrence({ type: "weekly" })).toBe("Every week");
+  });
+
+  test("monthly names the day of the month", () => {
+    expect(describeRecurrence({ type: "monthly", monthDay: 1 })).toBe("Monthly on the 1st");
+    expect(describeRecurrence({ type: "monthly", monthDay: 12 })).toBe("Monthly on the 12th");
+    expect(describeRecurrence({ type: "monthly", monthDay: 21 })).toBe("Monthly on the 21st");
+    expect(describeRecurrence({ type: "monthly", monthDay: 3 })).toBe("Monthly on the 3rd");
+  });
+
+  test("an end date wins over a count, and both are optional", () => {
+    expect(describeRecurrence({ type: "daily", endDate: day(2026, 12, 31) })).toBe("Every day · until 2026-12-31");
+    expect(describeRecurrence({ type: "daily", count: 12 })).toBe("Every day · 12 occurrences");
+    expect(describeRecurrence({ type: "daily", count: 1 })).toBe("Every day · 1 occurrence");
+    expect(describeRecurrence({ type: "daily", endDate: day(2026, 12, 31), count: 12 })).toBe(
+      "Every day · until 2026-12-31",
+    );
+  });
+
+  test("excluded dates are counted", () => {
+    expect(describeRecurrence({ type: "daily", excludedDates: [day(2026, 8, 12)] })).toBe(
+      "Every day · 1 excluded date",
+    );
+    expect(describeRecurrence({ type: "daily", excludedDates: [day(2026, 8, 12), day(2026, 8, 13)] })).toBe(
+      "Every day · 2 excluded dates",
+    );
   });
 });

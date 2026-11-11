@@ -815,6 +815,190 @@ fn list_tasks_range(
     }
 }
 
+/// One task, with everything the database knows about it.
+///
+/// The desktop app opens the database read-only, so this is a plain read and
+/// there is deliberately no `update_task` counterpart: tasks are edited on the
+/// phone and arrive here through the sync server.
+///
+/// On top of the `tasks` row this returns the task's tags, the goals and
+/// notes linked to it, the names of the workout (or workout template) it
+/// points at, and the sibling rows of a repeating series — a recurring task
+/// is stored as one anchor row plus the occurrences already materialized
+/// under the same `series_id`.
+///
+/// Split from the command so it can be tested without a Tauri `State`.
+fn task_detail(conn: &Connection, id: &str) -> Option<serde_json::Value> {
+    // The workout and template names come along for the ride: a task points at
+    // them by id only, and the id alone tells the reader nothing.
+    let mut task: Option<serde_json::Value> = conn
+        .query_row(
+            "SELECT t.id, t.date, t.title, t.done, t.task_status, t.carry_over, t.sort_order, \
+             t.due_date, t.due_time_minutes, t.start_time_minutes, t.end_time_minutes, t.notes, \
+             t.workout_id, t.workout_template_id, t.recurrence, t.series_id, t.created_at, t.updated_at, \
+             w.name, wt.name \
+             FROM tasks t \
+             LEFT JOIN workouts w ON w.id = t.workout_id AND w.deleted_at IS NULL \
+             LEFT JOIN workout_templates wt ON wt.id = t.workout_template_id AND wt.deleted_at IS NULL \
+             WHERE t.id = ?1 AND t.deleted_at IS NULL",
+            params![id],
+            |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, String>(0)?,
+                    "date": r.get::<_, i64>(1)?,
+                    "title": r.get::<_, String>(2)?,
+                    "done": r.get::<_, i64>(3)?,
+                    "taskStatus": r.get::<_, Option<i64>>(4)?,
+                    "carryOver": r.get::<_, i64>(5)? != 0,
+                    "sortOrder": r.get::<_, i64>(6)?,
+                    "dueDate": r.get::<_, Option<i64>>(7)?,
+                    "dueTimeMinutes": r.get::<_, Option<i64>>(8)?,
+                    "startTimeMinutes": r.get::<_, Option<i64>>(9)?,
+                    "endTimeMinutes": r.get::<_, Option<i64>>(10)?,
+                    "notes": r.get::<_, Option<String>>(11)?,
+                    "workoutId": r.get::<_, Option<String>>(12)?,
+                    "workoutTemplateId": r.get::<_, Option<String>>(13)?,
+                    "recurrence": r.get::<_, Option<String>>(14)?,
+                    "seriesId": r.get::<_, Option<String>>(15)?,
+                    "createdAt": r.get::<_, i64>(16)?,
+                    "updatedAt": r.get::<_, i64>(17)?,
+                    "workoutName": r.get::<_, Option<String>>(18)?,
+                    "workoutTemplateName": r.get::<_, Option<String>>(19)?,
+                }))
+            },
+        )
+        .ok();
+
+    let Some(mut task) = task else {
+        return None;
+    };
+
+    let object = task.as_object_mut().expect("task row is a JSON object");
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.id, t.name, t.color FROM task_tags tt \
+             JOIN tags t ON t.id = tt.tag_id \
+             WHERE tt.task_id = ?1 AND t.deleted_at IS NULL \
+             ORDER BY t.sort_order, t.name",
+        )
+        .expect("prepare task tags");
+    let tags: Vec<serde_json::Value> = stmt
+        .query_map(params![id], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "name": r.get::<_, String>(1)?,
+                "color": r.get::<_, Option<i64>>(2)?,
+            }))
+        })
+        .expect("query task tags")
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT g.id, g.title, g.status FROM task_goals tg \
+             JOIN goals g ON g.id = tg.goal_id \
+             WHERE tg.task_id = ?1 AND g.deleted_at IS NULL \
+             ORDER BY g.start_date",
+        )
+        .expect("prepare task goals");
+    let goals: Vec<serde_json::Value> = stmt
+        .query_map(params![id], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "title": r.get::<_, String>(1)?,
+                "status": r.get::<_, Option<String>>(2)?,
+            }))
+        })
+        .expect("query task goals")
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT n.id, n.title FROM task_notes tn \
+             JOIN notes n ON n.id = tn.note_id \
+             WHERE tn.task_id = ?1 AND n.deleted_at IS NULL \
+             ORDER BY n.updated_at DESC",
+        )
+        .expect("prepare task notes");
+    let linked_notes: Vec<serde_json::Value> = stmt
+        .query_map(params![id], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "title": r.get::<_, String>(1)?,
+            }))
+        })
+        .expect("query task notes")
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // The anchor of a series carries `series_id == its own id`; the
+    // occurrences materialized from it share that id. An anchor written
+    // before the column was populated has a null `series_id`, so it is
+    // matched by its own id instead.
+    let series_id: Option<String> = object
+        .get("seriesId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let series_key = series_id.clone().unwrap_or_else(|| id.to_string());
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, date, done, task_status FROM tasks \
+             WHERE deleted_at IS NULL AND (series_id = ?1 OR (series_id IS NULL AND id = ?1)) \
+             ORDER BY date",
+        )
+        .expect("prepare task series");
+    let series: Vec<serde_json::Value> = stmt
+        .query_map(params![series_key], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "date": r.get::<_, i64>(1)?,
+                "done": r.get::<_, i64>(2)?,
+                "taskStatus": r.get::<_, Option<i64>>(3)?,
+            }))
+        })
+        .expect("query task series")
+        .filter_map(|r| r.ok())
+        .collect();
+
+    object.insert("tags".into(), serde_json::Value::Array(tags));
+    object.insert("linkedGoals".into(), serde_json::Value::Array(goals));
+    object.insert("linkedNotes".into(), serde_json::Value::Array(linked_notes));
+    object.insert("series".into(), serde_json::Value::Array(series));
+
+    Some(task)
+}
+
+/// The command wrapper around [`task_detail`].
+#[tauri::command]
+fn get_task(state: tauri::State<AppState>, id: String) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return CommandResult {
+                success: false,
+                data: None,
+                error: Some(format!("lock {e}")),
+            };
+        }
+    };
+
+    match task_detail(&conn, &id) {
+        Some(task) => CommandResult {
+            success: true,
+            data: Some(task),
+            error: None,
+        },
+        None => CommandResult {
+            success: false,
+            data: None,
+            error: Some("Task not found".to_string()),
+        },
+    }
+}
+
 // ---- Goal commands ----
 
 #[tauri::command]
@@ -4474,6 +4658,7 @@ pub fn run() {
             restore_receipt,
             list_tasks,
             list_tasks_range,
+            get_task,
             list_templates,
             list_workouts,
             get_workout,
@@ -4695,6 +4880,95 @@ mod tests {
             "the app's connection must refuse writes; got {:?}",
             write.ok()
         );
+    }
+
+    /// The task detail must carry everything the detail page shows.
+    ///
+    /// The page renders the row, the tags, the linked goals and notes, the
+    /// linked workout's name and the occurrences of a repeating series — a
+    /// join that silently dropping one of them would leave a blank section
+    /// in the app with nothing to explain it.
+    #[test]
+    fn task_detail_carries_the_row_and_everything_linked_to_it() {
+        let dir = std::env::temp_dir().join(format!("maia-test-task-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("maia.db");
+
+        let pool = maia::db::init_db(&path).unwrap();
+        {
+            let conn = pool.get().unwrap();
+            // The anchor of a recurring series, plus one occurrence already
+            // materialized under the same series id.
+            conn.execute(
+                "INSERT INTO tasks (id, date, title, done, task_status, carry_over, sort_order, \
+                 due_date, due_time_minutes, start_time_minutes, end_time_minutes, notes, \
+                 workout_id, recurrence, series_id, created_at, updated_at) \
+                 VALUES ('t1', 1000, 'Standup', 0, 0, 1, 3, 2000, 600, 540, 630, 'Bring the numbers', \
+                 'w1', '{\"type\":\"daily\"}', 't1', 10, 11)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id, date, title, done, task_status, carry_over, sort_order, \
+                 series_id, created_at, updated_at) \
+                 VALUES ('t2', 2000, 'Standup', 1, 1, 1, 3, 't1', 12, 13)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tags (id, name, sort_order, created_at, updated_at) \
+                 VALUES ('tag1', 'work', 0, 1, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO task_tags (tag_id, task_id) VALUES ('tag1', 't1')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO goals (id, title, start_date, status, created_at, updated_at) \
+                 VALUES ('g1', 'Ship it', 500, 'active', 1, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO task_goals (task_id, goal_id) VALUES ('t1', 'g1')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO notes (id, title, body, updated_at, created_at) \
+                 VALUES ('n1', 'Agenda', 'the list', 1, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO task_notes (task_id, note_id) VALUES ('t1', 'n1')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO workouts (id, name, date, created_at, updated_at) \
+                 VALUES ('w1', 'Bench press', 900, 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let conn = init_database(path.to_str().unwrap()).expect("read-only open should succeed");
+        let detail = task_detail(&conn, "t1").expect("the task should be found");
+
+        assert_eq!(detail["title"], "Standup");
+        assert_eq!(detail["notes"], "Bring the numbers");
+        assert_eq!(detail["startTimeMinutes"], 540);
+        assert_eq!(detail["endTimeMinutes"], 630);
+        assert_eq!(detail["dueTimeMinutes"], 600);
+        assert_eq!(detail["taskStatus"], 0);
+        assert_eq!(detail["workoutName"], "Bench press");
+        assert_eq!(detail["tags"][0]["name"], "work");
+        assert_eq!(detail["linkedGoals"][0]["title"], "Ship it");
+        assert_eq!(detail["linkedNotes"][0]["title"], "Agenda");
+
+        // The anchor and the materialized occurrence share the series.
+        let series = detail["series"].as_array().unwrap();
+        assert_eq!(series.len(), 2);
+        assert_eq!(series[0]["id"], "t1");
+        assert_eq!(series[1]["id"], "t2");
+
+        // A task that is not there is not a task.
+        assert!(task_detail(&conn, "nope").is_none());
     }
     use super::*;
     use serde_json::json;

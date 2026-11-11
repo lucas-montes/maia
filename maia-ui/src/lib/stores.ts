@@ -12,6 +12,7 @@ import type {
   SyncInfo,
   TemplateDetail,
   Todo,
+  TaskDetail,
   WorkoutDetail,
 } from "./api";
 
@@ -102,6 +103,31 @@ export const calendarAtom = atom<{
 });
 
 export const goalsAtom = atom<ListState<Goal>>(emptyList<Goal>());
+
+/**
+ * The task detail currently open, shared by the Tasks and Calendar views so
+ * a task opened from either one shows the same page.
+ *
+ * `occurrenceDate` is set when the task was opened from a calendar entry: a
+ * repeating task's entry is often a synthesized occurrence that has no row of
+ * its own, and the detail then shows the anchor's information with the
+ * occurrence's own day called out separately.
+ */
+export const taskDetailAtom = atom<{
+  taskId: string | null;
+  occurrenceDate: number | null;
+  occurrenceVirtual: boolean;
+  detail: TaskDetail | null;
+  status: Status;
+  message: string;
+}>({
+  taskId: null,
+  occurrenceDate: null,
+  occurrenceVirtual: false,
+  detail: null,
+  status: "idle",
+  message: "",
+});
 
 export const notesAtom = atom<
   ListState<Note> & {
