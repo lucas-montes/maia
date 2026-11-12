@@ -60,6 +60,7 @@ pub async fn list_statements(
                     (SELECT COUNT(*) FROM bank_statement_lines l WHERE l.statement_id=s.id),
                     (SELECT COUNT(*) FROM bank_statement_lines l WHERE l.statement_id=s.id AND l.status='pending'),
                     (SELECT COUNT(*) FROM bank_statement_lines l WHERE l.statement_id=s.id AND l.status='imported'),
+                    (SELECT COUNT(*) FROM bank_statement_lines l WHERE l.statement_id=s.id AND l.status='error'),
                     a.name, s.source_path
              FROM bank_statements s
              LEFT JOIN accounts a ON a.id = s.account_id
@@ -87,7 +88,7 @@ pub async fn list_statements(
                     "accountName": row.get::<_, String>(3)?,
                     "accountNumber": row.get::<_, Option<String>>(4)?,
                     "accountId": row.get::<_, Option<String>>(5)?,
-                    "resolvedAccountName": row.get::<_, Option<String>>(19)?,
+                    "resolvedAccountName": row.get::<_, Option<String>>(20)?,
                     "currencyCode": row.get::<_, String>(6)?,
                     "periodStart": row.get::<_, Option<String>>(7)?,
                     "periodEnd": row.get::<_, Option<String>>(8)?,
@@ -101,7 +102,8 @@ pub async fn list_statements(
                     "lineCount": row.get::<_, i64>(16)?,
                     "pendingCount": row.get::<_, i64>(17)?,
                     "importedCount": row.get::<_, i64>(18)?,
-                    "sourcePath": row.get::<_, Option<String>>(20)?,
+                    "errorCount": row.get::<_, i64>(19)?,
+                    "sourcePath": row.get::<_, Option<String>>(21)?,
                 }))
             },
         )
@@ -1015,5 +1017,48 @@ mod tests {
             file_statement_ids(&conn, path).is_err(),
             "with both statements deleted the file has no snapshot"
         );
+    }
+
+    /// The list says how many entries failed, so a failure is visible before
+    /// the user opens the file. An entry whose import failed is one the review
+    /// can offer a checkbox for, so it has to be counted.
+    #[tokio::test]
+    async fn the_statement_list_counts_the_entries_that_failed() {
+        let pool = crate::db::init_memory().unwrap();
+        let state = AppState::new(
+            crate::config::Config::from_values(serde_json::Map::new(), serde_json::Map::new()),
+            pool.clone(),
+        );
+        let id = stage(
+            &pool,
+            "ca-2026-09",
+            "dump/credit_agricole/ca.csv",
+            "Compte de chèques",
+            LineKind::Debit,
+        );
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "UPDATE bank_statement_lines SET status='error' WHERE statement_id=?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        }
+
+        let Json(payload) = list_statements(
+            State(state),
+            Query(ListQuery {
+                status: None,
+                source: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let items = payload["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["errorCount"], 1);
+        assert_eq!(items[0]["pendingCount"], 0);
+        assert_eq!(items[0]["lineCount"], 1);
     }
 }

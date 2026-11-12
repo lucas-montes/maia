@@ -146,6 +146,32 @@ describe("selectableLineIds", () => {
     const b = detail("s2", [inn, line("rent")], [m]);
     expect([...selectableLineIds([a, b])].sort()).toEqual(["fee", "out", "rent"]);
   });
+
+  test("offers a failed entry, so the import can be retried", () => {
+    // An entry whose import failed is exactly the one the user wants to try
+    // again: a missing FX rate, say. It has to be offered a checkbox, or the
+    // failure can never be retried.
+    const d = detail("s1", [
+      line("a"),
+      line("b", { status: "error", importError: "no USD/EUR rate" }),
+      line("c", { status: "duplicate" }),
+    ]);
+    expect([...selectableLineIds([d])].sort()).toEqual(["a", "b"]);
+  });
+
+  test("a pair whose import failed is offered, so the transfer can be retried", () => {
+    const out = line("out", { status: "error" });
+    const inn = line("in", { status: "error" });
+    const d = detail("s1", [out, inn], [match("m1", out, inn)]);
+    expect([...selectableLineIds([d])]).toEqual(["out"]);
+  });
+
+  test("a pair whose other side is settled is offered by neither path", () => {
+    const out = line("out", { status: "error" });
+    const settled = line("foreign", { status: "imported" });
+    const d = detail("s1", [out], [match("m1", out, settled)]);
+    expect([...selectableLineIds([d])]).toEqual([]);
+  });
 });
 
 describe("liveMatches / matchedLineIds", () => {

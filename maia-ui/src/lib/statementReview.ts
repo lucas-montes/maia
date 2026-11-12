@@ -54,6 +54,18 @@ export function localMatchSide(match: TransferMatch, local: Set<string>): string
   return null;
 }
 
+/** The entries the review can act on.
+ *
+ *  `pending` is work the user has not done yet. `error` is work that failed --
+ *  a missing FX rate, say -- and can be retried, so it is offered a checkbox
+ *  too: an entry the import could not book is exactly the one the user wants
+ *  to try again. Everything else is settled (`imported`, `skipped`) or was
+ *  never importable (`duplicate`, `informational`).
+ */
+export function isImportable(line: { status: string }): boolean {
+  return line.status === "pending" || line.status === "error";
+}
+
 /** The line ids the review offers a checkbox for, across every statement given
  *  (one for the statement detail page, all of a file's for the file review). */
 export function selectableLineIds(details: StatementDetail[]): Set<string> {
@@ -70,13 +82,15 @@ export function selectableLineIds(details: StatementDetail[]): Set<string> {
       // Trades are informational and never imported; a matched line is
       // offered through its transfer row instead of here.
       if (line.lineKind === "trade" || matched.has(line.id)) continue;
-      if (line.status === "pending") ids.add(line.id);
+      if (isImportable(line)) ids.add(line.id);
     }
   }
   for (const match of matches) {
-    // A pair is one transfer, so it is selectable only while both sides are
-    // still pending -- importing or skipping one side settles the pair.
-    if (match.debit.status !== "pending" || match.credit.status !== "pending") continue;
+    // A pair is one transfer, so it is selectable only while both sides can
+    // still be booked -- importing or skipping one side settles the pair. A
+    // side that failed keeps its place, so the pair can be retried as one
+    // transfer.
+    if (!isImportable(match.debit) || !isImportable(match.credit)) continue;
     const id = localMatchSide(match, local);
     if (id) ids.add(id);
   }

@@ -106,6 +106,9 @@ export interface StatementSummary {
   lineCount: number;
   pendingCount: number;
   importedCount: number;
+  /** Entries whose import failed. They can be retried, so the review offers
+   *  them a checkbox like a pending entry. */
+  errorCount: number;
   /** The file the statement was staged from; statements of one dropped file share it. */
   sourcePath?: string | null;
 }
@@ -156,7 +159,7 @@ export interface TransferMatch {
 
 export interface StatementDetail {
   /** The detail endpoint omits the list-only counters; lines carry the counts. */
-  statement: Omit<StatementSummary, "lineCount" | "pendingCount" | "importedCount"> & {
+  statement: Omit<StatementSummary, "lineCount" | "pendingCount" | "importedCount" | "errorCount"> & {
     sourcePath: string | null;
     storedPath: string | null;
     parsed: unknown;

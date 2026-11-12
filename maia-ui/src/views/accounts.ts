@@ -176,7 +176,7 @@ export function mount(root: HTMLElement): () => void {
         <tr>
           <td class="text-sm text-ink-200">${escapeHtml(`${s.institution} · ${s.accountName}`)}</td>
           <td class="text-xs text-ink-500">${escapeHtml(period)}</td>
-          <td class="text-xs">${s.pendingCount} pending · ${s.importedCount} imported</td>
+          <td class="text-xs">${s.pendingCount} pending · ${s.importedCount} imported${s.errorCount > 0 ? ` · ${s.errorCount} failed` : ""}</td>
           <td><span class="badge badge-ghost badge-xs">${escapeHtml(s.status)}</span></td>
         </tr>`;
     });

@@ -741,16 +741,18 @@ pub fn import_statement(
                 if !all_lines.contains_key(&counterpart_id) {
                     all_lines.insert(counterpart_id.clone(), load_line(tx, &counterpart_id)?);
                 }
-                // Only a still-pending counterpart can be imported with this
-                // line. If it was already imported on its own (an earlier
-                // import with auto-linking off), pairing now would create a
+                // A counterpart can be imported with this line while it has
+                // not been booked yet: `pending` is work not done, `error` is
+                // work that failed and can be retried. A counterpart that was
+                // already imported on its own (an earlier import with
+                // auto-linking off) must not be paired -- that would create a
                 // second transaction for money that is already booked and
                 // repoint the old line at it. Dismiss the match instead: the
                 // transfer did happen, but this import cannot represent it as
                 // one row without duplicating a transaction.
                 if all_lines
                     .get(&counterpart_id)
-                    .is_none_or(|counterpart| counterpart.status != "pending")
+                    .is_none_or(|counterpart| !is_pairable(&counterpart.status))
                 {
                     tx.execute(
                         "UPDATE transfer_matches SET status='dismissed', updated_at=?1 WHERE id=?2",
@@ -862,9 +864,11 @@ pub fn import_statement(
                         None => load_line(tx, &counterpart_id)?,
                     };
                     // Same rule as the expansion above: never pair with a line
-                    // that is no longer pending, or an earlier single import
-                    // would be duplicated by the transfer row.
-                    if counterpart.status != "pending" {
+                    // that has already been booked, or an earlier single
+                    // import would be duplicated by the transfer row. A line
+                    // that failed keeps its place in the pair, so a retry
+                    // books the transfer as one row again.
+                    if !is_pairable(&counterpart.status) {
                         tx.execute(
                             "UPDATE transfer_matches SET status='dismissed', updated_at=?1 WHERE id=?2",
                             params![now, match_id],
@@ -950,6 +954,16 @@ pub fn import_statement(
 
     refresh_statement_status(tx, statement_id, now)?;
     Ok(outcome)
+}
+
+/// Whether a line can still be imported as part of a transfer pair.
+///
+/// `pending` is work the user has not done yet and `error` is work that
+/// failed and can be retried, so both can still be booked. `imported` and
+/// `skipped` cannot: the money is already booked, and pairing it again would
+/// duplicate the transaction.
+fn is_pairable(status: &str) -> bool {
+    matches!(status, "pending" | "error")
 }
 
 fn auto_match(tx: &Transaction<'_>, line_id: &str) -> anyhow::Result<Option<(String, String)>> {

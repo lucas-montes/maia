@@ -14,6 +14,7 @@ import {
 import { escapeHtml, formatEpoch, setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
 import {
+  isImportable,
   liveMatches,
   localMatchSide,
   matchedLineIds,
@@ -109,6 +110,11 @@ function groupPending(statements: StatementSummary[]): number {
   return statements.reduce((sum, s) => sum + s.pendingCount, 0);
 }
 
+/** How many entries of a group failed to import and can be retried. */
+function groupErrors(statements: StatementSummary[]): number {
+  return statements.reduce((sum, s) => sum + s.errorCount, 0);
+}
+
 /** How many *accounts* a group covers, not how many statements.
  *
  *  They are the same thing for a dropped file — one statement per account —
@@ -161,6 +167,7 @@ function listHtml(
                 ${s.accountNumber ? `<span class="font-mono">${escapeHtml(s.accountNumber)}</span>` : ""}
                 ${period ? `<span>${escapeHtml(period)}</span>` : ""}
                 <span>${s.pendingCount} pending</span>
+                ${s.errorCount > 0 ? `<span class="text-err-400">${s.errorCount} failed</span>` : ""}
               </div>
             </div>
           </button>
@@ -173,7 +180,7 @@ function listHtml(
           <input type="checkbox" class="checkbox checkbox-sm" data-file-check="${escapeHtml(key)}" ${allPicked ? "checked" : ""} ${somePicked && !allPicked ? "data-indeterminate" : ""} title="Select all accounts of this file" />
           <button class="min-w-0 flex-1 text-left" type="button" data-action="open-file" data-file-path="${escapeHtml(key.startsWith("~") ? "" : key)}">
             <span class="text-sm font-medium text-ink-200 underline decoration-base-300 underline-offset-2">${escapeHtml(label)}</span>
-            <span class="ml-2 text-xs text-ink-500">${groupAccounts(statements)} account${groupAccounts(statements) !== 1 ? "s" : ""} · ${groupPending(statements)} entr${groupPending(statements) !== 1 ? "ies" : "y"} pending</span>
+            <span class="ml-2 text-xs text-ink-500">${groupAccounts(statements)} account${groupAccounts(statements) !== 1 ? "s" : ""} · ${groupPending(statements)} entr${groupPending(statements) !== 1 ? "ies" : "y"} pending${groupErrors(statements) > 0 ? ` · ${groupErrors(statements)} failed` : ""}</span>
           </button>
           ${key.startsWith("~") ? "" : `<button class="btn btn-ghost btn-xs" type="button" data-action="open-file" data-file-path="${escapeHtml(key)}">Review file</button>`}
         </div>
@@ -307,6 +314,7 @@ function detailHtml(
   );
   const selectable = selectableLineIds([detail]);
   const pending = detail.lines.filter((line) => line.status === "pending").length;
+  const failed = detail.lines.filter((line) => line.status === "error").length;
 
   const tradeRows = trades
     .map(
@@ -334,7 +342,7 @@ function detailHtml(
           <div><span class="text-ink-500">Account:</span> <span class="text-ink-300">${escapeHtml(s.resolvedAccountName ?? `will be created on import (${s.accountName})`)}</span></div>
           <div><span class="text-ink-500">Opening:</span> <span class="font-mono text-ink-300">${s.openingBalance === null ? "?" : escapeHtml(money(s.openingBalance, s.currencyCode))}</span></div>
           <div><span class="text-ink-500">Closing:</span> <span class="font-mono text-ink-300">${s.closingBalance === null ? "?" : escapeHtml(money(s.closingBalance, s.currencyCode))}</span></div>
-          <div><span class="text-ink-500">Entries:</span> <span class="text-ink-300">${detail.lines.length} (${pending} pending)</span></div>
+          <div><span class="text-ink-500">Entries:</span> <span class="text-ink-300">${detail.lines.length} (${pending} pending${failed > 0 ? ` · ${failed} failed` : ""})</span></div>
           <div><span class="text-ink-500">Updated:</span> <span class="text-ink-300">${escapeHtml(formatEpoch(s.updatedAt))}</span></div>
         </div>
         ${s.parseError ? `<div class="mt-3 rounded border border-surface-800 bg-base-100 p-2 text-xs text-err-400">Parse failed: ${escapeHtml(s.parseError)}</div>` : ""}
@@ -355,7 +363,7 @@ function detailHtml(
         <div class="mb-2 flex items-center justify-between">
           <h3 class="text-sm font-medium text-ink-200">Entries to add</h3>
           <div class="flex items-center gap-2">
-            <button class="btn btn-ghost btn-xs" type="button" data-action="select-all" ${selectable.size === 0 ? "disabled" : ""}>Select pending</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="select-all" ${selectable.size === 0 ? "disabled" : ""}>Select all</button>
             <button class="btn btn-ghost btn-xs" type="button" data-action="select-none" ${selected.size === 0 ? "disabled" : ""}>Clear</button>
           </div>
         </div>
@@ -648,6 +656,10 @@ function fileHtml(
     (sum, detail) => sum + detail.lines.filter((line) => line.status === "pending").length,
     0,
   );
+  const failed = statements.reduce(
+    (sum, detail) => sum + detail.lines.filter((line) => line.status === "error").length,
+    0,
+  );
 
   const matched = matchedLineIds(matches);
   const entrySections = statements
@@ -657,7 +669,9 @@ function fileHtml(
         (line) => line.lineKind !== "trade" && !matched.has(line.id),
       );
       if (ordinary.length === 0) return "";
-      const accountPending = ordinary.filter((line) => line.status === "pending").length;
+      // What this account can still add: entries waiting to be reviewed, and
+      // entries whose import failed and can be retried.
+      const accountPending = ordinary.filter((line) => isImportable(line)).length;
       // Month subheadings when the account spans months. A file used to be
       // split into one statement per month, which the review read as one
       // account each; the months were real information, so they are kept —
@@ -715,9 +729,9 @@ function fileHtml(
       ${summaryHtml(preview, previewing, selected.size)}
 
       <div class="flex flex-wrap items-center gap-2">
-        <span class="text-xs text-ink-500">${pending} entr${pending !== 1 ? "ies" : "y"} pending in this file</span>
+        <span class="text-xs text-ink-500">${pending} entr${pending !== 1 ? "ies" : "y"} pending in this file${failed > 0 ? ` · ${failed} failed` : ""}</span>
         <span class="flex-1"></span>
-        <button class="btn btn-ghost btn-xs" type="button" data-action="select-all" ${selectable.size === 0 ? "disabled" : ""}>Select pending</button>
+        <button class="btn btn-ghost btn-xs" type="button" data-action="select-all" ${selectable.size === 0 ? "disabled" : ""}>Select all</button>
         <button class="btn btn-ghost btn-xs" type="button" data-action="select-none" ${selected.size === 0 ? "disabled" : ""}>Clear</button>
       </div>
 
@@ -978,7 +992,7 @@ export function mount(root: HTMLElement): () => void {
           </details>
           <div class="flex flex-wrap items-center justify-between gap-2">
             <div class="text-sm text-ink-400">${state.items.length} statement${state.items.length !== 1 ? "s" : ""}</div>
-            <button class="btn btn-ghost btn-xs" type="button" data-action="select-all-statements" ${(state.items as StatementSummary[]).some((s) => s.pendingCount > 0) ? "" : "disabled"}>Select all pending</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="select-all-statements" ${(state.items as StatementSummary[]).some((s) => s.pendingCount > 0 || s.errorCount > 0) ? "" : "disabled"}>Select all to import</button>
           </div>
           ${listHtml(state.items as StatementSummary[], state.selectedId, state.selectedStatements)}
           <div>${backToDashboard()}</div>
@@ -1340,12 +1354,14 @@ export function mount(root: HTMLElement): () => void {
         .map((detail) => ({
           id: detail.statement.id,
           lines: detail.lines
-            .filter((line) => line.status === "pending")
+            // An entry whose import failed is retried too: it is the one the
+            // user wants to try again, and the server books it the same way.
+            .filter((line) => isImportable(line))
             .map((line) => ({ id: line.id, action: "import" as const })),
           autoLink: true,
         }))
         .filter((entry) => entry.lines.length > 0);
-      if (statements.length === 0) throw new Error("nothing is pending in the selected statements");
+      if (statements.length === 0) throw new Error("nothing to import in the selected statements");
       const res = await api.importStatements(statements);
       if (!res.success) throw new Error(res.error ?? "Import failed");
       await loadList();
@@ -1353,7 +1369,7 @@ export function mount(root: HTMLElement): () => void {
         ...statementsAtom.get(),
         selectedStatements: [],
         status: "saved",
-        message: `Imported pending entries from ${statements.length} statement${statements.length !== 1 ? "s" : ""}.`,
+        message: `Imported ${statements.length} statement${statements.length !== 1 ? "s" : ""}.`,
       });
       rerender();
     } catch (e) {
@@ -1746,12 +1762,13 @@ export function mount(root: HTMLElement): () => void {
         return;
       case "select-all-statements": {
         // Top-level equivalent of "select-all" within a file: picks every
-        // statement in the current (filtered) view that still has pending
-        // entries, so the bulk import/delete bar below can act on all of
+        // statement in the current (filtered) view that still has entries to
+        // import -- pending ones, and ones whose import failed and can be
+        // retried -- so the bulk import/delete bar below can act on all of
         // them in one shot, across every file group.
         const state = statementsAtom.get();
         const ids = (state.items as StatementSummary[])
-          .filter((s) => s.pendingCount > 0)
+          .filter((s) => s.pendingCount > 0 || s.errorCount > 0)
           .map((s) => s.id);
         statementsAtom.set({ ...state, selectedStatements: ids });
         render();

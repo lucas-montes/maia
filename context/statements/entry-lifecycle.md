@@ -15,7 +15,7 @@ kinds:
 | `pending` | derived | staging, or a re-read | no — recomputed |
 | `informational` | derived | the parser marked the row as carrying no money movement (`LineKind::is_informational`, i.e. a trade) | no — recomputed |
 | `duplicate` | derived | another **live** statement holds the same `dedupe_key` | no — recomputed |
-| `error` | derived | the import could not book the line (`mark_error`) | no — recomputed |
+| `error` | derived | the import could not book the line (`mark_error`) — retryable | no — recomputed |
 
 `imported` and `skipped` are the only statuses a re-read preserves. Every other
 status is a function of the file's bytes plus the state of the other
@@ -110,6 +110,27 @@ flowchart TD
 deleting a derived line removes the match that used it. `match_pending` runs
 right after a staging batch (`src/statements/mod.rs`), so matches are rebuilt
 from the fresh lines rather than restored.
+
+## Retrying a failed entry
+
+An `error` entry is one the import could not book — a missing FX rate is the
+usual reason — and it is the one the user wants to try again. The review
+offers it a checkbox like a pending entry, so it is **importable**: `pending`
+or `error`.
+
+The server already accepted one: `import_statement` short-circuits only
+`imported`, `informational` and `duplicate`, so an `error` line falls through
+and is booked, and `mark_imported` clears the error with it.
+
+A failed **transfer pair** is one thing that failed, and both sides land in
+`error` together. The rule that decides whether a counterpart can still be
+paired accepts `error` as well as `pending` (`is_pairable` in `store.rs`), so
+a retry books the transfer as one row again. An `imported` or `skipped`
+counterpart still cannot be paired: the money is already booked, and pairing
+it again would duplicate the transaction.
+
+`GET /statements` reports `errorCount` alongside `pendingCount` and
+`importedCount`, so a failure is visible before the file is opened.
 
 ## Where a file sits
 

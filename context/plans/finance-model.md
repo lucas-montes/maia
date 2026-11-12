@@ -81,7 +81,13 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Goal: `parsed/` means imported, so a file whose entries are all duplicates (or hold anything else that is not imported or skipped) waits in `staged/`.
   - Boundaries: In — the "unsettled" test in `collect_file_states` and the two doc comments that state the rule. Out — `error` entries being selectable (T5), the v12 repair migration (T6), the review's empty state (T7), schema, UI.
   - Note: the test is the complement of the rule (`status NOT IN ('imported','skipped')`), so it stays correct as statuses are added. The placement is derived, so a file that gains an unsettled entry walks back to `staged/` on the next pass.
-- [ ] T5 `error` entries are selectable and counted (`statementReview.ts`, `handlers/statements.rs:61`).
+- [x] T5 `error` entries are selectable and counted (`statementReview.ts`, `handlers/statements.rs:61`). (status:done)
+  - Completed: 2026-11-13
+  - Goal: an entry whose import failed can be retried, and the failure is visible before the file is opened.
+  - Boundaries: In — `statementReview.ts` (an `isImportable` helper: pending **or** error; both the ordinary-entry and the transfer-pair branch), `handlers/statements.rs` (`errorCount`), `api.ts` (the type), the desktop display of the count, the bulk-import path, and the counterpart rule in `store.rs`. Out — the review's empty state (T7), the parser (T8), schema.
+  - Note: the server already accepted an `error` line for import — `import_statement` short-circuits only `imported`/`informational`/`duplicate` — so the work was in the review, which offered it no checkbox.
+  - Note: a failed **transfer pair** is one thing that failed, so the rule in `store.rs` that decides whether a counterpart can still be paired now accepts `error` as well as `pending`. Without it a retry booked the pair as two separate entries and dismissed the match, and money between two of the user's own accounts read as an expense and an income.
+
 - [ ] T6 Migration v12: `duplicate` entries whose `duplicate_of` is in a discarded statement →
       `pending`, clear `duplicate_of`.
 - [ ] T7 Review explains an empty state ("every entry duplicates another file — re-drop to re-read").
@@ -142,7 +148,9 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   written as the complement (`status NOT IN ('imported','skipped')`), so it stays correct as
   statuses are added.
 
-## Evidence (T1 + T2, 2026-11-12)
+## Evidence (T1–T5)
+
+### T1 + T2 (2026-11-12, commit `b056627`)
 - `cargo test`: 229 passed, 0 failed, 1 ignored. The four new tests in `src/lib.rs::statement_tests`
   (`a_line_seen_only_in_a_discarded_statement_is_not_a_duplicate`,
   `a_line_seen_only_in_an_ignored_statement_is_not_a_duplicate`,
@@ -151,18 +159,34 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   `store.rs` and pass with it — checked by stashing the change and re-running.
 - `a_line_seen_in_another_statement_is_stored_as_duplicate` (the pre-existing live-statement case)
   stayed green throughout: a live statement still claims its lines.
+
+### T3 (2026-11-12, commit `f0c75a1`)
+- `cargo test`: 233 passed. `a_live_statement_whose_entries_all_duplicate_is_read_again` and
+  `an_informational_only_feed_month_is_read_again` fail against the previous `store.rs`;
+  `an_unchanged_statement_with_an_imported_entry_is_a_no_op` and `an_unchanged_feed_month_is_a_no_op`
+  pass in both states — they are the guards the plan's feed constraint asks for.
+
+### T4 (2026-11-12, commit `1cd3702`)
+- `cargo test`: 235 passed. `a_file_whose_entries_all_duplicate_stays_staged` and
+  `an_informational_entry_holds_its_file_in_staged` fail against the previous query and pass with it
+  (checked by reverting only the SQL, keeping the tests). The nine existing placement tests stayed
+  green.
+
+### T5 (2026-11-13)
+- `cargo test`: 237 passed, 0 failed, 1 ignored. `the_statement_list_counts_the_entries_that_failed`
+  fails without the `errorCount` query; `a_failed_transfer_pair_is_retried_as_one_transfer` fails
+  without the counterpart rule (the retry books an `expense` instead of a `transfer`).
+- `npx tsc --noEmit`: clean. `npx vitest run`: 42 passed (3 new). The two new selection tests fail
+  against the previous `statementReview.ts`.
 - `cargo clippy --all-targets`: no new warnings and no new errors. The 3 `clippy::erasing_op`
   errors in `src/finance_scenarios.rs` are pre-existing and untouched by this change.
-- `npx tsc --noEmit`: clean. `npx vitest run`: 39 passed.
 - `cargo build`: succeeds. The new code is rustfmt-clean; the repository is not (37 files have
   pre-existing rustfmt drift, `src/finance_scenarios.rs` and `maia-ui/src-tauri` among them). That
   drift predates this change and was left alone — the file list is byte-identical with and without
   this change.
 
 ## Remaining for Stage 1
-- **T5, T6 and T7 are left.** T5 makes an `error` entry selectable and counted (the review cannot
-  currently act on it); T6 (migration v12) repairs the rows the live database still carries as
+- **T6, T7 and T8 are left.** T6 (migration v12) repairs the rows the live database still carries as
   `duplicate` after the hand-discarded statement of 2026-11-11; T7 explains the empty state in the
-  review when every entry duplicates another file.
-- **T8** (the Firstrade parser warns on an unreadable date row instead of skipping it silently)
-  is independent of the rest.
+  review when every entry duplicates another file; T8 makes the Firstrade parser warn on an
+  unreadable date row instead of skipping it silently.

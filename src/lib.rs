@@ -2720,6 +2720,90 @@ mod statement_tests {
         assert_eq!(imported, 2);
     }
 
+    /// A failed import leaves both sides of a transfer in `error`. Retrying
+    /// them must book the transfer as one row again, not as two separate
+    /// entries: the money moved between two of the user's own accounts, and
+    /// booking it as an expense and an income would misread it.
+    #[test]
+    fn a_failed_transfer_pair_is_retried_as_one_transfer() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 16);
+        let mut out = line("Virement émis VIR", -1000.0, day, "out");
+        out.currency_code = "USD".to_string();
+        let mut inn = line("Virement en votre faveur", 1000.0, day, "in");
+        inn.currency_code = "USD".to_string();
+
+        let debit = draft("credit_agricole:111:hash-out", "hash-out", "111", vec![out]);
+        let credit = draft("credit_agricole:222:hash-in", "hash-in", "222", vec![inn]);
+        let outcomes = save(&pool, vec![debit, credit]);
+
+        // No USD/EUR rate is seeded, so the import cannot book either side.
+        let failed = import(&pool, &outcomes[0].statement_id, empty_request());
+        assert_eq!(failed.created, 0);
+        assert_eq!(failed.errors, 1, "the pair is one thing that failed");
+        assert_eq!(
+            line_states(&pool, &outcomes[0].statement_id),
+            vec![("error".to_string(), None)],
+        );
+        assert_eq!(
+            line_states(&pool, &outcomes[1].statement_id),
+            vec![("error".to_string(), None)],
+            "the counterpart failed with it"
+        );
+
+        // The retry: the user ticks both entries again. The rate that was
+        // missing has arrived by now.
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO fx_rates (code, base_code, rate_date, rate_to_base, updated_at)
+                 VALUES ('USD', 'EUR', '2026-10-16', 0.92, 1)",
+                [],
+            )
+            .unwrap();
+        }
+        let out_id = line_ids(&pool, &outcomes[0].statement_id)[0].clone();
+        let in_id = line_ids(&pool, &outcomes[1].statement_id)[0].clone();
+        let retry = import(
+            &pool,
+            &outcomes[0].statement_id,
+            ImportRequest {
+                lines: vec![
+                    ImportLine {
+                        id: out_id,
+                        action: store::ImportAction::Import,
+                        type_: None,
+                        category: None,
+                        account_id: None,
+                        counterpart_account_id: None,
+                    },
+                    ImportLine {
+                        id: in_id,
+                        action: store::ImportAction::Import,
+                        type_: None,
+                        category: None,
+                        account_id: None,
+                        counterpart_account_id: None,
+                    },
+                ],
+                account_id: None,
+                counterpart_account_id: None,
+                auto_link: Some(true),
+            },
+        );
+        assert_eq!(retry.created, 1, "the pair is one transfer, not two rows");
+
+        let conn = pool.get().unwrap();
+        let transactions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(transactions, 1, "one transfer, not two entries");
+        let (type_,): (String,) = conn
+            .query_row("SELECT type FROM transactions", [], |r| Ok((r.get(0)?,)))
+            .unwrap();
+        assert_eq!(type_, "transfer");
+    }
+
     /// Importing one side on its own must not later be "upgraded" into a pair:
     /// the pair would be a second transaction for the same money and would
     /// repoint the first line at it.
