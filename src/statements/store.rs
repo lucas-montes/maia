@@ -30,10 +30,13 @@ struct Counts {
 /// Rules that make re-runs safe:
 /// - The same `source_key` and `source_hash` is a no-op.
 /// - The same `source_key` with different bytes (a feed re-sync) updates the
-///   header and replaces only `pending`/`informational` lines; imported and
-///   skipped lines survive.
-/// - A line whose `dedupe_key` already exists in another statement is stored as
-///   `duplicate`, visible but not importable.
+///   header and replaces every derived line (`pending`, `informational`,
+///   `duplicate`, `error`); imported and skipped lines survive, because those
+///   are decisions the user already made.
+/// - A line whose `dedupe_key` already exists in another **live** statement is
+///   stored as `duplicate`, visible but not importable. A discarded
+///   (`deleted_at`) or ignored statement claims nothing, so its lines stage as
+///   `pending` and stay importable.
 pub fn save_statement(tx: &Transaction<'_>, draft: StatementDraft) -> anyhow::Result<SaveOutcome> {
     let now = db::server_time_ms();
     let parsed_json = serde_json::to_string(&draft.parsed).unwrap_or_else(|_| "null".into());
@@ -96,11 +99,16 @@ pub fn save_statement(tx: &Transaction<'_>, draft: StatementDraft) -> anyhow::Re
                     id,
                 ],
             )?;
-            // Imported and skipped lines are decisions the user already made.
-            // Pending/informational lines are safe to replace.
+            // Imported and skipped lines are decisions the user already made,
+            // so they survive a re-read. Everything else — pending,
+            // informational, duplicate and error — is derived from the file's
+            // bytes and is recomputed on every re-read, so a stale derived line
+            // must go before the fresh ones are inserted. Leaving it would
+            // make the re-insert a no-op (the `(statement_id, fingerprint)`
+            // uniqueness) and keep the old verdict forever.
             tx.execute(
                 "DELETE FROM bank_statement_lines
-                 WHERE statement_id=?1 AND status IN ('pending','informational')",
+                 WHERE statement_id=?1 AND status IN ('pending','informational','duplicate','error')",
                 params![id],
             )?;
             (id, None)
@@ -147,9 +155,16 @@ pub fn save_statement(tx: &Transaction<'_>, draft: StatementDraft) -> anyhow::Re
     for line in &draft.lines {
         let duplicate_of: Option<String> = tx
             .query_row(
-                "SELECT id FROM bank_statement_lines
-                 WHERE dedupe_key=?1 AND statement_id<>?2 AND status<>'duplicate'
-                 ORDER BY created_at LIMIT 1",
+                // Only a live statement claims content. A discarded
+                // (`deleted_at`) or ignored statement is not something the user
+                // still holds, so its lines must not turn a fresh entry into a
+                // duplicate — otherwise re-dropping a discarded file stages
+                // every entry as `duplicate` and there is nothing to import.
+                "SELECT l.id FROM bank_statement_lines l
+                 JOIN bank_statements s ON s.id = l.statement_id
+                 WHERE l.dedupe_key=?1 AND l.statement_id<>?2 AND l.status<>'duplicate'
+                   AND s.deleted_at IS NULL AND s.status <> 'ignored'
+                 ORDER BY l.created_at LIMIT 1",
                 params![line.dedupe_key, statement_id],
                 |r| r.get(0),
             )

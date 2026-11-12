@@ -2116,6 +2116,41 @@ mod statement_tests {
         }
     }
 
+    /// `(status, duplicate_of)` of every line of a statement.
+    fn line_states(pool: &db::DbPool, statement_id: &str) -> Vec<(String, Option<String>)> {
+        let conn = pool.get().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT status, duplicate_of FROM bank_statement_lines
+                 WHERE statement_id=?1 ORDER BY created_at",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map(rusqlite::params![statement_id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    }
+
+    /// The id of every line of a statement.
+    fn line_ids(pool: &db::DbPool, statement_id: &str) -> Vec<String> {
+        let conn = pool.get().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM bank_statement_lines WHERE statement_id=?1 ORDER BY created_at",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map(rusqlite::params![statement_id], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    }
+
     #[test]
     fn restaging_the_same_bytes_is_a_no_op() {
         let pool = db::init_memory().unwrap();
@@ -2239,6 +2274,187 @@ mod statement_tests {
         let outcome = import(&pool, &outcomes[1].statement_id, request);
         assert_eq!(outcome.created, 0);
         assert_eq!(outcome.lines[0].status, "duplicate");
+    }
+
+    /// A discarded statement is not something the user still holds. Its lines
+    /// must not turn a fresh entry into a duplicate: the re-dropped file would
+    /// stage every entry as `duplicate`, leaving nothing to import, and the
+    /// file would still be moved to `parsed/` as if it had been.
+    #[test]
+    fn a_line_seen_only_in_a_discarded_statement_is_not_a_duplicate() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let a = draft(
+            "credit_agricole:111:hash-a",
+            "hash-a",
+            "111",
+            vec![line("Coffee", -3.5, day, "same-line")],
+        );
+        let b = draft(
+            "credit_agricole:222:hash-b",
+            "hash-b",
+            "222",
+            vec![line("Coffee", -3.5, day, "same-line")],
+        );
+
+        let first = save(&pool, vec![a]);
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "UPDATE bank_statements SET deleted_at=1 WHERE id=?1",
+                rusqlite::params![first[0].statement_id],
+            )
+            .unwrap();
+        }
+
+        let second = save(&pool, vec![b]);
+        assert_eq!(second[0].duplicate_lines, 0);
+        assert_eq!(
+            line_states(&pool, &second[0].statement_id),
+            vec![("pending".to_string(), None)],
+            "a discarded statement claims nothing, so the entry stays importable"
+        );
+    }
+
+    /// An ignored statement is the same claim as a discarded one: the user said
+    /// "not this file", so its lines must not make another file's entry a
+    /// duplicate.
+    #[test]
+    fn a_line_seen_only_in_an_ignored_statement_is_not_a_duplicate() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let a = draft(
+            "credit_agricole:111:hash-a",
+            "hash-a",
+            "111",
+            vec![line("Coffee", -3.5, day, "same-line")],
+        );
+        let b = draft(
+            "credit_agricole:222:hash-b",
+            "hash-b",
+            "222",
+            vec![line("Coffee", -3.5, day, "same-line")],
+        );
+
+        let first = save(&pool, vec![a]);
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "UPDATE bank_statements SET status='ignored' WHERE id=?1",
+                rusqlite::params![first[0].statement_id],
+            )
+            .unwrap();
+        }
+
+        let second = save(&pool, vec![b]);
+        assert_eq!(second[0].duplicate_lines, 0);
+        assert_eq!(
+            line_states(&pool, &second[0].statement_id),
+            vec![("pending".to_string(), None)],
+            "an ignored statement claims nothing, so the entry stays importable"
+        );
+    }
+
+    /// A re-read has to recompute the derived verdicts. A line that was a
+    /// duplicate because a now-discarded statement held it has to come back as
+    /// `pending`. The stale derived line is deleted first: leaving it would
+    /// make the re-insert a no-op on `(statement_id, fingerprint)` and keep the
+    /// old `duplicate` verdict forever.
+    #[test]
+    fn a_restage_replaces_a_stale_duplicate_line_with_a_pending_one() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let a = draft(
+            "credit_agricole:111:hash-a",
+            "hash-a",
+            "111",
+            vec![line("Coffee", -3.5, day, "same-line")],
+        );
+        let b = draft(
+            "credit_agricole:222:hash-b",
+            "hash-b",
+            "222",
+            vec![line("Coffee", -3.5, day, "same-line")],
+        );
+
+        let first = save(&pool, vec![a]);
+        let second = save(&pool, vec![b]);
+        assert_eq!(second[0].duplicate_lines, 1, "a live statement claims it");
+        assert_eq!(
+            line_states(&pool, &second[0].statement_id),
+            vec![(
+                "duplicate".to_string(),
+                Some(line_ids(&pool, &first[0].statement_id)[0].clone()),
+            )],
+            "the duplicate names the line it was kept from",
+        );
+
+        // The claimer is discarded, so it claims nothing any more.
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "UPDATE bank_statements SET deleted_at=1 WHERE id=?1",
+                rusqlite::params![first[0].statement_id],
+            )
+            .unwrap();
+        }
+
+        // Same source_key, different bytes: the re-read branch.
+        let again = draft(
+            "credit_agricole:222:hash-b",
+            "hash-b2",
+            "222",
+            vec![line("Coffee", -3.5, day, "same-line")],
+        );
+        let outcomes = save(&pool, vec![again]);
+        assert_eq!(outcomes[0].statement_id, second[0].statement_id);
+        assert_eq!(outcomes[0].duplicate_lines, 0);
+        assert_eq!(
+            line_states(&pool, &outcomes[0].statement_id),
+            vec![("pending".to_string(), None)],
+            "the stale duplicate is gone, not kept beside the fresh line"
+        );
+    }
+
+    /// An `error` line is derived too: the import failed, nothing was booked,
+    /// and re-reading the file is the retry. The failed line has to be deleted
+    /// before the fresh one is inserted, or the insert is ignored and the line
+    /// stays broken forever.
+    #[test]
+    fn a_restage_replaces_an_errored_line_with_a_pending_one() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let mut usd = line("Coffee", -3.5, day, "usd-line");
+        usd.currency_code = "USD".to_string();
+
+        let first = save(
+            &pool,
+            vec![draft(
+                "credit_agricole:111:hash-a",
+                "hash-a",
+                "111",
+                vec![usd.clone()],
+            )],
+        );
+
+        // No USD/EUR rate is seeded, so the import cannot book the line.
+        let outcome = import(&pool, &first[0].statement_id, empty_request());
+        assert_eq!(outcome.errors, 1);
+        assert_eq!(
+            line_states(&pool, &first[0].statement_id),
+            vec![("error".to_string(), None)],
+        );
+
+        // Same source_key, different bytes: the re-read branch.
+        let again = draft("credit_agricole:111:hash-a", "hash-a2", "111", vec![usd]);
+        let outcomes = save(&pool, vec![again]);
+        assert_eq!(outcomes[0].statement_id, first[0].statement_id);
+        assert_eq!(outcomes[0].inserted_lines, 1);
+        assert_eq!(
+            line_states(&pool, &outcomes[0].statement_id),
+            vec![("pending".to_string(), None)],
+            "the failed line is derived, so a re-read retries it"
+        );
     }
 
     #[test]
