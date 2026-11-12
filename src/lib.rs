@@ -2087,6 +2087,41 @@ mod statement_tests {
         }
     }
 
+    /// A feed draft: the source key is the month bucket and the hash covers
+    /// the whole payload, so every month of one fetch shares it.
+    fn feed_draft(
+        month: &str,
+        hash: &str,
+        account_number: &str,
+        lines: Vec<StatementLineDraft>,
+    ) -> StatementDraft {
+        StatementDraft {
+            source: SourceId::Trading212,
+            institution: "Trading 212".to_string(),
+            account_name: "Trading 212".to_string(),
+            account_number: Some(account_number.to_string()),
+            currency_code: "EUR".to_string(),
+            period_start: None,
+            period_end: None,
+            opening_balance: None,
+            closing_balance: None,
+            source_path: None,
+            stored_path: None,
+            source_hash: hash.to_string(),
+            source_key: format!("trading212:{account_number}:{month}"),
+            parsed: serde_json::Value::Null,
+            warnings: Vec::new(),
+            lines,
+        }
+    }
+
+    /// A trade is informational: it shows in the review but is never imported.
+    fn trade_line(description: &str, posted_at: i64, key: &str) -> StatementLineDraft {
+        let mut line = line(description, 0.0, posted_at, key);
+        line.line_kind = LineKind::Trade;
+        line
+    }
+
     fn save(pool: &db::DbPool, drafts: Vec<StatementDraft>) -> Vec<SaveOutcome> {
         let mut conn = pool.get().unwrap();
         let tx = conn.transaction().unwrap();
@@ -2454,6 +2489,161 @@ mod statement_tests {
             line_states(&pool, &outcomes[0].statement_id),
             vec![("pending".to_string(), None)],
             "the failed line is derived, so a re-read retries it"
+        );
+    }
+
+    /// The trap the no-op used to spring. The file sources put the bytes in
+    /// the `source_key`, so re-dropping a file is always "the same bytes" --
+    /// and a statement whose entries are all duplicates holds nothing the user
+    /// can act on. Reporting "already ingested" for it left the stale verdict
+    /// in place forever: the claim belonged to a statement the user had
+    /// discarded, so nothing was claiming the content any more.
+    #[test]
+    fn a_live_statement_whose_entries_all_duplicate_is_read_again() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let a = draft(
+            "credit_agricole:111:hash-a",
+            "hash-a",
+            "111",
+            vec![line("Coffee", -3.5, day, "same-line")],
+        );
+        let b = draft(
+            "credit_agricole:222:hash-b",
+            "hash-b",
+            "222",
+            vec![line("Coffee", -3.5, day, "same-line")],
+        );
+
+        let first = save(&pool, vec![a]);
+        let second = save(&pool, vec![b]);
+        assert_eq!(second[0].duplicate_lines, 1, "the live statement claims it");
+
+        // The claimer is discarded, so it claims nothing any more.
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "UPDATE bank_statements SET deleted_at=1 WHERE id=?1",
+                rusqlite::params![first[0].statement_id],
+            )
+            .unwrap();
+        }
+
+        // The same file again, byte for byte.
+        let again = draft(
+            "credit_agricole:222:hash-b",
+            "hash-b",
+            "222",
+            vec![line("Coffee", -3.5, day, "same-line")],
+        );
+        let outcomes = save(&pool, vec![again]);
+        assert!(
+            outcomes[0].skipped_reason.is_none(),
+            "nothing left to act on means the statement is read again"
+        );
+        assert_eq!(outcomes[0].inserted_lines, 1);
+        assert_eq!(
+            line_states(&pool, &outcomes[0].statement_id),
+            vec![("pending".to_string(), None)],
+            "the released claim is released: the entry is importable again"
+        );
+    }
+
+    /// An entry the user has already acted on keeps the statement a no-op.
+    /// Re-reading it would touch rows the user decided about.
+    #[test]
+    fn an_unchanged_statement_with_an_imported_entry_is_a_no_op() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let statement = draft(
+            "credit_agricole:111:hash-a",
+            "hash-a",
+            "111",
+            vec![line("Coffee", -3.5, day, "coffee")],
+        );
+
+        let first = save(&pool, vec![statement.clone()]);
+        let outcome = import(&pool, &first[0].statement_id, empty_request());
+        assert_eq!(outcome.created, 1);
+        assert_eq!(
+            line_states(&pool, &first[0].statement_id),
+            vec![("imported".to_string(), None)],
+        );
+
+        let again = save(&pool, vec![statement]);
+        assert!(
+            again[0].skipped_reason.is_some(),
+            "an imported entry is the user's own decision and settles the statement"
+        );
+        assert_eq!(again[0].inserted_lines, 0);
+        assert_eq!(
+            line_states(&pool, &first[0].statement_id),
+            vec![("imported".to_string(), None)],
+        );
+    }
+
+    /// The feed re-syncs on demand and its payload covers every month at
+    /// once, so an unchanged payload must leave every month alone. A month
+    /// waiting for review holds a pending entry, and a month already reviewed
+    /// holds an imported one: both settle it.
+    #[test]
+    fn an_unchanged_feed_month_is_a_no_op() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let month = feed_draft(
+            "2026-10",
+            "payload-hash",
+            "acct-1",
+            vec![line("Dividend", 12.0, day, "dividend")],
+        );
+
+        let first = save(&pool, vec![month.clone()]);
+        assert_eq!(first[0].inserted_lines, 1);
+
+        let again = save(&pool, vec![month]);
+        assert!(
+            again[0].skipped_reason.is_some(),
+            "an unchanged feed month is already ingested"
+        );
+        assert_eq!(again[0].inserted_lines, 0);
+        assert_eq!(again[0].pending_lines, 1);
+    }
+
+    /// The cost of the literal rule, kept visible: a month whose entries are
+    /// all informational -- a month of trades and nothing else -- holds no
+    /// entry the user can act on, so it is read again on every sync. Nothing
+    /// is lost (the entries come back with the same ids), but the statement is
+    /// touched.
+    #[test]
+    fn an_informational_only_feed_month_is_read_again() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let month = feed_draft(
+            "2026-10",
+            "payload-hash",
+            "acct-1",
+            vec![trade_line("Bought 7 VOO", day, "vovo")],
+        );
+
+        let first = save(&pool, vec![month.clone()]);
+        assert_eq!(
+            first[0].inserted_lines, 0,
+            "a trade is not an importable line"
+        );
+        assert_eq!(
+            line_states(&pool, &first[0].statement_id),
+            vec![("informational".to_string(), None)],
+        );
+
+        let again = save(&pool, vec![month]);
+        assert!(
+            again[0].skipped_reason.is_none(),
+            "no entry the user can act on means the month is read again"
+        );
+        assert_eq!(
+            line_states(&pool, &first[0].statement_id),
+            vec![("informational".to_string(), None)],
+            "and it comes back the same"
         );
     }
 

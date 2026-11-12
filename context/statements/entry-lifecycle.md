@@ -56,8 +56,8 @@ file's bytes:
 
 | Branch | When | Effect |
 |---|---|---|
-| no-op | same `source_key`, same `source_hash`, statement not deleted | reports `skipped_reason = "already ingested"`; nothing is re-read |
-| re-read | same `source_key`, different bytes, or the statement was deleted | header updated, every **derived** line deleted, the fresh lines inserted and their verdicts recomputed |
+| no-op | same `source_key`, same `source_hash`, statement not deleted, and it still holds a `pending`/`imported`/`skipped` entry | reports `skipped_reason = "already ingested"`; nothing is re-read |
+| re-read | same `source_key` with different bytes, or the statement was deleted, or it holds no entry the user can act on | header updated, every **derived** line deleted, the fresh lines inserted and their verdicts recomputed |
 | new | no such statement | statement inserted, lines staged |
 
 The re-read branch deletes `pending`, `informational`, `duplicate` and `error`
@@ -66,20 +66,42 @@ insert: `bank_statement_lines` is unique on `(statement_id, fingerprint)`, so a
 surviving line would make the re-insert a no-op and keep its stale verdict
 forever.
 
+### Where the bytes live in the key
+
+The file sources put the file's hash in the `source_key` —
+`credit_agricole:<account>:<hash>`, `firstrade:<account>:<hash>`,
+`trading212:csv:<account>:<hash>`. So for a file, the same `source_key` means
+the same bytes, and re-dropping a file always takes the no-op or the re-read
+branch — never the "new statement" branch.
+
+The T212 **feed** is the exception: its key is the month bucket
+(`trading212:<account>:<month>`) and its hash covers the whole payload, so
+every month of one fetch shares that hash. A feed sync whose payload changed
+therefore re-reads every month, and one whose payload did not changes nothing.
+
+### When a statement is read again
+
+The no-op is a statement-level decision, so it is all-or-nothing: a statement
+that holds one `pending` entry is a no-op as a whole, and its `duplicate`
+entries are not recomputed. Only a statement with nothing the user can act on
+is read again.
+
 ```mermaid
 flowchart TD
     A[File dropped] --> B{source_key known?}
-    B -- same bytes, statement live --> C[No-op: "already ingested"]
-    B -- same bytes, statement deleted --> D[Re-read]
-    B -- different bytes --> D
-    B -- never seen --> E[New statement]
-    D --> F[Delete derived lines: pending, informational, duplicate, error]
-    F --> G[Keep imported and skipped]
-    G --> H[Insert the fresh lines]
-    E --> H
-    H --> I{Another live statement holds the dedupe_key?}
-    I -- yes --> J[Status duplicate, duplicate_of set]
-    I -- no --> K[Status pending]
+    B -- same bytes, statement live --> C{Still an entry to act on?}
+    C -- pending, imported or skipped --> D[No-op: "already ingested"]
+    C -- nothing --> E[Re-read]
+    B -- same bytes, statement deleted --> E
+    B -- different bytes --> E
+    B -- never seen --> F[New statement]
+    E --> G[Delete derived lines: pending, informational, duplicate, error]
+    G --> H[Keep imported and skipped]
+    H --> I[Insert the fresh lines]
+    F --> I
+    I --> J{Another live statement holds the dedupe_key?}
+    J -- yes --> K[Status duplicate, duplicate_of set]
+    J -- no --> L[Status pending]
 ```
 
 ## Transfer matches
@@ -93,17 +115,19 @@ from the fresh lines rather than restored.
 
 Tracked in `context/plans/finance-model.md`:
 
-- **Unchanged bytes never re-read (plan T3).** The no-op branch returns before
-  any line is looked at, so a statement whose entries are all `duplicate` stays
-  that way when the same file is dropped again. The re-read is correct; nothing
-  triggers it yet.
-- **Rows already stored as `duplicate` are not repaired (plan T6).** A line that
-  a since-discarded statement claimed keeps its verdict until migration v12
-  runs.
 - **An all-duplicate file moves to `parsed/` (plan T4).** `collect_file_states`
   counts a file as settled when no line is `pending` or `error`, and a
   `duplicate` line is neither, so the file looks imported although nothing was
   imported.
+- **Rows already stored as `duplicate` are not repaired (plan T6).** A line that
+  a since-discarded statement claimed keeps its verdict until migration v12
+  runs.
+- **The no-op is all-or-nothing (accepted).** A statement holding one `pending`
+  entry and one stale `duplicate` entry is a no-op, so the stale duplicate
+  survives. Only an all-duplicate statement is read again.
+- **An informational-only feed month is touched on every sync (accepted).** It
+  holds no entry the user can act on, so it is read again. Nothing is lost — the
+  entries come back with the same ids — but the statement's `updated_at` moves.
 
 ## Where the code lives
 

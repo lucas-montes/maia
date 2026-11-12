@@ -28,7 +28,12 @@ struct Counts {
 /// Stage one statement and its lines.
 ///
 /// Rules that make re-runs safe:
-/// - The same `source_key` and `source_hash` is a no-op.
+/// - The same `source_key` and `source_hash` is a no-op, as long as the
+///   statement still holds an entry the user can act on (`pending`) or has
+///   acted on (`imported`, `skipped`). One whose entries are all derived has
+///   nothing to act on, and its verdicts may be stale -- another statement can
+///   have been discarded since, which releases the claim its duplicates rest
+///   on -- so it is read again.
 /// - The same `source_key` with different bytes (a feed re-sync) updates the
 ///   header and replaces every derived line (`pending`, `informational`,
 ///   `duplicate`, `error`); imported and skipped lines survive, because those
@@ -51,12 +56,20 @@ pub fn save_statement(tx: &Transaction<'_>, draft: StatementDraft) -> anyhow::Re
         )
         .optional()?;
 
+    // Whether the same bytes again changes nothing. It does not, as long as
+    // the statement still holds an entry the user can act on or has acted on.
+    // The file sources put the bytes in the `source_key`, so this is the only
+    // way a live statement is ever read again -- and it has to be, because a
+    // duplicate verdict rests on another statement still being alive.
+    let already_ingested = match &existing {
+        Some((id, hash, false)) if hash == &draft.source_hash => has_user_entry(tx, id)?,
+        _ => false,
+    };
+
     let (statement_id, skipped_reason) = match existing {
-        // A deleted statement is not a no-op: dropping the file again is how a
-        // user recovers one they dismissed by mistake. The row is revived below
-        // rather than re-inserted, because `(source, source_key)` is unique and
-        // the feed buckets must keep one row per month.
-        Some((id, hash, false)) if hash == draft.source_hash => {
+        // The same bytes for a statement the user still has something to do
+        // with: leave it alone.
+        Some((id, _, _)) if already_ingested => {
             let counts = counts(tx, &id)?;
             return Ok(SaveOutcome {
                 statement_id: id,
@@ -71,7 +84,14 @@ pub fn save_statement(tx: &Transaction<'_>, draft: StatementDraft) -> anyhow::Re
                 skipped_reason: Some("already ingested".to_string()),
             });
         }
+        // The same bytes but nothing left to act on, different bytes, or a
+        // statement that was discarded: read it again.
         Some((id, _, _)) => {
+            // A deleted statement is not a no-op: dropping the file again is
+            // how a user recovers one they dismissed by mistake. The row is
+            // revived here rather than re-inserted, because
+            // `(source, source_key)` is unique and the feed buckets must keep
+            // one row per month.
             tx.execute(
                 "UPDATE bank_statements SET
                     institution=?1, account_name=?2, account_number=?3,
@@ -255,6 +275,24 @@ pub fn save_statement(tx: &Transaction<'_>, draft: StatementDraft) -> anyhow::Re
         warnings: draft.warnings,
         skipped_reason,
     })
+}
+
+/// Whether the statement still holds an entry the user can act on or has
+/// acted on.
+///
+/// `imported` and `skipped` are the user's own decisions and `pending` is work
+/// they have not done yet. A statement with none of them holds only derived
+/// entries, and those can be stale without the file changing: a `duplicate`
+/// rests on another statement still being alive, and that statement can have
+/// been discarded since.
+fn has_user_entry(tx: &Transaction<'_>, statement_id: &str) -> anyhow::Result<bool> {
+    let count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM bank_statement_lines
+         WHERE statement_id=?1 AND status IN ('pending','imported','skipped')",
+        params![statement_id],
+        |r| r.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 fn counts(tx: &Transaction<'_>, statement_id: &str) -> anyhow::Result<Counts> {

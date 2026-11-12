@@ -68,8 +68,13 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Boundaries: In — the re-stage `DELETE` in `src/statements/store.rs` and its doc comment. Out — the "already ingested" no-op (T3), `collect_file_states` (T4), `error` lines being selectable (T5), the v12 repair migration (T6).
   - Note: `imported`/`skipped` lines are never deleted, so user decisions survive. `transfer_matches` cascades on the line delete and `match_pending` runs right after the batch (`statements/mod.rs`), so matches rebuild themselves.
 
-- [ ] T3 "Already ingested" no-op only when the statement has a pending/imported/skipped entry;
-      otherwise re-read. Must stay a no-op for unchanged T212 feed months.
+- [x] T3 "Already ingested" no-op only when the statement has a pending/imported/skipped entry;
+      otherwise re-read. Must stay a no-op for unchanged T212 feed months. (status:done)
+  - Completed: 2026-11-12
+  - Goal: let a live statement be read again even when its bytes are unchanged, so a stale derived verdict can be recomputed.
+  - Boundaries: In — the no-op condition in `save_statement` and its doc comment. Out — `collect_file_states` (T4), `error` entries being selectable (T5), the v12 repair migration (T6), schema, UI.
+  - Note: the file sources put the bytes in the `source_key`, so for a file "same `source_key`" means "same bytes" and the no-op is the only path a re-dropped file takes. The T212 feed is the exception: its key is the month bucket and the hash covers the whole payload.
+  - Note: the predicate is the plan's literal list. See the deviations below for what that costs.
 - [ ] T4 `collect_file_states` (`watch.rs`): a file is imported only when every entry is
       imported/skipped.
 - [ ] T5 `error` entries are selectable and counted (`statementReview.ts`, `handlers/statements.rs:61`).
@@ -116,6 +121,15 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   the human approved the combined session. Each is still a separate, independently tested change.
 - **T1 alone does not repair rows already stored as `duplicate`.** A line that a discarded statement
   claimed before this change keeps its verdict until migration v12 (T6) runs.
+- **T3 uses the plan's literal predicate, not a stronger one.** The plan names `pending`,
+  `imported` and `skipped`; a stronger rule ("re-read whenever a `duplicate` verdict could be
+  stale") was considered and declined by the human. Two consequences follow, both deliberate:
+  - A statement holding *both* a `pending` entry and a stale `duplicate` entry stays a no-op, so
+    the stale duplicate survives. Only an all-duplicate statement is read again.
+  - A T212 feed month whose entries are all informational — a month of trades and nothing else —
+    holds no entry the user can act on, so it is read again on every sync. Nothing is lost (the
+    entries come back with the same ids), but the statement is touched. A feed month with pending
+    or imported entries stays a no-op, which is the constraint the plan states.
 
 ## Evidence (T1 + T2, 2026-11-12)
 - `cargo test`: 229 passed, 0 failed, 1 ignored. The four new tests in `src/lib.rs::statement_tests`
@@ -135,9 +149,10 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   this change.
 
 ## Remaining for Stage 1
-- **T3 is now the blocking task.** Re-dropping a file whose bytes are *unchanged* still hits the
-  "already ingested" no-op, which returns before any line is re-read. A statement that is live and
-  whose lines are all `duplicate` therefore stays that way until T3 lets it re-read. T1 and T2 make
-  the re-read correct; T3 is what makes the re-read happen.
+- **T4 is the next task.** `collect_file_states` counts a file as settled when no line is `pending`
+  or `error`, and a `duplicate` line is neither, so an all-duplicate file still walks into
+  `parsed/` although nothing was imported.
 - T6 (migration v12) is still needed for the live database, which carries rows already marked
   `duplicate` by a statement that was discarded by hand on 2026-11-11.
+- T5 (an `error` entry is selectable and counted) and T7 (the review explains an empty state) are
+  independent of the above.
