@@ -111,14 +111,32 @@ deleting a derived line removes the match that used it. `match_pending` runs
 right after a staging batch (`src/statements/mod.rs`), so matches are rebuilt
 from the fresh lines rather than restored.
 
+## Where a file sits
+
+`reconcile_files` derives each file's root from the state of its statements
+rather than remembering it, and moves the file to match:
+
+| statements for that `stored_path`          | root          |
+|---------------------------------------------|---------------|
+| any live statement with an unsettled entry | `staged/`     |
+| every live statement imported/skipped      | `parsed/`     |
+| every statement soft-deleted or ignored    | `discarded/`  |
+
+"settled" means every entry is `imported` or `skipped`. The test is the
+complement (`status NOT IN ('imported','skipped')`), so it stays correct as
+statuses are added. A `pending` entry is work the user has not done; an
+`error` is an import that failed; a `duplicate` is an entry another statement
+still claims, which the user may yet release; an `informational` entry is one
+the review never offers for import. None of them is an import, so none of them
+lets the file reach `parsed/`.
+
+The placement is derived, so it moves in both directions: a file that gains an
+unsettled entry walks back to `staged/` on the next pass.
+
 ## Known gaps
 
 Tracked in `context/plans/finance-model.md`:
 
-- **An all-duplicate file moves to `parsed/` (plan T4).** `collect_file_states`
-  counts a file as settled when no line is `pending` or `error`, and a
-  `duplicate` line is neither, so the file looks imported although nothing was
-  imported.
 - **Rows already stored as `duplicate` are not repaired (plan T6).** A line that
   a since-discarded statement claimed keeps its verdict until migration v12
   runs.
@@ -128,6 +146,9 @@ Tracked in `context/plans/finance-model.md`:
 - **An informational-only feed month is touched on every sync (accepted).** It
   holds no entry the user can act on, so it is read again. Nothing is lost — the
   entries come back with the same ids — but the statement's `updated_at` moves.
+- **A file with informational entries waits in `staged/` (accepted).** The
+  review offers no way to act on a trade, so such a file has no user action
+  available until trades become movable.
 
 ## Where the code lives
 

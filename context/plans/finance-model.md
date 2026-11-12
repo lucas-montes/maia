@@ -75,8 +75,12 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Boundaries: In — the no-op condition in `save_statement` and its doc comment. Out — `collect_file_states` (T4), `error` entries being selectable (T5), the v12 repair migration (T6), schema, UI.
   - Note: the file sources put the bytes in the `source_key`, so for a file "same `source_key`" means "same bytes" and the no-op is the only path a re-dropped file takes. The T212 feed is the exception: its key is the month bucket and the hash covers the whole payload.
   - Note: the predicate is the plan's literal list. See the deviations below for what that costs.
-- [ ] T4 `collect_file_states` (`watch.rs`): a file is imported only when every entry is
-      imported/skipped.
+- [x] T4 `collect_file_states` (`watch.rs`): a file is imported only when every entry is
+      imported/skipped. (status:done)
+  - Completed: 2026-11-12
+  - Goal: `parsed/` means imported, so a file whose entries are all duplicates (or hold anything else that is not imported or skipped) waits in `staged/`.
+  - Boundaries: In — the "unsettled" test in `collect_file_states` and the two doc comments that state the rule. Out — `error` entries being selectable (T5), the v12 repair migration (T6), the review's empty state (T7), schema, UI.
+  - Note: the test is the complement of the rule (`status NOT IN ('imported','skipped')`), so it stays correct as statuses are added. The placement is derived, so a file that gains an unsettled entry walks back to `staged/` on the next pass.
 - [ ] T5 `error` entries are selectable and counted (`statementReview.ts`, `handlers/statements.rs:61`).
 - [ ] T6 Migration v12: `duplicate` entries whose `duplicate_of` is in a discarded statement →
       `pending`, clear `duplicate_of`.
@@ -130,6 +134,13 @@ Chosen: book the **cash leg as a fact** and derive everything else.
     holds no entry the user can act on, so it is read again on every sync. Nothing is lost (the
     entries come back with the same ids), but the statement is touched. A feed month with pending
     or imported entries stays a no-op, which is the constraint the plan states.
+- **T4 reads "every entry is imported or skipped" literally, so `informational` holds a file in
+  `staged/`.** A weaker rule (`pending`/`error`/`duplicate` pin the file, `informational` does not)
+  was considered and declined by the human. Consequences: the Firstrade file (51 income + 15
+  trades) stays in `staged/` until Stage 3 turns trades into movements, and a file whose entries
+  are all trades waits in `staged/` with nothing the review offers to select. The rule is now
+  written as the complement (`status NOT IN ('imported','skipped')`), so it stays correct as
+  statuses are added.
 
 ## Evidence (T1 + T2, 2026-11-12)
 - `cargo test`: 229 passed, 0 failed, 1 ignored. The four new tests in `src/lib.rs::statement_tests`
@@ -149,10 +160,9 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   this change.
 
 ## Remaining for Stage 1
-- **T4 is the next task.** `collect_file_states` counts a file as settled when no line is `pending`
-  or `error`, and a `duplicate` line is neither, so an all-duplicate file still walks into
-  `parsed/` although nothing was imported.
-- T6 (migration v12) is still needed for the live database, which carries rows already marked
-  `duplicate` by a statement that was discarded by hand on 2026-11-11.
-- T5 (an `error` entry is selectable and counted) and T7 (the review explains an empty state) are
-  independent of the above.
+- **T5, T6 and T7 are left.** T5 makes an `error` entry selectable and counted (the review cannot
+  currently act on it); T6 (migration v12) repairs the rows the live database still carries as
+  `duplicate` after the hand-discarded statement of 2026-11-11; T7 explains the empty state in the
+  review when every entry duplicates another file.
+- **T8** (the Firstrade parser warns on an unreadable date row instead of skipping it silently)
+  is independent of the rest.

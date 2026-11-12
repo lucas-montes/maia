@@ -547,11 +547,11 @@ pub fn drain_intake(state: &AppState) -> usize {
 /// which this project already uses for filesystem state that is a projection
 /// of the database. A file's root follows from the state of its statements:
 ///
-/// | statements for that `stored_path`      | root          |
-/// |----------------------------------------|---------------|
-/// | any live statement with pending lines  | `staged/`     |
-/// | every live statement imported/skipped  | `parsed/`     |
-/// | every statement soft-deleted or ignored| `discarded/`  |
+/// | statements for that `stored_path`          | root          |
+/// |---------------------------------------------|---------------|
+/// | any live statement with an unsettled entry | `staged/`     |
+/// | every live statement imported/skipped      | `parsed/`     |
+/// | every statement soft-deleted or ignored    | `discarded/`  |
 ///
 /// Because it derives rather than remembers, it migrates files mislabelled by
 /// the old "parsed means did not crash" rule on first boot for free, and
@@ -604,10 +604,16 @@ pub fn reconcile_files(state: &AppState) {
 ///
 /// One row per distinct `stored_path`. The aggregate is what decides: a file
 /// moves on only when *every* live statement it produced is settled, and
-/// "settled" means every line is imported or skipped. A line left in `error`
-/// — a missing FX rate is the usual one — is neither, so its file stays in
-/// `staged/`: `parsed/` means imported, and a file whose entries all failed to
-/// import is the furthest thing from that.
+/// "settled" means every entry is imported or skipped.
+///
+/// Anything else holds the file in `staged/`, because `parsed/` means
+/// imported and nothing else. A `pending` entry is work the user has not done
+/// yet. An `error` is an import that failed — a missing FX rate is the usual
+/// one — so the file is the furthest thing from imported. A `duplicate` is an
+/// entry another statement still claims, which the user may yet release, and a
+/// file whose entries are all duplicates has nothing to import at all. An
+/// `informational` entry is one the review never offers for import, so it
+/// never becomes imported either.
 ///
 /// An `ignored` statement counts as gone rather than live. The user said "not
 /// this" without deleting it, and it leaves its lines `pending`; counting it
@@ -620,8 +626,8 @@ fn collect_file_states(state: &AppState) -> anyhow::Result<Vec<(String, String, 
                 SUM(s.deleted_at IS NULL AND s.status <> 'ignored') AS live,
                 SUM(s.deleted_at IS NULL AND s.status <> 'ignored' AND EXISTS (
                     SELECT 1 FROM bank_statement_lines l
-                    WHERE l.statement_id = s.id AND l.status IN ('pending','error')
-                )) AS pending
+                    WHERE l.statement_id = s.id AND l.status NOT IN ('imported','skipped')
+                )) AS unsettled
          FROM bank_statements s
          WHERE s.stored_path IS NOT NULL AND s.stored_path <> ''
            AND s.status <> 'error'
@@ -632,10 +638,10 @@ fn collect_file_states(state: &AppState) -> anyhow::Result<Vec<(String, String, 
             let stored_path: String = r.get(0)?;
             let source: String = r.get(1)?;
             let live: i64 = r.get(2)?;
-            let pending: i64 = r.get(3)?;
+            let unsettled: i64 = r.get(3)?;
             let destination = if live == 0 {
                 Destination::Discarded
-            } else if pending > 0 {
+            } else if unsettled > 0 {
                 Destination::Staged
             } else {
                 Destination::Parsed
@@ -1109,6 +1115,59 @@ mod tests {
         assert!(
             file_names(&lifecycle.parsed).is_empty(),
             "nothing was imported, so parsed/ would be a lie"
+        );
+    }
+
+    /// A duplicate is neither imported nor skipped: it is an entry another
+    /// statement still claims, and the user may yet release that claim. A file
+    /// whose entries are all duplicates has nothing to import, so it must not
+    /// be filed under `parsed/` as if it had been.
+    #[test]
+    fn a_file_whose_entries_all_duplicate_stays_staged() {
+        let tmp = TempDir::new("reconcile-duplicates");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+        staged_file(
+            &state,
+            &lifecycle.staged,
+            "firstrade.csv",
+            "s1",
+            false,
+            &["duplicate", "duplicate"],
+        );
+
+        reconcile_files(&state);
+
+        assert_eq!(file_names(&lifecycle.staged), ["firstrade.csv"]);
+        assert!(
+            file_names(&lifecycle.parsed).is_empty(),
+            "a duplicate is not an import: parsed/ would be a lie"
+        );
+    }
+
+    /// A trade is informational: the review never offers it for import, so it
+    /// never becomes imported. The file has not been fully dealt with, so it
+    /// waits in `staged/` rather than claiming to have been parsed.
+    #[test]
+    fn an_informational_entry_holds_its_file_in_staged() {
+        let tmp = TempDir::new("reconcile-informational");
+        let lifecycle = tmp.statements();
+        let state = lifecycle.state(crate::db::init_memory().unwrap());
+        staged_file(
+            &state,
+            &lifecycle.staged,
+            "firstrade.csv",
+            "s1",
+            false,
+            &["imported", "informational"],
+        );
+
+        reconcile_files(&state);
+
+        assert_eq!(file_names(&lifecycle.staged), ["firstrade.csv"]);
+        assert!(
+            file_names(&lifecycle.parsed).is_empty(),
+            "every entry must be imported or skipped before parsed/ means anything"
         );
     }
 
