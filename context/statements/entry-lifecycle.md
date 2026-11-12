@@ -49,6 +49,12 @@ This is the only duplicate lookup in the codebase. `describe_duplicates` in
 `src/statements/preview.rs` reads already-stored `duplicate_of` links and
 performs no lookup of its own.
 
+**Migration v12** repairs the rows that predate this rule: an entry marked
+`duplicate` whose claimer has since been discarded (or ignored) goes back to
+`pending`, with the claim cleared, and the statement that held it is
+refreshed — a badge that says "imported" would hide it from the review's
+"awaiting" filter.
+
 ## Staging and re-reading
 
 `save_statement` has three branches, keyed on `(source, source_key)` and the
@@ -158,9 +164,6 @@ unsettled entry walks back to `staged/` on the next pass.
 
 Tracked in `context/plans/finance-model.md`:
 
-- **Rows already stored as `duplicate` are not repaired (plan T6).** A line that
-  a since-discarded statement claimed keeps its verdict until migration v12
-  runs.
 - **The no-op is all-or-nothing (accepted).** A statement holding one `pending`
   entry and one stale `duplicate` entry is a no-op, so the stale duplicate
   survives. Only an all-duplicate statement is read again.

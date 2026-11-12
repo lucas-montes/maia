@@ -199,13 +199,23 @@ pub const MIGRATIONS: &[(i64, Step)] = &[
             );",
         ),
     ),
+    // A `duplicate` entry means another statement holds the same content. The
+    // lookup that marks one only honours a live statement, but an entry marked
+    // that way keeps the verdict it was given — so an entry whose claimer was
+    // since discarded stays unimportable for good. This releases those
+    // entries: they go back to `pending`, with the claim cleared, and the
+    // statements that held them are refreshed.
+    (
+        12,
+        Step::Guarded(crate::statements::store::release_stale_duplicates),
+    ),
 ];
 
 /// Highest version in `MIGRATIONS`.
 ///
 /// A database newer than this means the data is newer than the binary, which is
 /// what a Nix rollback looks like. `migrate` refuses rather than serving.
-pub const LATEST_VERSION: i64 = 11;
+pub const LATEST_VERSION: i64 = 12;
 
 /// The v1 schema, exactly as it shipped.
 ///
@@ -1146,6 +1156,16 @@ mod tests {
         conn
     }
 
+    /// The version just below the latest, whose snapshot always survives.
+    ///
+    /// A migration from scratch takes the snapshots `v0`..`v(LATEST-1)`, and
+    /// the rotation keeps the newest ones, so the snapshot of this version is
+    /// there whatever the version number grows to. A test that hard-codes `v1`
+    /// stops working the moment there are more versions than snapshots kept.
+    fn latest_below() -> i64 {
+        super::LATEST_VERSION - 1
+    }
+
     /// v6 adds the recipe's final weight after cooking, nullable so legacy
     /// recipes keep resolving against their raw component sum.
     #[test]
@@ -1241,6 +1261,96 @@ mod tests {
         super::migrate(&conn).unwrap();
         super::migrate(&conn).unwrap();
         assert_eq!(super::user_version(&conn).unwrap(), super::LATEST_VERSION);
+    }
+
+    /// v12 releases the entries a dead statement was holding.
+    ///
+    /// A `duplicate` means another statement holds the same content, and only
+    /// a live statement may hold it: a discarded or ignored one claims
+    /// nothing. The entries marked that way kept the verdict they were given,
+    /// so an entry whose claimer had since been discarded stayed unimportable
+    /// for good.
+    #[test]
+    fn migration_v12_releases_the_entries_a_dead_statement_was_holding() {
+        let pool = init_memory().unwrap();
+        let conn = pool.get().unwrap();
+        super::migrate(&conn).unwrap();
+
+        for (id, deleted_at, status) in [
+            ("gone", Some(99i64), "staged"),
+            ("ignored", None, "ignored"),
+            ("other", None, "staged"),
+            ("live", None, "imported"),
+        ] {
+            conn.execute(
+                "INSERT INTO bank_statements
+                    (id, source, institution, account_name, currency_code, source_hash,
+                     source_key, status, created_at, updated_at, deleted_at)
+                 VALUES (?1, 'credit_agricole', 'CA', 'Account', 'EUR', ?1, ?1, ?2, 1, 1, ?3)",
+                params![id, status, deleted_at],
+            )
+            .unwrap();
+        }
+        // The lines the other statements hold, and the copies of them that
+        // were marked as duplicates of those.
+        for (id, statement, status, duplicate_of) in [
+            ("l1", "gone", "pending", None),
+            ("l2", "ignored", "pending", None),
+            ("l3", "other", "pending", None),
+            ("l4", "live", "imported", None),
+            ("l5", "live", "duplicate", Some("l1")),
+            ("l6", "live", "duplicate", Some("l2")),
+            ("l7", "live", "duplicate", Some("l3")),
+        ] {
+            conn.execute(
+                "INSERT INTO bank_statement_lines
+                    (id, statement_id, posted_at, description, amount, currency_code,
+                     line_kind, fingerprint, dedupe_key, duplicate_of, status,
+                     created_at, updated_at)
+                 VALUES (?1, ?2, 1, 'x', -1.0, 'EUR', 'debit', ?1, ?1, ?3, ?4, 1, 1)",
+                params![id, statement, duplicate_of, status],
+            )
+            .unwrap();
+        }
+
+        // Run only v12 against the already-created schema.
+        super::set_user_version(&conn, super::LATEST_VERSION - 1).unwrap();
+        super::migrate(&conn).unwrap();
+
+        let state = |id: &str| -> (String, Option<String>) {
+            conn.query_row(
+                "SELECT status, duplicate_of FROM bank_statement_lines WHERE id=?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            state("l5"),
+            ("pending".to_string(), None),
+            "the claim of a discarded statement is released"
+        );
+        assert_eq!(
+            state("l6"),
+            ("pending".to_string(), None),
+            "the claim of an ignored statement is released"
+        );
+        assert_eq!(
+            state("l7"),
+            ("duplicate".to_string(), Some("l3".to_string())),
+            "a live statement still holds its claim"
+        );
+
+        // The statement that held them stops saying "imported" once it has
+        // entries waiting again.
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM bank_statements WHERE id='live'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "partial");
     }
 
     /// A pre-versioning database (`user_version` 0, older table set) is brought
@@ -1456,17 +1566,18 @@ mod tests {
             [],
         )
         .unwrap();
-        super::set_user_version(&conn, 1).unwrap();
+        let from = latest_below();
+        super::set_user_version(&conn, from).unwrap();
 
         super::migrate(&conn).unwrap();
 
-        let taken = dir.join("snapshots").join("maia.v1.db");
+        let taken = dir.join("snapshots").join(format!("maia.v{from}.db"));
         let first = fs::read(&taken).unwrap();
         let modified_at = fs::metadata(&taken).unwrap().modified().unwrap();
 
         // Run the same migration again against a stale version stamp. Used to fail
         // with SQLITE_ERROR "output file already exists".
-        super::set_user_version(&conn, 1).unwrap();
+        super::set_user_version(&conn, from).unwrap();
         super::migrate(&conn).expect("re-migrating must not fail");
 
         assert_eq!(
@@ -1495,11 +1606,12 @@ mod tests {
             [],
         )
         .unwrap();
-        super::set_user_version(&conn, 1).unwrap();
+        let from = latest_below();
+        super::set_user_version(&conn, from).unwrap();
 
         let snapshots = dir.join("snapshots");
         fs::create_dir_all(&snapshots).unwrap();
-        let taken = snapshots.join("maia.v1.db");
+        let taken = snapshots.join(format!("maia.v{from}.db"));
         // Not a database: garbage rather than a truncated SQLite header.
         fs::write(&taken, b"SQLite format 3 truncated mid-write").unwrap();
         assert!(!super::is_readable_database(&taken));
@@ -1544,10 +1656,11 @@ mod tests {
         let db_path = dir.join("maia.db");
         let conn = Connection::open(&db_path).unwrap();
         super::migrate(&conn).unwrap();
-        // Leave v1 pending and its snapshot absent, so every runner tries to take
-        // the same one.
-        super::set_user_version(&conn, 1).unwrap();
-        fs::remove_file(dir.join("snapshots").join("maia.v1.db")).unwrap();
+        // Leave one version pending and its snapshot absent, so every runner
+        // tries to take the same one.
+        let from = latest_below();
+        super::set_user_version(&conn, from).unwrap();
+        fs::remove_file(dir.join("snapshots").join(format!("maia.v{from}.db"))).unwrap();
 
         const RUNNERS: usize = 6;
         let barrier = Arc::new(Barrier::new(RUNNERS));
@@ -1571,7 +1684,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("a concurrent runner failed: {e:#}"));
         }
 
-        let taken = dir.join("snapshots").join("maia.v1.db");
+        let taken = dir.join("snapshots").join(format!("maia.v{from}.db"));
         assert!(
             super::is_readable_database(&taken),
             "no usable snapshot was installed"

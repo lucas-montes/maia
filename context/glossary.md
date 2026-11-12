@@ -11,7 +11,7 @@
 | **Knowledge Base** | System for storing notes, bookmarks, and links with similarity search (not yet implemented) |
 | **Native Messaging Host** | Chrome extension companion binary that receives browser events and saves them locally |
 | **Saved URL** | A link captured from the Chrome tool or added manually, stored as a DB-only record with title, URL, source, tags, and is_new flag. No snapshot files or note/goal linking — opened externally via `tauri-plugin-opener`. |
-| **Sync Server** | Crate `sync-server` (Axum+rusqlite+tokio) implementing FitFat OpenAPI on deterministic `0.0.0.0:3030`; runs as the `maia` NixOS service as its own process. The desktop app is a client of it. Schema versioned by `PRAGMA user_version` (v3), history in `MIGRATIONS` in `db.rs` |
+| **Sync Server** | The root `maia` crate (Axum+rusqlite+tokio) implementing FitFat OpenAPI on deterministic `0.0.0.0:3030`; runs as the `maia` NixOS service as its own process. The desktop app is a client of it. Schema versioned by `PRAGMA user_version` (v12), history in `MIGRATIONS` in `src/db.rs` |
 | **SyncAck** | Push response `{server_time}` (OpenAPI `SyncAck`); client ignores body, `204` also accepted |
 | **server_time** | Epoch-ms cursor returned by every Pull (`server_time`); persisted as next `since` per resource |
 | **since cursor** | Epoch-ms query param `?since=<ms>`; server returns only rows where `updated_at > since` and `deleted_at > since` for `deleted[]` |

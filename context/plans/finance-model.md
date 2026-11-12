@@ -88,8 +88,14 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Note: the server already accepted an `error` line for import — `import_statement` short-circuits only `imported`/`informational`/`duplicate` — so the work was in the review, which offered it no checkbox.
   - Note: a failed **transfer pair** is one thing that failed, so the rule in `store.rs` that decides whether a counterpart can still be paired now accepts `error` as well as `pending`. Without it a retry booked the pair as two separate entries and dismissed the match, and money between two of the user's own accounts read as an expense and an income.
 
-- [ ] T6 Migration v12: `duplicate` entries whose `duplicate_of` is in a discarded statement →
-      `pending`, clear `duplicate_of`.
+- [x] T6 Migration v12: `duplicate` entries whose `duplicate_of` is in a discarded statement →
+      `pending`, clear `duplicate_of`. (status:done)
+  - Completed: 2026-11-13
+  - Goal: release the entries a dead statement was holding, so the live database stops carrying verdicts the code no longer agrees with.
+  - Boundaries: In — migration v12 (`src/db.rs`), the rule in `src/statements/store.rs`, and the shared `refresh_statement_status` signature. Out — T7, T8, any schema beyond the version bump.
+  - Note: the migration refreshes the statements that held the released entries, so one whose badge said "imported" does not keep saying it — the review's "awaiting" filter would otherwise hide it.
+  - Note: it releases the claim of an **ignored** statement as well as a discarded one, because the rule the lookup follows is that only a *live* statement claims anything.
+  - Note: `LATEST_VERSION` went to 12, which is one version more than there are snapshots kept, so the three snapshot tests that hard-coded `v1` now use the version just below the latest instead.
 - [ ] T7 Review explains an empty state ("every entry duplicates another file — re-drop to re-read").
 - [ ] T8 Firstrade parser warns on an unreadable date row instead of `continue` (`firstrade.rs:273`);
       the statement records rows read / kept / skipped and the review shows it.
@@ -178,6 +184,14 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   without the counterpart rule (the retry books an `expense` instead of a `transfer`).
 - `npx tsc --noEmit`: clean. `npx vitest run`: 42 passed (3 new). The two new selection tests fail
   against the previous `statementReview.ts`.
+
+### T6 (2026-11-13)
+- `cargo test`: 238 passed, 0 failed, 1 ignored.
+  `migration_v12_releases_the_entries_a_dead_statement_was_holding` fails when the migration is
+  neutered: the entry stays `duplicate` with its claim intact.
+- The three snapshot tests that used to name `v1` now name the version just below the latest; they
+  pass, and the snapshot file list a migration produces is unchanged.
+- `npx tsc --noEmit`: clean. `npx vitest run`: 42 passed.
 - `cargo clippy --all-targets`: no new warnings and no new errors. The 3 `clippy::erasing_op`
   errors in `src/finance_scenarios.rs` are pre-existing and untouched by this change.
 - `cargo build`: succeeds. The new code is rustfmt-clean; the repository is not (37 files have
@@ -186,7 +200,6 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   this change.
 
 ## Remaining for Stage 1
-- **T6, T7 and T8 are left.** T6 (migration v12) repairs the rows the live database still carries as
-  `duplicate` after the hand-discarded statement of 2026-11-11; T7 explains the empty state in the
-  review when every entry duplicates another file; T8 makes the Firstrade parser warn on an
-  unreadable date row instead of skipping it silently.
+- **T7 and T8 are left.** T7 explains the empty state in the review when every entry duplicates
+  another file ("re-drop to re-read"); T8 makes the Firstrade parser warn on an unreadable date row
+  instead of skipping it silently.

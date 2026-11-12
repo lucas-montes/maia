@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, bail};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -277,6 +277,48 @@ pub fn save_statement(tx: &Transaction<'_>, draft: StatementDraft) -> anyhow::Re
     })
 }
 
+/// Release the entries a dead statement was holding.
+///
+/// A `duplicate` means another statement holds the same content. The lookup
+/// that marks one only honours a live statement — a discarded or ignored
+/// statement claims nothing — but an entry marked that way keeps the verdict
+/// it was given, so an entry whose claimer has since been discarded stays
+/// unimportable for good. This releases those entries: they go back to
+/// `pending`, with the claim cleared, and the statements that held them are
+/// refreshed so one whose badge said "imported" stops saying it once it has
+/// entries waiting.
+pub fn release_stale_duplicates(conn: &Connection) -> anyhow::Result<()> {
+    let now = db::server_time_ms();
+    // Collected before the release: afterwards the released entries no longer
+    // say who was holding them.
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT l.statement_id FROM bank_statement_lines l
+         WHERE l.status='duplicate' AND l.duplicate_of IN (
+             SELECT c.id FROM bank_statement_lines c
+             JOIN bank_statements s ON s.id = c.statement_id
+             WHERE s.deleted_at IS NOT NULL OR s.status='ignored')",
+    )?;
+    let statements: Vec<String> = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    conn.execute(
+        "UPDATE bank_statement_lines
+         SET status='pending', duplicate_of=NULL, updated_at=?1
+         WHERE status='duplicate' AND duplicate_of IN (
+             SELECT c.id FROM bank_statement_lines c
+             JOIN bank_statements s ON s.id = c.statement_id
+             WHERE s.deleted_at IS NOT NULL OR s.status='ignored')",
+        params![now],
+    )?;
+
+    for id in &statements {
+        refresh_statement_status(conn, id, now)?;
+    }
+    Ok(())
+}
+
 /// Whether the statement still holds an entry the user can act on or has
 /// acted on.
 ///
@@ -285,8 +327,8 @@ pub fn save_statement(tx: &Transaction<'_>, draft: StatementDraft) -> anyhow::Re
 /// entries, and those can be stale without the file changing: a `duplicate`
 /// rests on another statement still being alive, and that statement can have
 /// been discarded since.
-fn has_user_entry(tx: &Transaction<'_>, statement_id: &str) -> anyhow::Result<bool> {
-    let count: i64 = tx.query_row(
+fn has_user_entry(conn: &Connection, statement_id: &str) -> anyhow::Result<bool> {
+    let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM bank_statement_lines
          WHERE statement_id=?1 AND status IN ('pending','imported','skipped')",
         params![statement_id],
@@ -295,9 +337,9 @@ fn has_user_entry(tx: &Transaction<'_>, statement_id: &str) -> anyhow::Result<bo
     Ok(count > 0)
 }
 
-fn counts(tx: &Transaction<'_>, statement_id: &str) -> anyhow::Result<Counts> {
+fn counts(conn: &Connection, statement_id: &str) -> anyhow::Result<Counts> {
     let mut counts = Counts::default();
-    let mut stmt = tx.prepare(
+    let mut stmt = conn.prepare(
         "SELECT status, COUNT(*) FROM bank_statement_lines
          WHERE statement_id=?1 GROUP BY status",
     )?;
@@ -320,12 +362,8 @@ fn counts(tx: &Transaction<'_>, statement_id: &str) -> anyhow::Result<Counts> {
     Ok(counts)
 }
 
-fn refresh_statement_status(
-    tx: &Transaction<'_>,
-    statement_id: &str,
-    now: i64,
-) -> anyhow::Result<()> {
-    let counts = counts(tx, statement_id)?;
+fn refresh_statement_status(conn: &Connection, statement_id: &str, now: i64) -> anyhow::Result<()> {
+    let counts = counts(conn, statement_id)?;
     let status = if counts.pending > 0 {
         if counts.imported > 0 || counts.skipped > 0 {
             "partial"
@@ -337,7 +375,7 @@ fn refresh_statement_status(
     } else {
         "staged"
     };
-    tx.execute(
+    conn.execute(
         "UPDATE bank_statements SET status=?1, updated_at=?2 WHERE id=?3",
         params![status, now, statement_id],
     )?;
