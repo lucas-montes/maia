@@ -146,14 +146,61 @@ pub async fn put_account_identity(
         }
     }
 
+    // A leaf's source must equal its root's: an account filed under Crédit
+    // Agricole cannot carry Firstrade's number, or the tree would say one thing
+    // and the identity another.
+    let (root_id, root_source, root_name): (Option<String>, Option<String>, Option<String>) = tx
+        .query_row(
+            "SELECT r.id, r.source, r.name FROM accounts a
+             LEFT JOIN account_roots r ON r.id = a.root_id
+             WHERE a.id=?1",
+            rusqlite::params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .unwrap_or((None, None, None));
+
     let now = db::server_time_ms();
+    let root_after: Option<String> = match identity.as_ref() {
+        Some((source, _)) => match (root_id.as_deref(), root_source.as_deref()) {
+            // No root yet: the account joins the root for this source, which
+            // is made if this is the first account of that institution. The
+            // tree stays complete this way.
+            (None, _) => Some(
+                crate::statements::store::resolve_root(&tx, source, now)
+                    .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+            ),
+            // The root already names a source, and it has to be the same one.
+            (Some(_), Some(root_source)) if root_source != *source => {
+                let under = root_name.as_deref().unwrap_or("another institution");
+                return Err(error(
+                    StatusCode::CONFLICT,
+                    format!("this account is under {under}, so it cannot carry a {source} number"),
+                ));
+            }
+            // A root with no source of its own cannot hold a leaf that has
+            // one: there would be no institution to file it under.
+            (Some(_), None) => {
+                return Err(error(
+                    StatusCode::CONFLICT,
+                    "this account is under a root with no source of its own, so it cannot carry a number",
+                ));
+            }
+            (Some(id), Some(_)) => Some(id.to_string()),
+        },
+        // Clearing the identity leaves the root alone: the account is still
+        // that institution's, it just has no provider number any more.
+        None => root_id,
+    };
+
     let (source, external_id) = match identity.as_ref() {
         Some((source, external_id)) => (Some(source.as_str()), Some(external_id.as_str())),
         None => (None, None),
     };
     tx.execute(
-        "UPDATE accounts SET source=?1, external_id=?2, updated_at=?3 WHERE id=?4",
-        rusqlite::params![source, external_id, now, id],
+        "UPDATE accounts SET source=?1, external_id=?2, root_id=?3, updated_at=?4 WHERE id=?5",
+        rusqlite::params![source, external_id, root_after, now, id],
     )
     .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -441,6 +488,132 @@ mod tests {
             })
             .unwrap();
         assert_eq!(name, "Eko by CA (renamed on the phone)");
+    }
+
+    /// A root for a source, as the tree holds one.
+    fn root(state: &AppState, id: &str, name: &str, source: &str) {
+        let conn = state.db.get().unwrap();
+        conn.execute(
+            "INSERT INTO account_roots (id, name, kind, source, created_at, updated_at)
+             VALUES (?1, ?2, 'bank', ?3, 1, 1)",
+            rusqlite::params![id, name, source],
+        )
+        .unwrap();
+    }
+
+    /// An account under a root, as the tree holds one: a leaf carrying the
+    /// institution's source and the root that source names.
+    fn leaf(state: &AppState, id: &str, name: &str, source: &str, root_id: &str) {
+        let conn = state.db.get().unwrap();
+        conn.execute(
+            "INSERT INTO accounts
+                (id, name, type, opening_balance, note, created_at, updated_at,
+                 source, external_id, root_id)
+             VALUES (?1, ?2, 'cash', 0.0, NULL, 1, 1, ?3, ?4, ?5)",
+            rusqlite::params![id, name, source, format!("{source}-{id}"), root_id],
+        )
+        .unwrap();
+    }
+
+    fn root_of(state: &AppState, id: &str) -> Option<String> {
+        let conn = state.db.get().unwrap();
+        conn.query_row(
+            "SELECT root_id FROM accounts WHERE id=?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// A leaf's source must equal its root's: an account filed under Crédit
+    /// Agricole cannot carry Firstrade's number, or the tree would say one
+    /// thing and the identity another.
+    #[tokio::test]
+    async fn a_number_from_another_institution_is_refused() {
+        let state = state();
+        root(&state, "r-ca", "Crédit Agricole", "credit_agricole");
+        leaf(&state, "acc-1", "Eko by CA", "credit_agricole", "r-ca");
+
+        let error = put(&state, "acc-1", Some("firstrade"), Some("abc123"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, axum::http::StatusCode::CONFLICT);
+        assert!(
+            error.1.message.contains("Crédit Agricole"),
+            "the refusal names the root: {}",
+            error.1.message
+        );
+        assert_eq!(
+            identity_of(&state, "acc-1").0.as_deref(),
+            Some("credit_agricole"),
+            "the refused number did not land"
+        );
+    }
+
+    /// The same institution's number is what the root is there for.
+    #[tokio::test]
+    async fn a_number_from_the_same_institution_is_accepted() {
+        let state = state();
+        root(&state, "r-ca", "Crédit Agricole", "credit_agricole");
+        leaf(&state, "acc-1", "Eko by CA", "credit_agricole", "r-ca");
+
+        put(
+            &state,
+            "acc-1",
+            Some("credit_agricole"),
+            Some("84890097587"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            identity_of(&state, "acc-1"),
+            (Some("credit_agricole".into()), Some("84890097587".into()))
+        );
+        assert_eq!(root_of(&state, "acc-1").as_deref(), Some("r-ca"));
+    }
+
+    /// An account with no root — one the phone made, say — joins the root of
+    /// the source it is given, so the tree stays complete.
+    #[tokio::test]
+    async fn an_account_with_no_root_joins_the_root_of_its_source() {
+        let state = state();
+        account(&state, "acc-1", "Firstrade");
+        assert_eq!(root_of(&state, "acc-1"), None);
+
+        put(&state, "acc-1", Some("firstrade"), Some("abc123"))
+            .await
+            .unwrap();
+
+        let root_id = root_of(&state, "acc-1").expect("it joined a root");
+        let (name, source): (String, String) = state
+            .db
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT name, source FROM account_roots WHERE id=?1",
+                rusqlite::params![root_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(name, "Firstrade");
+        assert_eq!(source, "firstrade");
+    }
+
+    /// Clearing the identity leaves the root alone: the account is still that
+    /// institution's, it just has no provider number any more.
+    #[tokio::test]
+    async fn clearing_an_identity_leaves_the_root_alone() {
+        let state = state();
+        root(&state, "r-ca", "Crédit Agricole", "credit_agricole");
+        leaf(&state, "acc-1", "Eko by CA", "credit_agricole", "r-ca");
+
+        put(&state, "acc-1", None, None).await.unwrap();
+        assert_eq!(identity_of(&state, "acc-1"), (None, None));
+        assert_eq!(
+            root_of(&state, "acc-1").as_deref(),
+            Some("r-ca"),
+            "the account is still Crédit Agricole's"
+        );
     }
 
     /// A number a *deleted* account still holds is refused to everyone else —

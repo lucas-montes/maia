@@ -57,33 +57,30 @@ Chosen: book the **cash leg as a fact** and derive everything else.
 ### Stage 1 — unblock statements (small, do first)
 - [x] T1 Duplicate lookup joins `bank_statements` and requires `deleted_at IS NULL AND status <> 'ignored'` (status:done)
   - Completed: 2026-11-12
-  - Goal: only a live statement claims content, so a discarded or ignored statement's lines never turn a fresh entry into a `duplicate`.
   - Boundaries: In — the duplicate lookup in `src/statements/store.rs`, its `save_statement` doc comment. Out — re-staging semantics (T2), the "already ingested" no-op (T3), repairing rows already stored as `duplicate` (T6), schema, UI.
   - Note: the lookup is the only one in the codebase. `preview.rs::describe_duplicates` reads already-stored `duplicate_of` links and does no lookup.
 
 - [x] T2 Re-stage deletes `pending, informational, duplicate, error` lines (cascades to
       `transfer_matches`, which `match_pending` rebuilds right after) (status:done)
   - Completed: 2026-11-12
-  - Goal: a re-read recomputes every derived verdict instead of keeping the stale one.
   - Boundaries: In — the re-stage `DELETE` in `src/statements/store.rs` and its doc comment. Out — the "already ingested" no-op (T3), `collect_file_states` (T4), `error` lines being selectable (T5), the v12 repair migration (T6).
   - Note: `imported`/`skipped` lines are never deleted, so user decisions survive. `transfer_matches` cascades on the line delete and `match_pending` runs right after the batch (`statements/mod.rs`), so matches rebuild themselves.
 
 - [x] T3 "Already ingested" no-op only when the statement has a pending/imported/skipped entry;
       otherwise re-read. Must stay a no-op for unchanged T212 feed months. (status:done)
   - Completed: 2026-11-12
-  - Goal: let a live statement be read again even when its bytes are unchanged, so a stale derived verdict can be recomputed.
   - Boundaries: In — the no-op condition in `save_statement` and its doc comment. Out — `collect_file_states` (T4), `error` entries being selectable (T5), the v12 repair migration (T6), schema, UI.
   - Note: the file sources put the bytes in the `source_key`, so for a file "same `source_key`" means "same bytes" and the no-op is the only path a re-dropped file takes. The T212 feed is the exception: its key is the month bucket and the hash covers the whole payload.
   - Note: the predicate is the plan's literal list. See the deviations below for what that costs.
+
 - [x] T4 `collect_file_states` (`watch.rs`): a file is imported only when every entry is
       imported/skipped. (status:done)
   - Completed: 2026-11-12
-  - Goal: `parsed/` means imported, so a file whose entries are all duplicates (or hold anything else that is not imported or skipped) waits in `staged/`.
   - Boundaries: In — the "unsettled" test in `collect_file_states` and the two doc comments that state the rule. Out — `error` entries being selectable (T5), the v12 repair migration (T6), the review's empty state (T7), schema, UI.
   - Note: the test is the complement of the rule (`status NOT IN ('imported','skipped')`), so it stays correct as statuses are added. The placement is derived, so a file that gains an unsettled entry walks back to `staged/` on the next pass.
+
 - [x] T5 `error` entries are selectable and counted (`statementReview.ts`, `handlers/statements.rs:61`). (status:done)
   - Completed: 2026-11-13
-  - Goal: an entry whose import failed can be retried, and the failure is visible before the file is opened.
   - Boundaries: In — `statementReview.ts` (an `isImportable` helper: pending **or** error; both the ordinary-entry and the transfer-pair branch), `handlers/statements.rs` (`errorCount`), `api.ts` (the type), the desktop display of the count, the bulk-import path, and the counterpart rule in `store.rs`. Out — the review's empty state (T7), the parser (T8), schema.
   - Note: the server already accepted an `error` line for import — `import_statement` short-circuits only `imported`/`informational`/`duplicate` — so the work was in the review, which offered it no checkbox.
   - Note: a failed **transfer pair** is one thing that failed, so the rule in `store.rs` that decides whether a counterpart can still be paired now accepts `error` as well as `pending`. Without it a retry booked the pair as two separate entries and dismissed the match, and money between two of the user's own accounts read as an expense and an income.
@@ -91,21 +88,18 @@ Chosen: book the **cash leg as a fact** and derive everything else.
 - [x] T6 Migration v12: `duplicate` entries whose `duplicate_of` is in a discarded statement →
       `pending`, clear `duplicate_of`. (status:done)
   - Completed: 2026-11-13
-  - Goal: release the entries a dead statement was holding, so the live database stops carrying verdicts the code no longer agrees with.
   - Boundaries: In — migration v12 (`src/db.rs`), the rule in `src/statements/store.rs`, and the shared `refresh_statement_status` signature. Out — T7, T8, any schema beyond the version bump.
   - Note: the migration refreshes the statements that held the released entries, so one whose badge said "imported" does not keep saying it — the review's "awaiting" filter would otherwise hide it.
   - Note: it releases the claim of an **ignored** statement as well as a discarded one, because the rule the lookup follows is that only a *live* statement claims anything.
   - Note: `LATEST_VERSION` went to 12, which is one version more than there are snapshots kept, so the three snapshot tests that hard-coded `v1` now use the version just below the latest instead.
 - [x] T7 Review explains an empty state ("every entry duplicates another file — re-drop to re-read"). (status:done)
   - Completed: 2026-11-13
-  - Goal: a file whose every entry duplicates another file says so, instead of reading as a broken review.
   - Boundaries: In — `statementReview.ts` (a `reviewEmptiness` helper: what can still be imported, and how many entries duplicate another file), the file review and the statement review in `statements.ts`, and the summary's "Nothing selected" message. Out — the server, the schema, the entry tables themselves.
   - Note: the summary used to say "Nothing selected. Tick the entries to import" when there was nothing to tick. It now says there is nothing to import, and the explanation below it says why.
 
 - [x] T8 Firstrade parser warns on an unreadable date row instead of `continue` (`firstrade.rs:273`);
       the statement records rows read / kept / skipped and the review shows it. (status:done)
   - Completed: 2026-11-13
-  - Goal: a row the parser cannot date is reported instead of vanishing, and the statement says how many rows it read, kept and dropped.
   - Boundaries: In — `firstrade.rs` (the CSV reader keeps an undatable row so the parser can warn; the statement records the counts in its `parsed_json`), `statementReview.ts` (a `parsedRowsSummary` helper) and the two reviews that show it. Out — the other parsers, the entry tables, the schema.
   - Note: the row is still dropped — it has no date, so it cannot become an entry. What changed is that it is now counted and named in a warning, instead of disappearing with no trace.
   - Note: the warning was already there for a row that reached the parser; the reader dropped the rows before that, so it never fired.
@@ -128,7 +122,12 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Note: the root is found by its source, so the one T9's migration created is the one the import finds — there is one root per institution, and the accounts are its leaves.
   - Note: `default_account_type` keeps its `(source, name)` signature and derives the kind inside it, so the preview's fallbacks — which must not create anything — read the same rule. The kind rule: a bank has savings products (livret/ldd/épargne) and everything else is cash; a broker and a bank without branches are cash.
   - Note: the securities leaf is not created here — it is Stage 3 (T16).
-- [ ] T11 Identity endpoint refuses a leaf whose source differs from its root's.
+- [x] T11 Identity endpoint refuses a leaf whose source differs from its root's. (status:done)
+  - Completed: 2026-11-13
+  - Goal: the tree and the identity cannot say different things — an account filed under Crédit Agricole cannot carry a Firstrade number.
+  - Boundaries: In — the source/root check in `PUT /accounts/:id/identity` (`handlers/accounts.rs`) and the `root_id` it writes. Out — the phone push (T12), the desktop view and moving a leaf (T13).
+  - Note: a leaf with **no** root — one the phone made — joins the root of the source it is given, so the tree stays complete rather than refusing the one account the desktop can actually give an identity to.
+  - Note: clearing an identity leaves the root alone: the account is still that institution's, it just has no provider number any more.
 - [ ] T12 Phone push stops writing `type`.
 - [ ] T13 Desktop accounts view: roots with leaves under them, root total, type editor offers
       cash/savings/securities, create/rename root, move a leaf (same source only).
@@ -200,8 +199,7 @@ Guards that must pass in **both** states, because they pin behaviour the change 
 
 Also checked, for every task: `cargo clippy --all-targets` (no new warnings; the 3 `erasing_op`
 errors in `src/finance_scenarios.rs` are pre-existing), `cargo build`, and `npx tsc --noEmit`. The
-new code is rustfmt-clean; the repository is not — 37 files have pre-existing rustfmt drift, and
-the list is byte-identical with and without these changes.
+new code is rustfmt-clean; the repository is not — 37 files have pre-existing rustfmt drift.
 
 Two findings worth keeping:
 - **T3** exposed that all three file sources put the file's hash in their `source_key`, so for a
@@ -231,6 +229,13 @@ Stage 1 is complete: every task above is done and the suite is green.
     "Crédit Agricole" bank root and a `savings` leaf.
   - `a_brokerage_import_makes_a_broker_root_with_a_cash_leaf` — the plan's example.
   - `two_accounts_of_one_institution_share_one_root` — one institution, one root, two leaves.
+- `cargo clippy --all-targets`: no new warnings and no new errors. The new code is rustfmt-clean.
+
+### T11 (2026-11-13)
+- `cargo test`: 247 passed. `a_number_from_another_institution_is_refused` fails when the
+  source/root check is disabled — the Firstrade number lands on a Crédit Agricole leaf.
+  The other three cover the same-institution case, a rootless account joining its source's root,
+  and clearing an identity leaving the root alone.
 - `cargo clippy --all-targets`: no new warnings and no new errors. The new code is rustfmt-clean.
 - `cargo clippy --all-targets`: no new warnings and no new errors. The new code is rustfmt-clean.
 

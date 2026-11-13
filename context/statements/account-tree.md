@@ -57,6 +57,25 @@ has no word for it.
 - **A trade is a movement, not income or expense.** Its cash leg moves between
   the cash leaf and the securities leaf.
 
+## Setting an identity
+
+`PUT /accounts/:id/identity` is where a leaf's `(source, external_id)` is
+written, so it is where the rule could be broken — and it refuses:
+
+| The leaf | The source given | What happens |
+|---|---|---|
+| under a root with a source | the same source | accepted |
+| under a root with a source | another source | **refused** (409) — the refusal names the root |
+| under a root with no source | any | **refused** (409) — there is no institution to file it under |
+| with no root | any | it **joins** the root for that source, made if need be |
+
+Clearing an identity leaves the root alone: the account is still that
+institution's, it just has no provider number any more.
+
+A leaf with no root is the normal case for an account the phone made — the
+push writes no root — so joining one is what keeps the tree complete rather
+than refusing the one identity the desktop can actually set.
+
 ## How a root is made
 
 An import that meets a new account resolves the root for its source first,

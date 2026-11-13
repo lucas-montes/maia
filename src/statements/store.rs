@@ -1326,7 +1326,7 @@ fn rate_for(tx: &Transaction<'_>, code: &str, base: &str, date_ms: i64) -> anyho
 /// the one this import finds: there is one root per institution, and the
 /// accounts are its leaves. A root's id is minted, never derived — it means
 /// nothing, and the source is what identifies it.
-fn resolve_root(tx: &Transaction<'_>, source: &str, now: i64) -> anyhow::Result<String> {
+pub(crate) fn resolve_root(tx: &Transaction<'_>, source: &str, now: i64) -> anyhow::Result<String> {
     if let Some(id) = lookup_root(tx, source)? {
         return Ok(id);
     }
