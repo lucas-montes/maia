@@ -66,6 +66,30 @@ export function isImportable(line: { status: string }): boolean {
   return line.status === "pending" || line.status === "error";
 }
 
+/** What a review can still import, and what stands in the way. */
+export interface ReviewEmptiness {
+  /** Entries the review can still import. */
+  importable: number;
+  /** Entries that duplicate another file, and so cannot be imported. */
+  duplicates: number;
+}
+
+/** What the review can still import, and what stands in the way.
+ *
+ *  An entry that duplicates another file is neither importable nor settled:
+ *  the claim is released when the other file is discarded, so re-dropping this
+ *  one re-reads it. A review holding nothing but those has to say so, or it
+ *  reads as broken -- a table of entries with no checkboxes and nothing saying
+ *  why there is nothing to tick.
+ */
+export function reviewEmptiness(details: StatementDetail[]): ReviewEmptiness {
+  const lines = details.flatMap((detail) => detail.lines);
+  return {
+    importable: selectableLineIds(details).size,
+    duplicates: lines.filter((line) => line.status === "duplicate").length,
+  };
+}
+
 /** The line ids the review offers a checkbox for, across every statement given
  *  (one for the statement detail page, all of a file's for the file review). */
 export function selectableLineIds(details: StatementDetail[]): Set<string> {

@@ -138,8 +138,20 @@ it again would duplicate the transaction.
 `GET /statements` reports `errorCount` alongside `pendingCount` and
 `importedCount`, so a failure is visible before the file is opened.
 
-## Where a file sits
+## When the review holds nothing to import
 
+A review whose entries are all duplicates of another file has nothing to tick,
+and that reads as broken unless it says why. `reviewEmptiness`
+(`maia-ui/src/lib/statementReview.ts`) reports what can still be imported and
+how many entries duplicate another file; the file review and the statement
+review use it to explain the empty state — "every entry duplicates another
+file", with the way out: re-drop the file, which re-reads it and recomputes
+the verdicts.
+
+The summary no longer says "Nothing selected. Tick the entries to import" when
+there is nothing to tick.
+
+## Where a file sits
 `reconcile_files` derives each file's root from the state of its statements
 rather than remembering it, and moves the file to match:
 

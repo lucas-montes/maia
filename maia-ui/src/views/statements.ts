@@ -18,6 +18,7 @@ import {
   liveMatches,
   localMatchSide,
   matchedLineIds,
+  reviewEmptiness,
   selectableLineIds,
 } from "../lib/statementReview";
 import { statementsAtom } from "../lib/stores";
@@ -315,6 +316,7 @@ function detailHtml(
   const selectable = selectableLineIds([detail]);
   const pending = detail.lines.filter((line) => line.status === "pending").length;
   const failed = detail.lines.filter((line) => line.status === "error").length;
+  const emptiness = reviewEmptiness([detail]);
 
   const tradeRows = trades
     .map(
@@ -359,6 +361,8 @@ function detailHtml(
         </table>
       </div>` : ""}
 
+      ${emptiness.importable === 0 && emptiness.duplicates > 0 ? duplicatesHtml(emptiness.duplicates) : ""}
+
       <div class="rounded border border-surface-800 bg-base-100 p-4">
         <div class="mb-2 flex items-center justify-between">
           <h3 class="text-sm font-medium text-ink-200">Entries to add</h3>
@@ -391,6 +395,21 @@ function detailHtml(
     </div>`;
 }
 
+/** The review's explanation when it holds nothing to import.
+ *
+ *  An entry that duplicates another file is neither importable nor settled:
+ *  the claim is released when the other file is discarded, so re-dropping this
+ *  one re-reads it. Without an explanation the review reads as broken -- a
+ *  table of entries with no checkboxes and nothing saying why.
+ */
+function duplicatesHtml(duplicates: number): string {
+  return `
+    <div class="rounded border border-surface-800 bg-base-100 p-4">
+      <h3 class="text-sm font-medium text-ink-200">Every entry duplicates another file</h3>
+      <p class="mt-1 text-xs text-ink-500">${duplicates} entr${duplicates !== 1 ? "ies" : "y"} ${duplicates !== 1 ? "are" : "is"} already staged elsewhere, so there is nothing to import from this file. Re-drop the file to re-read it: the verdicts are recomputed, so an entry whose claim has been released comes back as importable.</p>
+    </div>`;
+}
+
 /** The headline: what this import will do, in the import's own words.
  *
  *  Every number here comes from `POST /statements/preview`, which is the real
@@ -398,8 +417,20 @@ function detailHtml(
  *  summary the button produces. The page used to render its own reading of the
  *  statement rows instead, which is how it came to promise 34 accounts for a
  *  file that would create one. */
-function summaryHtml(preview: ImportPreview | null, previewing: boolean, selected: number): string {
+function summaryHtml(
+  preview: ImportPreview | null,
+  previewing: boolean,
+  selected: number,
+  selectable: number,
+): string {
   if (selected === 0) {
+    if (selectable === 0) {
+      // Nothing to tick, so do not tell the user to tick something.
+      return `
+      <div class="rounded border border-surface-800 bg-base-100 p-4 text-sm text-ink-500">
+        There is nothing to import here.
+      </div>`;
+    }
     return `
       <div class="rounded border border-surface-800 bg-base-100 p-4 text-sm text-ink-500">
         Nothing selected. Tick the entries to import — the summary here is the import's own answer,
@@ -660,6 +691,7 @@ function fileHtml(
     (sum, detail) => sum + detail.lines.filter((line) => line.status === "error").length,
     0,
   );
+  const emptiness = reviewEmptiness(statements);
 
   const matched = matchedLineIds(matches);
   const entrySections = statements
@@ -726,7 +758,7 @@ function fileHtml(
 
   return `
     <div class="min-h-0 flex-1 space-y-4 overflow-auto">
-      ${summaryHtml(preview, previewing, selected.size)}
+      ${summaryHtml(preview, previewing, selected.size, emptiness.importable)}
 
       <div class="flex flex-wrap items-center gap-2">
         <span class="text-xs text-ink-500">${pending} entr${pending !== 1 ? "ies" : "y"} pending in this file${failed > 0 ? ` · ${failed} failed` : ""}</span>
@@ -740,6 +772,8 @@ function fileHtml(
       ${previewErrorsHtml(preview)}
 
       ${mergesHtml(preview)}
+
+      ${emptiness.importable === 0 && emptiness.duplicates > 0 ? duplicatesHtml(emptiness.duplicates) : ""}
 
       ${entrySections || `<div class="rounded border border-surface-800 bg-base-100 p-4 text-sm text-ink-500">No importable entries in this file.</div>`}
 

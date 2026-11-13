@@ -96,7 +96,12 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Note: the migration refreshes the statements that held the released entries, so one whose badge said "imported" does not keep saying it — the review's "awaiting" filter would otherwise hide it.
   - Note: it releases the claim of an **ignored** statement as well as a discarded one, because the rule the lookup follows is that only a *live* statement claims anything.
   - Note: `LATEST_VERSION` went to 12, which is one version more than there are snapshots kept, so the three snapshot tests that hard-coded `v1` now use the version just below the latest instead.
-- [ ] T7 Review explains an empty state ("every entry duplicates another file — re-drop to re-read").
+- [x] T7 Review explains an empty state ("every entry duplicates another file — re-drop to re-read"). (status:done)
+  - Completed: 2026-11-13
+  - Goal: a file whose every entry duplicates another file says so, instead of reading as a broken review.
+  - Boundaries: In — `statementReview.ts` (a `reviewEmptiness` helper: what can still be imported, and how many entries duplicate another file), the file review and the statement review in `statements.ts`, and the summary's "Nothing selected" message. Out — the server, the schema, the entry tables themselves.
+  - Note: the summary used to say "Nothing selected. Tick the entries to import" when there was nothing to tick. It now says there is nothing to import, and the explanation below it says why.
+
 - [ ] T8 Firstrade parser warns on an unreadable date row instead of `continue` (`firstrade.rs:273`);
       the statement records rows read / kept / skipped and the review shows it.
 
@@ -199,7 +204,10 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   drift predates this change and was left alone — the file list is byte-identical with and without
   this change.
 
+### T7 (2026-11-13)
+- `npx tsc --noEmit`: clean. `npx vitest run`: 46 passed (4 new, for `reviewEmptiness`).
+- `cargo test`: 238 passed — no server change, so the Rust suite is untouched.
+
 ## Remaining for Stage 1
-- **T7 and T8 are left.** T7 explains the empty state in the review when every entry duplicates
-  another file ("re-drop to re-read"); T8 makes the Firstrade parser warn on an unreadable date row
-  instead of skipping it silently.
+- **T8 is left.** It makes the Firstrade parser warn on an unreadable date row instead of skipping it
+  silently, and records the rows read / kept / skipped on the statement so the review shows it.

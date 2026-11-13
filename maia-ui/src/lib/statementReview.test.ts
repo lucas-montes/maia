@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { StatementDetail, StatementLine, TransferMatch } from "./api";
-import { liveMatches, matchedLineIds, selectableLineIds } from "./statementReview";
+import { liveMatches, matchedLineIds, reviewEmptiness, selectableLineIds } from "./statementReview";
 
 function line(id: string, over: Partial<StatementLine> = {}): StatementLine {
   return {
@@ -174,8 +174,35 @@ describe("selectableLineIds", () => {
   });
 });
 
-describe("liveMatches / matchedLineIds", () => {
-  test("deduplicates a pair reported by both of its statements", () => {
+describe("reviewEmptiness", () => {
+  test("a review with nothing importable says how many entries are duplicates", () => {
+    // Every entry duplicates another file: there is nothing to tick, and the
+    // review has to say why rather than looking broken.
+    const d = detail("s1", [
+      line("a", { status: "duplicate" }),
+      line("b", { status: "duplicate" }),
+    ]);
+    expect(reviewEmptiness([d])).toEqual({ importable: 0, duplicates: 2 });
+  });
+
+  test("a review with something to import is not empty", () => {
+    const d = detail("s1", [line("a"), line("b", { status: "duplicate" })]);
+    expect(reviewEmptiness([d])).toEqual({ importable: 1, duplicates: 1 });
+  });
+
+  test("a settled entry is neither importable nor a duplicate", () => {
+    const d = detail("s1", [line("a", { status: "imported" })]);
+    expect(reviewEmptiness([d])).toEqual({ importable: 0, duplicates: 0 });
+  });
+
+  test("a file review counts across its statements", () => {
+    const a = detail("s1", [line("a", { status: "duplicate" })]);
+    const b = detail("s2", [line("b", { status: "duplicate" }), line("c")]);
+    expect(reviewEmptiness([a, b])).toEqual({ importable: 1, duplicates: 2 });
+  });
+});
+
+describe("liveMatches / matchedLineIds", () => {  test("deduplicates a pair reported by both of its statements", () => {
     const out = line("out");
     const inn = line("in");
     const m = match("m1", out, inn);
