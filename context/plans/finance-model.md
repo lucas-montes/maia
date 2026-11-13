@@ -120,8 +120,14 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Note: `default_account_type` moved to the new vocabulary in this task rather than T10. Leaving it would have meant the migration remapped `bank` to `cash` and the next import wrote `bank` straight back.
   - Note: `updated_at` moves on a remapped account, because the pull sends `type` and the phone has to learn the new value.
   - Note: **`credit` is left alone** — it is a card, not a product, and the new vocabulary has no word for it. T13's type editor offers cash/savings/securities, so an existing `credit` account will need a decision there.
-- [ ] T10 Statement import resolves/creates the root by source (Firstrade → broker root with a
-      `cash` leaf); `default_account_type` becomes the kind rule (CA: livret/ldd/épargne → savings).
+- [x] T10 Statement import resolves/creates the root by source (Firstrade → broker root with a
+      `cash` leaf); `default_account_type` becomes the kind rule (CA: livret/ldd/épargne → savings). (status:done)
+  - Completed: 2026-11-13
+  - Goal: the tree stops being schema and starts being used — an import finds or makes the root its institution needs and hangs the account under it.
+  - Boundaries: In — `resolve_root` and `lookup_root` (`statements/store.rs`), the account insert's `root_id`, and `default_account_type` as the kind rule. Out — the identity check (T11), the phone push (T12), the desktop view (T13), the securities leaf (Stage 3).
+  - Note: the root is found by its source, so the one T9's migration created is the one the import finds — there is one root per institution, and the accounts are its leaves.
+  - Note: `default_account_type` keeps its `(source, name)` signature and derives the kind inside it, so the preview's fallbacks — which must not create anything — read the same rule. The kind rule: a bank has savings products (livret/ldd/épargne) and everything else is cash; a broker and a bank without branches are cash.
+  - Note: the securities leaf is not created here — it is Stage 3 (T16).
 - [ ] T11 Identity endpoint refuses a leaf whose source differs from its root's.
 - [ ] T12 Phone push stops writing `type`.
 - [ ] T13 Desktop accounts view: roots with leaves under them, root total, type editor offers
@@ -217,6 +223,15 @@ Stage 1 is complete: every task above is done and the suite is green.
   "Crédit Agricole" (kind `bank`, source `credit_agricole`), with all four accounts under it —
   "Eko by CA" → cash, "Livret A" → savings, "LDD Solidaire" → savings, "Eko by CA (external)" →
   cash (the deleted one). The live database itself was not touched.
+
+### T10 (2026-11-13)
+- `cargo test`: 243 passed. The three new tests fail when the root resolution is removed: no root
+  is created and the account has no root to hang under.
+  - `an_import_creates_the_root_and_parents_the_account_under_it` — a Livret A makes the
+    "Crédit Agricole" bank root and a `savings` leaf.
+  - `a_brokerage_import_makes_a_broker_root_with_a_cash_leaf` — the plan's example.
+  - `two_accounts_of_one_institution_share_one_root` — one institution, one root, two leaves.
+- `cargo clippy --all-targets`: no new warnings and no new errors. The new code is rustfmt-clean.
 - `cargo clippy --all-targets`: no new warnings and no new errors. The new code is rustfmt-clean.
 
 ### Still to come

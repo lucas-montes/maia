@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     LINE_NS, STATEMENT_NS, TRANSACTION_NS, TRANSFER_NS,
     draft::{SaveOutcome, StatementDraft, SuggestedType},
+    root_for_source,
     stable_uuid,
 };
 use crate::db;
@@ -1319,6 +1320,37 @@ fn rate_for(tx: &Transaction<'_>, code: &str, base: &str, date_ms: i64) -> anyho
     .with_context(|| format!("no {code}/{base} FX rate on or before {date}"))
 }
 
+/// The root a statement's accounts belong under, created if it is not there.
+///
+/// The root is found by its source, so the one an earlier import created is
+/// the one this import finds: there is one root per institution, and the
+/// accounts are its leaves. A root's id is minted, never derived — it means
+/// nothing, and the source is what identifies it.
+fn resolve_root(tx: &Transaction<'_>, source: &str, now: i64) -> anyhow::Result<String> {
+    if let Some(id) = lookup_root(tx, source)? {
+        return Ok(id);
+    }
+    let (name, kind) = root_for_source(source);
+    let id = uuid::Uuid::now_v7().to_string();
+    tx.execute(
+        "INSERT INTO account_roots (id, name, kind, source, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+        params![id, name, kind, source, now],
+    )?;
+    Ok(id)
+}
+
+/// The root for a source, if there is one.
+pub(crate) fn lookup_root(tx: &Transaction<'_>, source: &str) -> anyhow::Result<Option<String>> {
+    tx.query_row(
+        "SELECT id FROM account_roots WHERE source=?1",
+        params![source],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 /// Resolve the budget account for a statement, creating it on first import.
 ///
 /// Fetch, then create: the exact `(source, external_id)` lookup runs before
@@ -1358,12 +1390,15 @@ fn resolve_account(
         return Ok(Some(id));
     }
 
+    // The account is a leaf of its institution's root, and the root is
+    // created with it if this is the first import from that source.
+    let root_id = resolve_root(tx, &statement.source, now)?;
     let type_ = default_account_type(&statement.source, &statement.account_name);
     tx.execute(
         "INSERT INTO accounts
             (id, name, type, opening_balance, note, created_at, updated_at,
-             deleted_at, source, external_id)
-         VALUES (?1,?2,?3,0.0,NULL,?4,?4,NULL,?5,?6)
+             deleted_at, source, external_id, root_id)
+         VALUES (?1,?2,?3,0.0,NULL,?4,?4,NULL,?5,?6,?7)
          ON CONFLICT(source, external_id)
             WHERE source IS NOT NULL AND external_id IS NOT NULL
             DO NOTHING",
@@ -1374,8 +1409,10 @@ fn resolve_account(
             now,
             statement.source,
             external_id,
+            root_id,
         ],
     )?;
+    let _ = root_id;
     // Read the id back rather than trusting the one just minted: on the
     // conflict path (the same identity resolved twice inside one transaction)
     // nothing was inserted, and the account's real id is the existing row's.
@@ -1767,12 +1804,14 @@ mod tests {
 /// The type a new account gets: what it *holds*, not what kind of institution
 /// it is at.
 ///
-/// `cash` and `savings` are the two a bank account can be; a brokerage cash
-/// account is `cash` too, and its securities sit in a sibling leaf under the
-/// same root.
+/// The rule is the root's kind. A bank has savings products — a Livret A, an
+/// LDD, an épargne — and everything else it holds is cash. A broker's account
+/// is cash; the securities sit in a sibling leaf under the same root. A bank
+/// without branches is cash too: it has no livrets to offer.
 pub(crate) fn default_account_type(source: &str, name: &str) -> &'static str {
-    match source {
-        "credit_agricole" => {
+    let (_, kind) = root_for_source(source);
+    match kind {
+        "bank" => {
             let lower = name.to_lowercase();
             if ["ldd", "livret", "epargne", "épargne"]
                 .iter()

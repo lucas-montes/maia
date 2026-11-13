@@ -2186,6 +2186,144 @@ mod statement_tests {
         rows
     }
 
+    /// The root a statement's accounts belong under: its name, its kind and
+    /// the source it is found by.
+    fn root_of(pool: &db::DbPool) -> (String, String, String) {
+        let conn = pool.get().unwrap();
+        conn.query_row(
+            "SELECT name, kind, source FROM account_roots LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    }
+
+    /// The account an import made: its name, its type, and the root it hangs
+    /// under.
+    fn account_of(pool: &db::DbPool) -> (String, String, Option<String>) {
+        let conn = pool.get().unwrap();
+        conn.query_row(
+            "SELECT name, type, root_id FROM accounts LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    }
+
+    /// An import creates the root its institution needs, and the account
+    /// becomes a leaf of it. A bank has savings products and everything else;
+    /// a broker's account is cash.
+    #[test]
+    fn an_import_creates_the_root_and_parents_the_account_under_it() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let mut livret = draft(
+            "credit_agricole:111:hash",
+            "hash",
+            "111",
+            vec![line("Saving", 100.0, day, "saving")],
+        );
+        livret.account_name = "Livret A".to_string();
+
+        let outcomes = save(&pool, vec![livret]);
+        import(&pool, &outcomes[0].statement_id, empty_request());
+
+        assert_eq!(
+            root_of(&pool),
+            (
+                "Crédit Agricole".to_string(),
+                "bank".to_string(),
+                "credit_agricole".to_string()
+            )
+        );
+        let (name, type_, root_id) = account_of(&pool);
+        assert_eq!(name, "Livret A");
+        assert_eq!(type_, "savings", "a Livret A holds savings");
+        assert!(root_id.is_some(), "the account is a leaf of the root");
+    }
+
+    /// The plan's example: a Firstrade export makes a broker root with a cash
+    /// leaf. The securities leaf comes later, in Stage 3.
+    #[test]
+    fn a_brokerage_import_makes_a_broker_root_with_a_cash_leaf() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let mut statement = draft(
+            "firstrade:acct:hash",
+            "hash",
+            "acct",
+            vec![line("Dividend", 5.0, day, "dividend")],
+        );
+        statement.source = SourceId::Firstrade;
+        statement.institution = "Firstrade".to_string();
+        statement.account_name = "Firstrade".to_string();
+
+        let outcomes = save(&pool, vec![statement]);
+        import(&pool, &outcomes[0].statement_id, empty_request());
+
+        assert_eq!(
+            root_of(&pool),
+            (
+                "Firstrade".to_string(),
+                "broker".to_string(),
+                "firstrade".to_string()
+            )
+        );
+        let (_, type_, root_id) = account_of(&pool);
+        assert_eq!(type_, "cash", "a brokerage account is cash");
+        assert!(root_id.is_some(), "the account is a leaf of the root");
+    }
+
+    /// One institution, one root: two accounts of the same source are leaves
+    /// of the same root, not of two roots that happen to look alike.
+    #[test]
+    fn two_accounts_of_one_institution_share_one_root() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let mut eko = draft(
+            "credit_agricole:111:hash",
+            "hash",
+            "111",
+            vec![line("Coffee", -3.5, day, "coffee")],
+        );
+        eko.account_name = "Eko by CA".to_string();
+        let mut ldd = draft(
+            "credit_agricole:222:hash",
+            "hash2",
+            "222",
+            vec![line("Saving", 100.0, day, "saving")],
+        );
+        ldd.account_name = "LDD Solidaire".to_string();
+
+        let outcomes = save(&pool, vec![eko, ldd]);
+        import(&pool, &outcomes[0].statement_id, empty_request());
+        import(&pool, &outcomes[1].statement_id, empty_request());
+
+        let conn = pool.get().unwrap();
+        let roots: i64 = conn
+            .query_row("SELECT COUNT(*) FROM account_roots", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(roots, 1, "one institution, one root");
+        let leaves: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM accounts WHERE root_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leaves, 2, "both accounts are leaves of it");
+        let mut stmt = conn
+            .prepare("SELECT type FROM accounts ORDER BY name")
+            .unwrap();
+        let types: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        // "Eko by CA" then "LDD Solidaire": cash, then savings.
+        assert_eq!(types, vec!["cash".to_string(), "savings".to_string()]);
+    }
+
     #[test]
     fn restaging_the_same_bytes_is_a_no_op() {
         let pool = db::init_memory().unwrap();

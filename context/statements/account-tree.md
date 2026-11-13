@@ -57,6 +57,29 @@ has no word for it.
 - **A trade is a movement, not income or expense.** Its cash leg moves between
   the cash leaf and the securities leaf.
 
+## How a root is made
+
+An import that meets a new account resolves the root for its source first,
+and creates it if there is none:
+
+```rust
+fn resolve_root(tx, source, now) -> anyhow::Result<String> {
+    if let Some(id) = lookup_root(tx, source)? { return Ok(id); }
+    let (name, kind) = root_for_source(source);
+    // minted, never derived — the source is what identifies the root
+    ...
+}
+```
+
+So there is **one root per institution**, and the accounts are its leaves: a
+Crédit Agricole import finds the root the migration made, a Firstrade import
+makes a *broker* root with a *cash* leaf. The securities leaf is made later,
+when a trade books.
+
+The leaf's type follows the root's **kind**: a bank has savings products — a
+Livret A, an LDD, an épargne — and everything else it holds is cash. A broker's
+account is cash, and so is a bank without branches.
+
 ## Where the code lives
 
 | Concern | File |
