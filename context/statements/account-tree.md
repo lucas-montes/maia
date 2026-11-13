@@ -45,6 +45,18 @@ sends `type` and the phone has to learn the new value.
 `credit` is left alone: it is a card, not a product, and the new vocabulary
 has no word for it.
 
+## Who owns the type
+
+The **server** owns the type. The pull sends it down, and a push only applies
+it when the server knows it, so a phone carrying the old vocabulary cannot
+revert the rename:
+
+- the **phone** does not push the type at all — the pull sends it down;
+- the **desktop** pushes one, and it lands, because its editor offers only the
+  three types the server knows;
+- a push naming anything else (`bank`, `investment`, …) is ignored rather than
+  applied.
+
 ## The rules
 
 - **A leaf's source must equal its root's.** A leaf with a source can only

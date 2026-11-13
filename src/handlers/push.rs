@@ -1344,8 +1344,13 @@ pub struct BudgetAccountsPush {
 pub struct AccountPush {
     pub id: String,
     pub name: String,
-    #[serde(rename = "type")]
-    pub type_: String,
+    /// The account's type, if the push carries one.
+    ///
+    /// Optional because the type is the server's to decide: the pull sends it
+    /// down, and a push that carries one the server does not know — a phone
+    /// with the old vocabulary — is ignored rather than applied.
+    #[serde(rename = "type", default)]
+    pub type_: Option<String>,
     #[serde(rename = "openingBalance")]
     pub opening_balance: f64,
     pub note: Option<String>,
@@ -1354,6 +1359,11 @@ pub struct AccountPush {
     #[serde(rename = "deletedAt", default)]
     pub deleted_at: Option<i64>,
 }
+
+/// The types the server knows. A push that names another one is ignored: the
+/// vocabulary is the server's, and a client with a stale one must not be able
+/// to revert the rename.
+const ACCOUNT_TYPES: [&str; 3] = ["cash", "savings", "securities"];
 
 pub async fn push_meals(
     State(state): State<AppState>,
@@ -1452,9 +1462,17 @@ pub async fn push_budget_accounts(
     let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
     for a in payload.accounts {
+        // The type is applied only when the push carries one the server knows.
+        // The phone does not push it at all — the pull sends it down — and a
+        // phone that still carries the old vocabulary must not be able to
+        // revert the rename.
+        let type_ = a
+            .type_
+            .as_deref()
+            .filter(|t| ACCOUNT_TYPES.contains(t));
         tx.execute(
-            "INSERT INTO accounts (id, name, type, opening_balance, note, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, opening_balance=excluded.opening_balance, note=excluded.note, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
-            rusqlite::params![a.id, a.name, a.type_, a.opening_balance, a.note, a.created_at, server_time, a.deleted_at],
+            "INSERT INTO accounts (id, name, type, opening_balance, note, created_at, updated_at, deleted_at) VALUES (?1, ?2, COALESCE(?3, 'cash'), ?4, ?5, ?6, ?7, ?8) ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=COALESCE(?3, accounts.type), opening_balance=excluded.opening_balance, note=excluded.note, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            rusqlite::params![a.id, a.name, type_, a.opening_balance, a.note, a.created_at, server_time, a.deleted_at],
         ).unwrap();
     }
     for id in payload.deleted {

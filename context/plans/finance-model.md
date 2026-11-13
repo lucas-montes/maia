@@ -108,7 +108,6 @@ Chosen: book the **cash leg as a fact** and derive everything else.
 - [x] T9  `account_roots` + `accounts.root_id`; map `bank→cash, investment→cash, other→cash`;
       create "Crédit Agricole" (bank) and re-parent the 4 existing accounts. (status:done)
   - Completed: 2026-11-13
-  - Goal: accounts become two levels — a root for the institution, the accounts as its leaves — and `type` says what an account holds rather than what kind of institution it is at.
   - Boundaries: In — migration v13 (`src/db.rs`), `SourceId::kind` and `root_for_source` (`statements/mod.rs`), `default_account_type` (`statements/store.rs`). Out — the import creating roots (T10), the identity check (T11), the phone push (T12), the desktop view (T13).
   - Note: root ids are minted, never derived, and roots are found by `source` — so the root the migration creates and the root the import would create are the same row. `account_roots.source` has a partial unique index, like `idx_accounts_external`: a root the user made has no source, and two of those must not collide.
   - Note: `default_account_type` moved to the new vocabulary in this task rather than T10. Leaving it would have meant the migration remapped `bank` to `cash` and the next import wrote `bank` straight back.
@@ -117,18 +116,21 @@ Chosen: book the **cash leg as a fact** and derive everything else.
 - [x] T10 Statement import resolves/creates the root by source (Firstrade → broker root with a
       `cash` leaf); `default_account_type` becomes the kind rule (CA: livret/ldd/épargne → savings). (status:done)
   - Completed: 2026-11-13
-  - Goal: the tree stops being schema and starts being used — an import finds or makes the root its institution needs and hangs the account under it.
   - Boundaries: In — `resolve_root` and `lookup_root` (`statements/store.rs`), the account insert's `root_id`, and `default_account_type` as the kind rule. Out — the identity check (T11), the phone push (T12), the desktop view (T13), the securities leaf (Stage 3).
   - Note: the root is found by its source, so the one T9's migration created is the one the import finds — there is one root per institution, and the accounts are its leaves.
   - Note: `default_account_type` keeps its `(source, name)` signature and derives the kind inside it, so the preview's fallbacks — which must not create anything — read the same rule. The kind rule: a bank has savings products (livret/ldd/épargne) and everything else is cash; a broker and a bank without branches are cash.
   - Note: the securities leaf is not created here — it is Stage 3 (T16).
 - [x] T11 Identity endpoint refuses a leaf whose source differs from its root's. (status:done)
   - Completed: 2026-11-13
-  - Goal: the tree and the identity cannot say different things — an account filed under Crédit Agricole cannot carry a Firstrade number.
   - Boundaries: In — the source/root check in `PUT /accounts/:id/identity` (`handlers/accounts.rs`) and the `root_id` it writes. Out — the phone push (T12), the desktop view and moving a leaf (T13).
   - Note: a leaf with **no** root — one the phone made — joins the root of the source it is given, so the tree stays complete rather than refusing the one account the desktop can actually give an identity to.
   - Note: clearing an identity leaves the root alone: the account is still that institution's, it just has no provider number any more.
-- [ ] T12 Phone push stops writing `type`.
+- [x] T12 Phone push stops writing `type`. (status:done)
+  - Completed: 2026-11-13
+  - Boundaries: In — the pushed type in `src/handlers/push.rs` (optional, and applied only when the server knows it), the phone's push (`mobile/lib/src/sync/data_push_service.dart`), and the desktop's type editor list. Out — the pull, which still sends the type ✓.
+  - Note: the phone does not push the type at all — the pull sends it down — and the server ignores a pushed type it does not know, so a phone still carrying the old vocabulary cannot revert the rename either.
+  - Note: the desktop's editor now offers only `cash`/`savings`/`securities`. It has to: the server ignores an unknown type, so offering `bank` would be an edit that silently does nothing. That is one line of T13 done early.
+  - Note: **the mobile app was changed**, against this plan's "server + desktop only" header, because the human chose it: the alternative was a desktop-only endpoint the desktop could use instead of the phone's push surface.
 - [ ] T13 Desktop accounts view: roots with leaves under them, root total, type editor offers
       cash/savings/securities, create/rename root, move a leaf (same source only).
 
@@ -159,22 +161,19 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   the human approved the combined session. Each is still a separate, independently tested change.
 - **T1 alone does not repair rows already stored as `duplicate`.** A line that a discarded statement
   claimed before this change keeps its verdict until migration v12 (T6) runs.
-- **T3 uses the plan's literal predicate, not a stronger one.** The plan names `pending`,
-  `imported` and `skipped`; a stronger rule ("re-read whenever a `duplicate` verdict could be
-  stale") was considered and declined by the human. Two consequences follow, both deliberate:
-  - A statement holding *both* a `pending` entry and a stale `duplicate` entry stays a no-op, so
-    the stale duplicate survives. Only an all-duplicate statement is read again.
-  - A T212 feed month whose entries are all informational — a month of trades and nothing else —
-    holds no entry the user can act on, so it is read again on every sync. Nothing is lost (the
-    entries come back with the same ids), but the statement is touched. A feed month with pending
-    or imported entries stays a no-op, which is the constraint the plan states.
+- **T3 uses the plan's literal predicate** (`pending`, `imported`, `skipped`), not the stronger "read
+  it again whenever a `duplicate` verdict could be stale" the human declined. Two consequences, both
+  deliberate: a statement holding *both* a `pending` entry and a stale `duplicate` entry stays a
+  no-op, so the stale duplicate survives; and a T212 feed month of nothing but trades holds no
+  entry the user can act on, so it is read again on every sync — nothing is lost, the entries come
+  back with the same ids, but the statement is touched.
 - **T4 reads "every entry is imported or skipped" literally, so `informational` holds a file in
-  `staged/`.** A weaker rule (`pending`/`error`/`duplicate` pin the file, `informational` does not)
-  was considered and declined by the human. Consequences: the Firstrade file (51 income + 15
-  trades) stays in `staged/` until Stage 3 turns trades into movements, and a file whose entries
-  are all trades waits in `staged/` with nothing the review offers to select. The rule is now
-  written as the complement (`status NOT IN ('imported','skipped')`), so it stays correct as
-  statuses are added.
+  `staged/`.** The weaker rule the human declined would have let a file of nothing but trades reach
+  `parsed/` with nothing imported. As it stands the Firstrade file (51 income + 15 trades) waits in
+  `staged/` until Stage 3 turns trades into movements. The rule is written as the complement
+  (`status NOT IN ('imported','skipped')`), so it stays correct as statuses are added.
+- **T12 changed the mobile app**, against this plan's "server + desktop only" header: the human
+  chose it over a desktop-only endpoint for the account save.
 
 ## Evidence (Stage 1, T1–T8)
 
@@ -198,15 +197,13 @@ Guards that must pass in **both** states, because they pin behaviour the change 
 (the plan's feed constraint), and the nine existing file-placement tests.
 
 Also checked, for every task: `cargo clippy --all-targets` (no new warnings; the 3 `erasing_op`
-errors in `src/finance_scenarios.rs` are pre-existing), `cargo build`, and `npx tsc --noEmit`. The
-new code is rustfmt-clean; the repository is not — 37 files have pre-existing rustfmt drift.
+errors in `src/finance_scenarios.rs` are pre-existing), `cargo build`, `npx tsc --noEmit` and
+rustfmt (the new code is clean; 37 files have pre-existing drift).
 
-Two findings worth keeping:
-- **T3** exposed that all three file sources put the file's hash in their `source_key`, so for a
-  file "same `source_key`" means "same bytes" and the no-op was the only path a re-dropped file
-  could take. The T212 feed is the exception: its key is the month bucket.
-- **T6** bumped the schema past the number of snapshots kept, which broke three snapshot tests that
-  hard-coded `v1`. They now name the version just below the latest.
+Two findings worth keeping: **T3** exposed that all three file sources put the file's hash in
+their `source_key`, so for a file "same `source_key`" means "same bytes" — the no-op was the only
+path a re-dropped file could take (the T212 feed is the exception). **T6** bumped the schema past
+the number of snapshots kept, breaking three tests that hard-coded `v1`.
 
 ## Stage 2 (the account tree)
 
@@ -233,18 +230,21 @@ Stage 1 is complete: every task above is done and the suite is green.
 
 ### T11 (2026-11-13)
 - `cargo test`: 247 passed. `a_number_from_another_institution_is_refused` fails when the
-  source/root check is disabled — the Firstrade number lands on a Crédit Agricole leaf.
-  The other three cover the same-institution case, a rootless account joining its source's root,
-  and clearing an identity leaving the root alone.
-- `cargo clippy --all-targets`: no new warnings and no new errors. The new code is rustfmt-clean.
+  source/root check is disabled — the Firstrade number lands on a Crédit Agricole leaf. The other
+  three cover the same institution, a rootless account joining its source's root, and clearing.
 - `cargo clippy --all-targets`: no new warnings and no new errors. The new code is rustfmt-clean.
 
+### T12 (2026-11-13)
+- `cargo test`: 249 passed. `a_push_cannot_revert_the_account_type` fails when the vocabulary
+  filter is removed: the push writes "bank" over "savings". The other covers the phone's push (no
+  type — the account is left alone) and the desktop's (a known type — it lands).
+- `flutter analyze lib/src/sync/data_push_service.dart`: no issues. The phone's suite gives the same
+  result with and without the change (190 passed, 156 failed — the failures are pre-existing and
+  environmental: `libsqlite3.so` cannot be loaded in this shell, and they fail identically at HEAD).
+- `npx tsc --noEmit`: clean. `npx vitest run`: 49 passed. `cargo clippy --all-targets`: no new
+  warnings and no new errors. The new code is rustfmt-clean.
+
 ### Still to come
-- **T10** — the import resolves or creates the root by source (Firstrade → a broker root with a
-  `cash` leaf), and `default_account_type` becomes the kind rule.
-- **T11** — the identity endpoint refuses a leaf whose source differs from its root's.
-- **T12** — the phone push stops writing `type`. **Until this lands, the next phone sync writes the
-  old vocabulary back**: `push_budget_accounts` still does `type=excluded.type`, so a phone that
-  pushes its accounts would turn the migration's `cash` back into `bank`.
-- **T13** — the desktop accounts view: roots with leaves under them, the root's total, the type
-  editor offering cash/savings/securities, creating and renaming a root, moving a leaf.
+- **T13** — the desktop accounts view: roots with leaves under them, the root's total, creating and
+  renaming a root, and moving a leaf (same source only). The type editor's vocabulary was narrowed
+  in T12, so what is left is the tree itself.

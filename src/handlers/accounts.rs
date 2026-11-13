@@ -616,6 +616,116 @@ mod tests {
         );
     }
 
+    /// The type is the server's to decide. The pull sends it down; a push that
+    /// carries one the server does not know — a phone with the old vocabulary
+    /// — is ignored rather than applied, so a sync cannot revert the rename.
+    #[tokio::test]
+    async fn a_push_cannot_revert_the_account_type() {
+        let state = state();
+        {
+            let conn = state.db.get().unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, name, type, opening_balance, note, created_at, updated_at)
+                 VALUES ('acc-1', 'Livret A', 'savings', 0.0, NULL, 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let push: crate::handlers::push::BudgetAccountsPush = serde_json::from_value(
+            serde_json::json!({
+                "accounts": [{
+                    "id": "acc-1",
+                    "name": "Livret A",
+                    "type": "bank",
+                    "openingBalance": 0.0,
+                    "note": null,
+                    "createdAt": 1,
+                    "deletedAt": null,
+                }],
+                "deleted": [],
+            }),
+        )
+        .unwrap();
+        crate::handlers::push::push_budget_accounts(State(state.clone()), Json(push)).await;
+
+        let type_: String = state
+            .db
+            .get()
+            .unwrap()
+            .query_row("SELECT type FROM accounts WHERE id='acc-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(type_, "savings", "the stale vocabulary did not land");
+    }
+
+    /// The phone does not push the type at all, and the desktop does. A push
+    /// without one leaves the account as it is; a push with one the server
+    /// knows sets it.
+    #[tokio::test]
+    async fn a_push_sets_the_type_only_when_it_carries_one_the_server_knows() {
+        let state = state();
+        {
+            let conn = state.db.get().unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, name, type, opening_balance, note, created_at, updated_at)
+                 VALUES ('acc-1', 'Eko by CA', 'cash', 0.0, NULL, 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        // The phone's push: no type at all.
+        let phone: crate::handlers::push::BudgetAccountsPush = serde_json::from_value(
+            serde_json::json!({
+                "accounts": [{
+                    "id": "acc-1",
+                    "name": "Eko by CA",
+                    "openingBalance": 0.0,
+                    "note": null,
+                    "createdAt": 1,
+                    "deletedAt": null,
+                }],
+                "deleted": [],
+            }),
+        )
+        .unwrap();
+        crate::handlers::push::push_budget_accounts(State(state.clone()), Json(phone)).await;
+
+        let type_: String = state
+            .db
+            .get()
+            .unwrap()
+            .query_row("SELECT type FROM accounts WHERE id='acc-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(type_, "cash", "a push without a type leaves it alone");
+
+        // The desktop's push: a type the server knows.
+        let desktop: crate::handlers::push::BudgetAccountsPush = serde_json::from_value(
+            serde_json::json!({
+                "accounts": [{
+                    "id": "acc-1",
+                    "name": "Eko by CA",
+                    "type": "savings",
+                    "openingBalance": 0.0,
+                    "note": null,
+                    "createdAt": 1,
+                    "deletedAt": null,
+                }],
+                "deleted": [],
+            }),
+        )
+        .unwrap();
+        crate::handlers::push::push_budget_accounts(State(state.clone()), Json(desktop)).await;
+
+        let type_: String = state
+            .db
+            .get()
+            .unwrap()
+            .query_row("SELECT type FROM accounts WHERE id='acc-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(type_, "savings", "the desktop's edit landed");
+    }
+
     /// A number a *deleted* account still holds is refused to everyone else —
     /// the partial unique index covers tombstones — so clearing it from the
     /// tombstone has to be possible, or the number is unusable for good and

@@ -20,10 +20,14 @@ const SOURCE_LABELS: Record<string, string> = {
   firstrade: "Firstrade",
 };
 
-/** Account types, matching what the budget accounts push accepts and the
- *  phone's `AccountType` understands; the list keeps the account's current
- *  type visible even when it is outside this set. */
-const ACCOUNT_TYPES = ["bank", "savings", "investment", "cash", "credit", "other"];
+/** Account types: what an account *holds* — cash, savings, or securities.
+ *
+ *  The server owns this vocabulary. It sends the type down in the pull and
+ *  only accepts one it knows in a push, so offering anything else here would
+ *  be an edit the server silently ignores. The list keeps the account's
+ *  current type visible even when it is outside this set, so a legacy account
+ *  still shows what it is. */
+const ACCOUNT_TYPES = ["cash", "savings", "securities"];
 
 /** Amount with its currency code, signed for the account the row belongs to.
  *  Income and inbound transfers show `+`; expenses and outbound transfers
