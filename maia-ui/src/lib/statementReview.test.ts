@@ -1,6 +1,12 @@
 import { describe, expect, test } from "vitest";
 import type { StatementDetail, StatementLine, TransferMatch } from "./api";
-import { liveMatches, matchedLineIds, reviewEmptiness, selectableLineIds } from "./statementReview";
+import {
+  liveMatches,
+  matchedLineIds,
+  parsedRowsSummary,
+  reviewEmptiness,
+  selectableLineIds,
+} from "./statementReview";
 
 function line(id: string, over: Partial<StatementLine> = {}): StatementLine {
   return {
@@ -171,6 +177,25 @@ describe("selectableLineIds", () => {
     const settled = line("foreign", { status: "imported" });
     const d = detail("s1", [out], [match("m1", out, settled)]);
     expect([...selectableLineIds([d])]).toEqual([]);
+  });
+});
+
+describe("parsedRowsSummary", () => {
+  test("reports what the parser read, kept and dropped", () => {
+    expect(parsedRowsSummary({ rowsRead: 67, rowsKept: 66, rowsSkipped: 1 })).toBe(
+      "67 rows read · 66 kept · 1 skipped",
+    );
+  });
+
+  test("says nothing when the parser kept no such record", () => {
+    expect(parsedRowsSummary({ lines: 12 })).toBe("");
+    expect(parsedRowsSummary(null)).toBe("");
+    expect(parsedRowsSummary(undefined)).toBe("");
+    expect(parsedRowsSummary("not an object")).toBe("");
+  });
+
+  test("a missing count is not invented", () => {
+    expect(parsedRowsSummary({ rowsRead: 67, rowsSkipped: 1 })).toBe("");
   });
 });
 

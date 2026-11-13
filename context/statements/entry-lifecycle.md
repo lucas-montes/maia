@@ -151,6 +151,19 @@ the verdicts.
 The summary no longer says "Nothing selected. Tick the entries to import" when
 there is nothing to tick.
 
+## What a parser records
+
+A statement's `parsed_json` holds what its parser saw: the period it covers,
+how many entries it made, and — for a parser that can drop rows — how many
+rows it read, kept and skipped.
+
+The Firstrade parser can drop a row: a row whose date will not parse has no
+date, so it cannot become an entry. It used to be dropped by the CSV reader,
+which made an export short a line with nothing to show for it. The reader now
+keeps it, the parser warns about it by name, and the statement records the
+counts. The review shows them (`parsedRowsSummary` in
+`maia-ui/src/lib/statementReview.ts`): "67 rows read · 66 kept · 1 skipped".
+
 ## Where a file sits
 `reconcile_files` derives each file's root from the state of its statements
 rather than remembering it, and moves the file to match:

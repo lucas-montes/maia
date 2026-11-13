@@ -66,6 +66,23 @@ export function isImportable(line: { status: string }): boolean {
   return line.status === "pending" || line.status === "error";
 }
 
+/** The parser's own record of what it read, kept and dropped.
+ *
+ *  A parser that drops rows says how many: the review shows the entries it
+ *  kept, and this says what went missing. Empty when the parser recorded no
+ *  counts, so a statement from a parser that keeps no such record simply has
+ *  nothing to show.
+ */
+export function parsedRowsSummary(parsed: unknown): string {
+  if (!parsed || typeof parsed !== "object") return "";
+  const record = parsed as Record<string, unknown>;
+  const read = typeof record.rowsRead === "number" ? record.rowsRead : null;
+  const kept = typeof record.rowsKept === "number" ? record.rowsKept : null;
+  const skipped = typeof record.rowsSkipped === "number" ? record.rowsSkipped : null;
+  if (read === null || kept === null || skipped === null) return "";
+  return `${read} row${read !== 1 ? "s" : ""} read · ${kept} kept · ${skipped} skipped`;
+}
+
 /** What a review can still import, and what stands in the way. */
 export interface ReviewEmptiness {
   /** Entries the review can still import. */

@@ -73,10 +73,20 @@ impl Parser for FirstradeSource {
         let mut lines: Vec<StatementLineDraft> = Vec::new();
         let mut occurrences: BTreeMap<(String, String, String, String), usize> = BTreeMap::new();
         let mut warnings = Vec::new();
+        // How many rows the file held, and how many of them became entries. A
+        // row the parser cannot date is dropped, and the difference is what
+        // went missing.
+        let mut rows_read = 0usize;
+        let mut rows_skipped = 0usize;
 
         for row in rows {
+            rows_read += 1;
             let Some(posted_at) = row.posted_at else {
-                warnings.push(format!("row without a date: {}", row.raw.join(",")));
+                rows_skipped += 1;
+                warnings.push(format!(
+                    "row without a readable date: {}",
+                    row.raw.join(",")
+                ));
                 continue;
             };
             // The month stays in the fingerprint even though statements are no
@@ -160,6 +170,8 @@ impl Parser for FirstradeSource {
             source_hash: ctx.source_hash.clone(),
             stored_path: ctx.stored_path.clone(),
             source_path: ctx.source_path.clone(),
+            rows_read,
+            rows_skipped,
             lines,
             warnings,
         }])
@@ -186,6 +198,11 @@ pub struct FirstradeStatement {
     /// The dropped file's own path, carried through so the list endpoint can
     /// group a file's statements (see [`ParseContext::source_path`]).
     pub source_path: Option<String>,
+    /// How many data rows the file held, and how many of them were dropped
+    /// because their date could not be read. Recorded on the statement so the
+    /// review can show what went missing.
+    pub rows_read: usize,
+    pub rows_skipped: usize,
     pub lines: Vec<StatementLineDraft>,
     pub warnings: Vec<String>,
 }
@@ -225,6 +242,9 @@ impl FirstradeStatement {
             source_hash: self.source_hash,
             parsed: serde_json::json!({
                 "lines": self.lines.len(),
+                "rowsRead": self.rows_read,
+                "rowsKept": self.lines.len(),
+                "rowsSkipped": self.rows_skipped,
                 "periodStart": self.period_start,
                 "periodEnd": self.period_end,
             }),
@@ -270,12 +290,12 @@ fn parse_csv(text: &str) -> Result<Vec<FirstradeRow>, SourceError> {
             continue;
         }
         let columns = columns.as_ref().expect("columns detected above");
-        let Some(date) = columns.get(&fields, "date") else {
-            continue;
-        };
-        let Some(posted_at) = parse_datetime(&date) else {
-            continue;
-        };
+        // A row whose date cannot be read is kept, with no date, so the parser
+        // can warn about it. Dropping it here would make it vanish with no
+        // trace: the export would be short a line and nothing would say so.
+        let posted_at = columns
+            .get(&fields, "date")
+            .and_then(|date| parse_datetime(&date));
         let action = columns
             .get(&fields, "action")
             .or_else(|| columns.get(&fields, "type"))
@@ -299,7 +319,7 @@ fn parse_csv(text: &str) -> Result<Vec<FirstradeRow>, SourceError> {
             .filter(|value| !value.is_empty());
 
         rows.push(FirstradeRow {
-            posted_at: Some(posted_at),
+            posted_at,
             action,
             symbol,
             description,
@@ -669,10 +689,12 @@ mod tests {
         assert_eq!(statements[0].lines[0].dedupe_key, expected);
     }
 
-    /// An undated row never reaches a statement, and the dated ones around it
-    /// still do.
+    /// An undated row never becomes an entry, but it is not swallowed: the
+    /// statement says how many rows it read and how many it dropped, and warns
+    /// about the row itself. Dropping it silently made an export short a line
+    /// with nothing to show for it.
     #[test]
-    fn a_row_without_a_readable_date_is_skipped() {
+    fn a_row_without_a_readable_date_is_counted_and_warned_about() {
         let csv = "Date,Action,Symbol,Description,Quantity,Price,Amount\n\
                    06/15/2026,DEPOSIT,,ACH deposit,,,100.00\n\
                    not-a-date,DEPOSIT,,ACH deposit,,,100.00\n";
@@ -684,8 +706,39 @@ mod tests {
         let statements = FirstradeSource::new(PathBuf::from("x.csv"))
             .parse(&[doc], &ctx())
             .unwrap();
-        let warnings: usize = statements.iter().map(|s| s.warnings.len()).sum();
-        assert_eq!(warnings, 0, "an undated row is dropped by the CSV reader");
-        assert_eq!(statements[0].lines.len(), 1);
+        assert_eq!(
+            statements[0].lines.len(),
+            1,
+            "the dated row still becomes an entry"
+        );
+        assert_eq!(statements[0].rows_read, 2, "both rows were read");
+        assert_eq!(statements[0].rows_skipped, 1, "one row could not be dated");
+        let warnings: Vec<&String> = statements[0].warnings.iter().collect();
+        assert_eq!(warnings.len(), 1, "the row is named: {warnings:?}");
+        assert!(
+            warnings[0].contains("not-a-date"),
+            "the warning quotes the row: {warnings:?}"
+        );
+    }
+
+    /// The statement records what the parser read, kept and dropped, so the
+    /// review can show what went missing.
+    #[test]
+    fn the_statement_records_the_rows_it_read_kept_and_skipped() {
+        let csv = "Date,Action,Symbol,Description,Quantity,Price,Amount\n\
+                   06/15/2026,DEPOSIT,,ACH deposit,,,100.00\n\
+                   not-a-date,DEPOSIT,,ACH deposit,,,100.00\n";
+        let doc = RawDocument::file(
+            DocumentKind::Csv,
+            csv.as_bytes().to_vec(),
+            PathBuf::from("x.csv"),
+        );
+        let statements = FirstradeSource::new(PathBuf::from("x.csv"))
+            .parse(&[doc], &ctx())
+            .unwrap();
+        let draft = statements.into_iter().next().unwrap().into_draft();
+        assert_eq!(draft.parsed["rowsRead"], 2);
+        assert_eq!(draft.parsed["rowsKept"], 1);
+        assert_eq!(draft.parsed["rowsSkipped"], 1);
     }
 }

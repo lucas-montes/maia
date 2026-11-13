@@ -18,6 +18,7 @@ import {
   liveMatches,
   localMatchSide,
   matchedLineIds,
+  parsedRowsSummary,
   reviewEmptiness,
   selectableLineIds,
 } from "../lib/statementReview";
@@ -317,6 +318,7 @@ function detailHtml(
   const pending = detail.lines.filter((line) => line.status === "pending").length;
   const failed = detail.lines.filter((line) => line.status === "error").length;
   const emptiness = reviewEmptiness([detail]);
+  const rows = parsedRowsSummary(s.parsed);
 
   const tradeRows = trades
     .map(
@@ -345,6 +347,7 @@ function detailHtml(
           <div><span class="text-ink-500">Opening:</span> <span class="font-mono text-ink-300">${s.openingBalance === null ? "?" : escapeHtml(money(s.openingBalance, s.currencyCode))}</span></div>
           <div><span class="text-ink-500">Closing:</span> <span class="font-mono text-ink-300">${s.closingBalance === null ? "?" : escapeHtml(money(s.closingBalance, s.currencyCode))}</span></div>
           <div><span class="text-ink-500">Entries:</span> <span class="text-ink-300">${detail.lines.length} (${pending} pending${failed > 0 ? ` · ${failed} failed` : ""})</span></div>
+          ${rows ? `<div><span class="text-ink-500">Rows:</span> <span class="text-ink-300">${escapeHtml(rows)}</span></div>` : ""}
           <div><span class="text-ink-500">Updated:</span> <span class="text-ink-300">${escapeHtml(formatEpoch(s.updatedAt))}</span></div>
         </div>
         ${s.parseError ? `<div class="mt-3 rounded border border-surface-800 bg-base-100 p-2 text-xs text-err-400">Parse failed: ${escapeHtml(s.parseError)}</div>` : ""}
@@ -704,6 +707,8 @@ function fileHtml(
       // What this account can still add: entries waiting to be reviewed, and
       // entries whose import failed and can be retried.
       const accountPending = ordinary.filter((line) => isImportable(line)).length;
+      // What the parser read, kept and dropped, when it kept a record of it.
+      const rows = parsedRowsSummary(s.parsed);
       // Month subheadings when the account spans months. A file used to be
       // split into one statement per month, which the review read as one
       // account each; the months were real information, so they are kept —
@@ -729,7 +734,7 @@ function fileHtml(
       return `
         <div class="rounded border border-surface-800 bg-base-100 p-4">
           <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <h3 class="text-sm font-medium text-ink-200">${escapeHtml(statementTitle(s))} <span class="font-normal text-ink-500">· ${accountPending} entr${accountPending !== 1 ? "ies" : "y"} to add</span></h3>
+            <h3 class="text-sm font-medium text-ink-200">${escapeHtml(statementTitle(s))} <span class="font-normal text-ink-500">· ${accountPending} entr${accountPending !== 1 ? "ies" : "y"} to add${rows ? ` · ${escapeHtml(rows)}` : ""}</span></h3>
             ${s.periodStart && s.periodEnd ? `<span class="text-xs text-ink-500">${escapeHtml(s.periodStart)} → ${escapeHtml(s.periodEnd)}</span>` : ""}
           </div>
           <table class="table table-sm w-full">

@@ -102,8 +102,13 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Boundaries: In — `statementReview.ts` (a `reviewEmptiness` helper: what can still be imported, and how many entries duplicate another file), the file review and the statement review in `statements.ts`, and the summary's "Nothing selected" message. Out — the server, the schema, the entry tables themselves.
   - Note: the summary used to say "Nothing selected. Tick the entries to import" when there was nothing to tick. It now says there is nothing to import, and the explanation below it says why.
 
-- [ ] T8 Firstrade parser warns on an unreadable date row instead of `continue` (`firstrade.rs:273`);
-      the statement records rows read / kept / skipped and the review shows it.
+- [x] T8 Firstrade parser warns on an unreadable date row instead of `continue` (`firstrade.rs:273`);
+      the statement records rows read / kept / skipped and the review shows it. (status:done)
+  - Completed: 2026-11-13
+  - Goal: a row the parser cannot date is reported instead of vanishing, and the statement says how many rows it read, kept and dropped.
+  - Boundaries: In — `firstrade.rs` (the CSV reader keeps an undatable row so the parser can warn; the statement records the counts in its `parsed_json`), `statementReview.ts` (a `parsedRowsSummary` helper) and the two reviews that show it. Out — the other parsers, the entry tables, the schema.
+  - Note: the row is still dropped — it has no date, so it cannot become an entry. What changed is that it is now counted and named in a warning, instead of disappearing with no trace.
+  - Note: the warning was already there for a row that reached the parser; the reader dropped the rows before that, so it never fired.
 
 ### Stage 2 — account tree (migration v13)
 - [ ] T9  `account_roots` + `accounts.root_id`; map `bank→cash, investment→cash, other→cash`;
@@ -208,6 +213,16 @@ Chosen: book the **cash leg as a fact** and derive everything else.
 - `npx tsc --noEmit`: clean. `npx vitest run`: 46 passed (4 new, for `reviewEmptiness`).
 - `cargo test`: 238 passed — no server change, so the Rust suite is untouched.
 
+### T8 (2026-11-13)
+- `cargo test`: 239 passed.
+  `a_row_without_a_readable_date_is_counted_and_warned_about` and
+  `the_statement_records_the_rows_it_read_kept_and_skipped` both fail against the previous reader
+  (it dropped the row: "both rows were read — left: 1, right: 2"). The previous test, which pinned
+  the silent drop, was replaced by these two.
+- `npx tsc --noEmit`: clean. `npx vitest run`: 49 passed (3 new, for `parsedRowsSummary`).
+- `cargo clippy --all-targets`: no new warnings and no new errors.
+- The new code is rustfmt-clean.
+
 ## Remaining for Stage 1
-- **T8 is left.** It makes the Firstrade parser warn on an unreadable date row instead of skipping it
-  silently, and records the rows read / kept / skipped on the statement so the review shows it.
+- **Nothing — Stage 1 is complete.** Stage 2 starts with migration v13: the account tree
+  (`account_roots` and `accounts.root_id`).
