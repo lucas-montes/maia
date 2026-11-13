@@ -1651,7 +1651,7 @@ mod tests {
         let created = accounts_of(&pool);
         assert_eq!(created.len(), 1, "one identity, one account");
         let account_id = created[0].0.clone();
-        assert_eq!(created[0].2, "investment");
+        assert_eq!(created[0].2, "cash");
 
         let derived = stable_uuid(
             uuid::Uuid::from_u128(0x0a1c_2e4f_6b8d_4f01_9a3c_5e7f_9b1d_2f40),
@@ -1764,6 +1764,12 @@ mod tests {
     }
 }
 
+/// The type a new account gets: what it *holds*, not what kind of institution
+/// it is at.
+///
+/// `cash` and `savings` are the two a bank account can be; a brokerage cash
+/// account is `cash` too, and its securities sit in a sibling leaf under the
+/// same root.
 pub(crate) fn default_account_type(source: &str, name: &str) -> &'static str {
     match source {
         "credit_agricole" => {
@@ -1774,10 +1780,9 @@ pub(crate) fn default_account_type(source: &str, name: &str) -> &'static str {
             {
                 "savings"
             } else {
-                "bank"
+                "cash"
             }
         }
-        "trading212" | "firstrade" => "investment",
-        _ => "other",
+        _ => "cash",
     }
 }

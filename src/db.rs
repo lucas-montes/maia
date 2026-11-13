@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, bail};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension, params};
 
 /// A pool of SQLite connections rather than one connection behind a mutex.
 ///
@@ -209,13 +209,18 @@ pub const MIGRATIONS: &[(i64, Step)] = &[
         12,
         Step::Guarded(crate::statements::store::release_stale_duplicates),
     ),
+    // The account tree. A root is the institution a set of accounts belongs to
+    // — Crédit Agricole, Firstrade — and its leaves are the accounts
+    // themselves; a root's balance is the sum of its leaves. Roots are
+    // server-only: the phone never sees them.
+    (13, Step::Guarded(add_account_roots)),
 ];
 
 /// Highest version in `MIGRATIONS`.
 ///
 /// A database newer than this means the data is newer than the binary, which is
 /// what a Nix rollback looks like. `migrate` refuses rather than serving.
-pub const LATEST_VERSION: i64 = 12;
+pub const LATEST_VERSION: i64 = 13;
 
 /// The v1 schema, exactly as it shipped.
 ///
@@ -1024,6 +1029,95 @@ fn add_ingredient_price_source_url(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// v13: the account tree.
+///
+/// A root is the institution a set of accounts belongs to; its leaves are the
+/// accounts. The existing accounts are re-parented under a root for their
+/// source, and their `type` is brought into the new vocabulary: `cash`,
+/// `savings` or `securities` — what the account *holds*, rather than what kind
+/// of institution it is at.
+fn add_account_roots(conn: &Connection) -> anyhow::Result<()> {
+    if !table_exists(conn, "account_roots")? {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS account_roots (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                source TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                deleted_at INTEGER
+            );",
+        )?;
+    }
+    // Partial, like `idx_accounts_external`: a root the user made has no
+    // source, and two of those must not collide with each other.
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_account_roots_source
+             ON account_roots(source) WHERE source IS NOT NULL;",
+    )?;
+    if !column_exists(conn, "accounts", "root_id")? {
+        conn.execute_batch(
+            "ALTER TABLE accounts ADD COLUMN root_id TEXT REFERENCES account_roots(id) ON DELETE CASCADE",
+        )?;
+    }
+
+    // The old vocabulary mixed the institution kind with the product kind:
+    // `bank`, `savings`, `investment` and `other` all described a product, and
+    // two of them described the same one. `credit` is left alone — it is a
+    // card, not a product, and the new vocabulary has no word for it.
+    //
+    // `updated_at` moves because the pull sends `type`: the phone has to learn
+    // the new value or it keeps showing the old one.
+    conn.execute(
+        "UPDATE accounts SET type='cash', updated_at=?1 WHERE type IN ('bank','investment','other')",
+        params![server_time_ms()],
+    )?;
+
+    // One root per source the accounts actually use.
+    let sources: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT source FROM accounts
+             WHERE source IS NOT NULL AND source <> ''",
+        )?;
+        let rows = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let now = server_time_ms();
+    for source in sources {
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT id FROM account_roots WHERE source=?1",
+                params![source],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let root_id = match existing {
+            Some(id) => id,
+            None => {
+                let (name, kind) = crate::statements::root_for_source(&source);
+                let id = uuid::Uuid::now_v7().to_string();
+                conn.execute(
+                    "INSERT INTO account_roots (id, name, kind, source, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                    params![id, name, kind, source, now],
+                )?;
+                id
+            }
+        };
+        // Every account of the source, live or deleted: a deleted leaf still
+        // belongs to its root, and the root's balance counts only the live
+        // ones.
+        conn.execute(
+            "UPDATE accounts SET root_id=?1 WHERE source=?2",
+            params![root_id, source],
+        )?;
+    }
+    Ok(())
+}
+
 fn column_exists(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = stmt.query([])?;
@@ -1313,8 +1407,10 @@ mod tests {
             .unwrap();
         }
 
-        // Run only v12 against the already-created schema.
-        super::set_user_version(&conn, super::LATEST_VERSION - 1).unwrap();
+        // Run v12 against the already-created schema. The version is the one
+        // v12 leaves behind, written out rather than derived: the point of
+        // this test is v12, and a later version must not shift it.
+        super::set_user_version(&conn, 11).unwrap();
         super::migrate(&conn).unwrap();
 
         let state = |id: &str| -> (String, Option<String>) {
@@ -1351,6 +1447,124 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "partial");
+    }
+
+    /// v13 gives the accounts a tree: a root for the institution, the accounts
+    /// as its leaves, and a `type` that says what the account holds.
+    #[test]
+    fn migration_v13_builds_the_account_tree_and_remaps_the_types() {
+        let pool = init_memory().unwrap();
+        let conn = pool.get().unwrap();
+        super::migrate(&conn).unwrap();
+
+        for (id, name, type_, source) in [
+            ("a1", "Eko by CA", "bank", Some("credit_agricole")),
+            ("a2", "Livret A", "savings", Some("credit_agricole")),
+            ("a3", "LDD Solidaire", "savings", Some("credit_agricole")),
+            (
+                "a4",
+                "Eko by CA (external)",
+                "other",
+                Some("credit_agricole"),
+            ),
+            ("a5", "Broker cash", "investment", Some("firstrade")),
+            ("a6", "Groceries", "bank", None),
+        ] {
+            conn.execute(
+                "INSERT INTO accounts
+                    (id, name, type, opening_balance, note, created_at, updated_at,
+                     source, external_id)
+                 VALUES (?1, ?2, ?3, 0.0, NULL, 1, 1, ?4, ?5)",
+                params![id, name, type_, source, source.map(|s| format!("{s}-{id}"))],
+            )
+            .unwrap();
+        }
+
+        // Run v13 against the already-created schema.
+        super::set_user_version(&conn, 12).unwrap();
+        super::migrate(&conn).unwrap();
+
+        // One root per source in use, named and typed after the institution.
+        let mut stmt = conn
+            .prepare("SELECT name, kind, source FROM account_roots ORDER BY source")
+            .unwrap();
+        let roots: Vec<(String, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(roots.len(), 2, "one root per source in use: {roots:?}");
+        assert_eq!(
+            roots[0],
+            (
+                "Crédit Agricole".to_string(),
+                "bank".to_string(),
+                "credit_agricole".to_string()
+            )
+        );
+        assert_eq!(
+            roots[1],
+            (
+                "Firstrade".to_string(),
+                "broker".to_string(),
+                "firstrade".to_string()
+            )
+        );
+
+        // Every account of a source is a leaf of that source's root, and a
+        // hand-made account has no root until the user gives it one.
+        let mut stmt = conn
+            .prepare(
+                "SELECT a.id, r.source FROM accounts a
+                 LEFT JOIN account_roots r ON r.id = a.root_id
+                 ORDER BY a.id",
+            )
+            .unwrap();
+        let leaves: Vec<(String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            leaves,
+            vec![
+                ("a1".to_string(), Some("credit_agricole".to_string())),
+                ("a2".to_string(), Some("credit_agricole".to_string())),
+                ("a3".to_string(), Some("credit_agricole".to_string())),
+                ("a4".to_string(), Some("credit_agricole".to_string())),
+                ("a5".to_string(), Some("firstrade".to_string())),
+                ("a6".to_string(), None),
+            ]
+        );
+
+        // The type says what the account holds: cash, savings or securities.
+        let mut stmt = conn
+            .prepare("SELECT id, type FROM accounts ORDER BY id")
+            .unwrap();
+        let types: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            types,
+            vec![
+                ("a1".to_string(), "cash".to_string()),
+                ("a2".to_string(), "savings".to_string()),
+                ("a3".to_string(), "savings".to_string()),
+                ("a4".to_string(), "cash".to_string()),
+                ("a5".to_string(), "cash".to_string()),
+                ("a6".to_string(), "cash".to_string()),
+            ]
+        );
+
+        // The phone reads `type`, so a remapped account has to look changed.
+        let updated_at: i64 = conn
+            .query_row("SELECT updated_at FROM accounts WHERE id='a1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(updated_at > 1, "the phone must learn the new type");
     }
 
     /// A pre-versioning database (`user_version` 0, older table set) is brought

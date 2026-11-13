@@ -111,8 +111,15 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Note: the warning was already there for a row that reached the parser; the reader dropped the rows before that, so it never fired.
 
 ### Stage 2 — account tree (migration v13)
-- [ ] T9  `account_roots` + `accounts.root_id`; map `bank→cash, investment→cash, other→cash`;
-      create "Crédit Agricole" (bank) and re-parent the 4 existing accounts.
+- [x] T9  `account_roots` + `accounts.root_id`; map `bank→cash, investment→cash, other→cash`;
+      create "Crédit Agricole" (bank) and re-parent the 4 existing accounts. (status:done)
+  - Completed: 2026-11-13
+  - Goal: accounts become two levels — a root for the institution, the accounts as its leaves — and `type` says what an account holds rather than what kind of institution it is at.
+  - Boundaries: In — migration v13 (`src/db.rs`), `SourceId::kind` and `root_for_source` (`statements/mod.rs`), `default_account_type` (`statements/store.rs`). Out — the import creating roots (T10), the identity check (T11), the phone push (T12), the desktop view (T13).
+  - Note: root ids are minted, never derived, and roots are found by `source` — so the root the migration creates and the root the import would create are the same row. `account_roots.source` has a partial unique index, like `idx_accounts_external`: a root the user made has no source, and two of those must not collide.
+  - Note: `default_account_type` moved to the new vocabulary in this task rather than T10. Leaving it would have meant the migration remapped `bank` to `cash` and the next import wrote `bank` straight back.
+  - Note: `updated_at` moves on a remapped account, because the pull sends `type` and the phone has to learn the new value.
+  - Note: **`credit` is left alone** — it is a card, not a product, and the new vocabulary has no word for it. T13's type editor offers cash/savings/securities, so an existing `credit` account will need a decision there.
 - [ ] T10 Statement import resolves/creates the root by source (Firstrade → broker root with a
       `cash` leaf); `default_account_type` becomes the kind rule (CA: livret/ldd/épargne → savings).
 - [ ] T11 Identity endpoint refuses a leaf whose source differs from its root's.
@@ -164,65 +171,60 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   written as the complement (`status NOT IN ('imported','skipped')`), so it stays correct as
   statuses are added.
 
-## Evidence (T1–T5)
+## Evidence (Stage 1, T1–T8)
 
-### T1 + T2 (2026-11-12, commit `b056627`)
-- `cargo test`: 229 passed, 0 failed, 1 ignored. The four new tests in `src/lib.rs::statement_tests`
-  (`a_line_seen_only_in_a_discarded_statement_is_not_a_duplicate`,
-  `a_line_seen_only_in_an_ignored_statement_is_not_a_duplicate`,
-  `a_restage_replaces_a_stale_duplicate_line_with_a_pending_one`,
-  `a_restage_replaces_an_errored_line_with_a_pending_one`) all fail against the previous
-  `store.rs` and pass with it — checked by stashing the change and re-running.
-- `a_line_seen_in_another_statement_is_stored_as_duplicate` (the pre-existing live-statement case)
-  stayed green throughout: a live statement still claims its lines.
+Every task's new test was checked against the code it replaces — stashing the change or reverting
+only the part under test — so each one fails without its fix. The counts below are the suite after
+each task; the suite is green at the end of the stage (240 Rust, 49 frontend).
 
-### T3 (2026-11-12, commit `f0c75a1`)
-- `cargo test`: 233 passed. `a_live_statement_whose_entries_all_duplicate_is_read_again` and
-  `an_informational_only_feed_month_is_read_again` fail against the previous `store.rs`;
-  `an_unchanged_statement_with_an_imported_entry_is_a_no_op` and `an_unchanged_feed_month_is_a_no_op`
-  pass in both states — they are the guards the plan's feed constraint asks for.
+| Task | Test that fails without the fix |
+|---|---|
+| T1 + T2 | `a_line_seen_only_in_a_discarded_statement_is_not_a_duplicate`, `a_line_seen_only_in_an_ignored_statement_is_not_a_duplicate`, `a_restage_replaces_a_stale_duplicate_line_with_a_pending_one`, `a_restage_replaces_an_errored_line_with_a_pending_one` |
+| T3 | `a_live_statement_whose_entries_all_duplicate_is_read_again`, `an_informational_only_feed_month_is_read_again` |
+| T4 | `a_file_whose_entries_all_duplicate_stays_staged`, `an_informational_entry_holds_its_file_in_staged` |
+| T5 | `the_statement_list_counts_the_entries_that_failed`, `a_failed_transfer_pair_is_retried_as_one_transfer` |
+| T6 | `migration_v12_releases_the_entries_a_dead_statement_was_holding` |
+| T7 | `reviewEmptiness` (4 new tests) |
+| T8 | `a_row_without_a_readable_date_is_counted_and_warned_about`, `the_statement_records_the_rows_it_read_kept_and_skipped` |
 
-### T4 (2026-11-12, commit `1cd3702`)
-- `cargo test`: 235 passed. `a_file_whose_entries_all_duplicate_stays_staged` and
-  `an_informational_entry_holds_its_file_in_staged` fail against the previous query and pass with it
-  (checked by reverting only the SQL, keeping the tests). The nine existing placement tests stayed
-  green.
+Guards that must pass in **both** states, because they pin behaviour the change must not break:
+`a_line_seen_in_another_statement_is_stored_as_duplicate` (a live statement still claims its lines),
+`an_unchanged_statement_with_an_imported_entry_is_a_no_op` and `an_unchanged_feed_month_is_a_no_op`
+(the plan's feed constraint), and the nine existing file-placement tests.
 
-### T5 (2026-11-13)
-- `cargo test`: 237 passed, 0 failed, 1 ignored. `the_statement_list_counts_the_entries_that_failed`
-  fails without the `errorCount` query; `a_failed_transfer_pair_is_retried_as_one_transfer` fails
-  without the counterpart rule (the retry books an `expense` instead of a `transfer`).
-- `npx tsc --noEmit`: clean. `npx vitest run`: 42 passed (3 new). The two new selection tests fail
-  against the previous `statementReview.ts`.
+Also checked, for every task: `cargo clippy --all-targets` (no new warnings; the 3 `erasing_op`
+errors in `src/finance_scenarios.rs` are pre-existing), `cargo build`, and `npx tsc --noEmit`. The
+new code is rustfmt-clean; the repository is not — 37 files have pre-existing rustfmt drift, and
+the list is byte-identical with and without these changes.
 
-### T6 (2026-11-13)
-- `cargo test`: 238 passed, 0 failed, 1 ignored.
-  `migration_v12_releases_the_entries_a_dead_statement_was_holding` fails when the migration is
-  neutered: the entry stays `duplicate` with its claim intact.
-- The three snapshot tests that used to name `v1` now name the version just below the latest; they
-  pass, and the snapshot file list a migration produces is unchanged.
-- `npx tsc --noEmit`: clean. `npx vitest run`: 42 passed.
-- `cargo clippy --all-targets`: no new warnings and no new errors. The 3 `clippy::erasing_op`
-  errors in `src/finance_scenarios.rs` are pre-existing and untouched by this change.
-- `cargo build`: succeeds. The new code is rustfmt-clean; the repository is not (37 files have
-  pre-existing rustfmt drift, `src/finance_scenarios.rs` and `maia-ui/src-tauri` among them). That
-  drift predates this change and was left alone — the file list is byte-identical with and without
-  this change.
+Two findings worth keeping:
+- **T3** exposed that all three file sources put the file's hash in their `source_key`, so for a
+  file "same `source_key`" means "same bytes" and the no-op was the only path a re-dropped file
+  could take. The T212 feed is the exception: its key is the month bucket.
+- **T6** bumped the schema past the number of snapshots kept, which broke three snapshot tests that
+  hard-coded `v1`. They now name the version just below the latest.
 
-### T7 (2026-11-13)
-- `npx tsc --noEmit`: clean. `npx vitest run`: 46 passed (4 new, for `reviewEmptiness`).
-- `cargo test`: 238 passed — no server change, so the Rust suite is untouched.
+## Stage 2 (the account tree)
 
-### T8 (2026-11-13)
-- `cargo test`: 239 passed.
-  `a_row_without_a_readable_date_is_counted_and_warned_about` and
-  `the_statement_records_the_rows_it_read_kept_and_skipped` both fail against the previous reader
-  (it dropped the row: "both rows were read — left: 1, right: 2"). The previous test, which pinned
-  the silent drop, was replaced by these two.
-- `npx tsc --noEmit`: clean. `npx vitest run`: 49 passed (3 new, for `parsedRowsSummary`).
-- `cargo clippy --all-targets`: no new warnings and no new errors.
-- The new code is rustfmt-clean.
+Stage 1 is complete: every task above is done and the suite is green.
 
-## Remaining for Stage 1
-- **Nothing — Stage 1 is complete.** Stage 2 starts with migration v13: the account tree
-  (`account_roots` and `accounts.root_id`).
+### T9 (2026-11-13)
+- `cargo test`: 240 passed.
+  `migration_v13_builds_the_account_tree_and_remaps_the_types` covers the roots, the re-parenting,
+  the type remap and the `updated_at` bump. The v12 test now stamps version 11 explicitly, so a
+  later version cannot shift it.
+- **The real database was migrated on a copy** to check it end to end: v11 → v13 produced one root,
+  "Crédit Agricole" (kind `bank`, source `credit_agricole`), with all four accounts under it —
+  "Eko by CA" → cash, "Livret A" → savings, "LDD Solidaire" → savings, "Eko by CA (external)" →
+  cash (the deleted one). The live database itself was not touched.
+- `cargo clippy --all-targets`: no new warnings and no new errors. The new code is rustfmt-clean.
+
+### Still to come
+- **T10** — the import resolves or creates the root by source (Firstrade → a broker root with a
+  `cash` leaf), and `default_account_type` becomes the kind rule.
+- **T11** — the identity endpoint refuses a leaf whose source differs from its root's.
+- **T12** — the phone push stops writing `type`. **Until this lands, the next phone sync writes the
+  old vocabulary back**: `push_budget_accounts` still does `type=excluded.type`, so a phone that
+  pushes its accounts would turn the migration's `cash` back into `bank`.
+- **T13** — the desktop accounts view: roots with leaves under them, the root's total, the type
+  editor offering cash/savings/securities, creating and renaming a root, moving a leaf.

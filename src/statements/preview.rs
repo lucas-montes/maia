@@ -846,7 +846,10 @@ mod tests {
         let account = &result.accounts[0];
         assert_eq!(account.resolution, AccountResolution::WillCreate);
         assert_eq!(account.account_id, None, "an unmade account has no id");
-        assert_eq!(account.account_type, "investment");
+        assert_eq!(
+            account.account_type, "cash",
+            "a brokerage cash account is cash; the securities sit in a sibling leaf"
+        );
         assert_eq!(account.statement_ids.len(), 2);
         assert_eq!(account.files, vec!["one.csv", "two.csv"]);
         assert_eq!(account.transactions, 2);

@@ -133,6 +133,31 @@ impl SourceId {
     pub fn all() -> [Self; 3] {
         [Self::CreditAgricole, Self::Trading212, Self::Firstrade]
     }
+
+    /// What kind of institution this is: a bank, a broker, or a bank without
+    /// branches.
+    ///
+    /// It says what the *root* is, not what an account holds. A Crédit
+    /// Agricole account is cash or savings; a Firstrade account is cash or
+    /// securities; both live under a root of their institution's kind.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::CreditAgricole => "bank",
+            Self::Trading212 | Self::Firstrade => "broker",
+        }
+    }
+}
+
+/// The root a source's accounts belong under: its name and its kind.
+///
+/// A source the project does not know gets a root named after itself and the
+/// catch-all kind — a bank without branches, which is what an account with an
+/// unrecognised provider most likely is.
+pub fn root_for_source(source: &str) -> (String, &'static str) {
+    match SourceId::parse(source) {
+        Some(id) => (id.institution().to_string(), id.kind()),
+        None => (source.to_string(), "neobank"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
