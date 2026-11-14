@@ -1080,6 +1080,7 @@ mod tests {
                     suggested_type: None,
                     suggested_category: None,
                     metadata: serde_json::json!({}),
+                    trade: None,
                     fingerprint: format!("fp-{key}"),
                     dedupe_key: format!("dd-{key}"),
                 }],

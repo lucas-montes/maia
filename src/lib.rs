@@ -2022,7 +2022,10 @@ mod statement_tests {
     use crate::db;
     use crate::statements::{
         SourceId, ToDatabaseRecord,
-        draft::{LineKind, SaveOutcome, StatementDraft, StatementLineDraft, SuggestedType},
+        draft::{
+            LineKind, SaveOutcome, StatementDraft, StatementLineDraft, SuggestedType, TradeDetails,
+            TradeSide,
+        },
         store::{self, ImportLine, ImportRequest},
     };
 
@@ -2056,6 +2059,7 @@ mod statement_tests {
             }),
             suggested_category: None,
             metadata: serde_json::Value::Null,
+            trade: None,
             fingerprint: key.to_string(),
             dedupe_key: key.to_string(),
         }
@@ -2213,6 +2217,64 @@ mod statement_tests {
     /// An import creates the root its institution needs, and the account
     /// becomes a leaf of it. A bank has savings products and everything else;
     /// a broker's account is cash.
+    /// A staged trade keeps the cash it moved and what it bought, so the
+    /// booking can read them back from the line instead of the provider's
+    /// raw row. The source's own metadata is kept beside them.
+    #[test]
+    fn a_staged_trade_keeps_its_cash_amount_and_its_details() {
+        let pool = db::init_memory().unwrap();
+        let mut buy = line("Bought 7 VOO", -3_500.0, ms(2026, 9, 10), "buy");
+        buy.line_kind = LineKind::Trade;
+        buy.suggested_type = None;
+        buy.metadata = serde_json::json!({ "action": "Bought" });
+        buy.trade = Some(TradeDetails {
+            side: TradeSide::Buy,
+            symbol: "VOO".to_string(),
+            quantity: Some(7.0),
+            price: Some(500.0),
+        });
+        // A line whose source wrote no metadata at all still keeps the trade.
+        let mut sale = trade_line("Sold 3 NVDA", ms(2026, 9, 11), "sale");
+        sale.amount = 359.75;
+        sale.trade = Some(TradeDetails {
+            side: TradeSide::Sell,
+            symbol: "NVDA".to_string(),
+            quantity: Some(3.0),
+            price: None,
+        });
+        save(
+            &pool,
+            vec![draft(
+                "firstrade:x:hash",
+                "hash",
+                "x",
+                vec![buy.clone(), sale.clone()],
+            )],
+        );
+
+        let conn = pool.get().unwrap();
+        let stored = |description: &str| -> (f64, String, Option<String>) {
+            conn.query_row(
+                "SELECT amount, status, metadata_json FROM bank_statement_lines
+                 WHERE description=?1",
+                [description],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+        };
+        let (amount, status, metadata) = stored("Bought 7 VOO");
+        assert_eq!(amount, -3_500.0);
+        assert_eq!(status, "informational", "trades are not booked yet");
+        assert_eq!(store::stored_trade(metadata.as_deref()), buy.trade);
+        let metadata: serde_json::Value =
+            serde_json::from_str(metadata.as_deref().unwrap()).unwrap();
+        assert_eq!(metadata["action"], "Bought");
+
+        let (amount, _, metadata) = stored("Sold 3 NVDA");
+        assert_eq!(amount, 359.75);
+        assert_eq!(store::stored_trade(metadata.as_deref()), sale.trade);
+    }
+
     #[test]
     fn an_import_creates_the_root_and_parents_the_account_under_it() {
         let pool = db::init_memory().unwrap();

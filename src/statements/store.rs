@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     LINE_NS, STATEMENT_NS, TRANSACTION_NS, TRANSFER_NS,
-    draft::{SaveOutcome, StatementDraft, SuggestedType},
+    draft::{SaveOutcome, StatementDraft, StatementLineDraft, SuggestedType, TradeDetails},
     root_for_source,
     stable_uuid,
 };
@@ -24,6 +24,32 @@ struct Counts {
     informational: usize,
     duplicate: usize,
     error: usize,
+}
+
+/// What a line stores in `metadata_json`: the source's own metadata, plus the
+/// trade's structured details under `"trade"` when the line is one. The
+/// details are written by the store rather than by each parser so every
+/// source stores them under the same key, in the same shape.
+fn line_metadata(line: &StatementLineDraft) -> serde_json::Value {
+    let mut metadata = line.metadata.clone();
+    if let Some(trade) = &line.trade {
+        let details = serde_json::to_value(trade).unwrap_or(serde_json::Value::Null);
+        match metadata.as_object_mut() {
+            Some(object) => {
+                object.insert("trade".to_string(), details);
+            }
+            None => metadata = serde_json::json!({ "trade": details }),
+        }
+    }
+    metadata
+}
+
+/// The trade a stored line describes, read back from its `metadata_json`.
+/// `None` for a line that is not a trade, or one staged before trades kept
+/// their details.
+pub fn stored_trade(metadata_json: Option<&str>) -> Option<TradeDetails> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json?).ok()?;
+    serde_json::from_value(metadata.get("trade")?.clone()).ok()
 }
 
 /// Stage one statement and its lines.
@@ -202,7 +228,8 @@ pub fn save_statement(tx: &Transaction<'_>, draft: StatementDraft) -> anyhow::Re
             LINE_NS,
             &format!("line:{}:{}", statement_id, line.fingerprint),
         );
-        let metadata = serde_json::to_string(&line.metadata).unwrap_or_else(|_| "null".into());
+        let metadata =
+            serde_json::to_string(&line_metadata(line)).unwrap_or_else(|_| "null".into());
 
         let changed = tx.execute(
             "INSERT OR IGNORE INTO bank_statement_lines

@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use super::{
     DocumentKind, ParseContext, Parser, RawDocument, SourceError, SourceId, ToDatabaseRecord,
-    draft::{LineKind, StatementDraft, StatementLineDraft, SuggestedType},
+    draft::{LineKind, StatementDraft, StatementLineDraft, SuggestedType, TradeDetails, TradeSide},
     sha256_hex,
 };
 use crate::config::Config;
@@ -268,6 +268,7 @@ impl Parser for Trading212Source {
                         "type": type_,
                         "raw": item,
                     }),
+                    trade: None,
                     fingerprint,
                     dedupe_key,
                 });
@@ -339,6 +340,7 @@ impl Parser for Trading212Source {
                         "ticker": ticker,
                         "raw": item,
                     }),
+                    trade: None,
                     fingerprint,
                     dedupe_key,
                 });
@@ -391,6 +393,19 @@ impl Parser for Trading212Source {
                 order_id.as_deref(),
             );
             let dedupe_key = sha256_hex(&[PROVIDER, &account_number, &fingerprint]);
+            // The cash the fill moved is its wallet impact, signed by the side.
+            // The fingerprint above keeps the zero it always used, so a trade
+            // staged before keeps its id.
+            let trade = TradeSide::from_action(&side).map(|side| TradeDetails {
+                side,
+                symbol: ticker.clone(),
+                quantity: quantity.map(f64::abs),
+                price,
+            });
+            let amount = match &trade {
+                Some(trade) => trade.side.cash_sign() * net_value.unwrap_or(0.0).abs(),
+                None => net_value.unwrap_or(0.0),
+            };
             by_month
                 .entry(month_key(posted_at))
                 .or_default()
@@ -405,7 +420,7 @@ impl Parser for Trading212Source {
                     )
                     .trim()
                     .to_string(),
-                    amount: 0.0,
+                    amount,
                     currency_code: currency.clone(),
                     balance_after: None,
                     category_hint: None,
@@ -422,6 +437,7 @@ impl Parser for Trading212Source {
                         "fill_id": fill_id,
                         "raw": item,
                     }),
+                    trade,
                     fingerprint,
                     dedupe_key,
                 });
@@ -785,7 +801,16 @@ mod tests {
             .iter()
             .find(|l| l.line_kind == LineKind::Trade)
             .unwrap();
-        assert_eq!(trade.amount, 0.0);
+        assert_eq!(trade.amount, -200.0, "the fill's wallet impact");
+        assert_eq!(
+            trade.trade,
+            Some(TradeDetails {
+                side: TradeSide::Buy,
+                symbol: "VWCE".to_string(),
+                quantity: Some(2.0),
+                price: Some(100.0),
+            })
+        );
         assert!(trade.suggested_type.is_none());
         assert_eq!(trade.metadata["ticker"], "VWCE");
     }

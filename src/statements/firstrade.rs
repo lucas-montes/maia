@@ -3,7 +3,8 @@
 //! Firstrade has no public trading API, so this is a file source. The export
 //! layout has changed over the years, so the parser finds columns by header
 //! name and falls back to the common `Date,Action,Symbol,Description,Quantity,
-//! Price,Amount` order. Trades are informational; cash movements become
+//! Price,Amount` order. Trades keep their cash amount and their side, symbol,
+//! quantity and price (still staged informational); cash movements become
 //! importable lines with the same mapping as Trading 212.
 //!
 //! **One file is one statement.** An export used to be split into one
@@ -20,7 +21,7 @@ use chrono::NaiveDate;
 
 use super::{
     DocumentKind, ParseContext, Parser, RawDocument, SourceError, SourceId, ToDatabaseRecord,
-    draft::{LineKind, StatementDraft, StatementLineDraft, SuggestedType},
+    draft::{LineKind, StatementDraft, StatementLineDraft, SuggestedType, TradeDetails, TradeSide},
     sha256_hex,
 };
 
@@ -102,17 +103,39 @@ impl Parser for FirstradeSource {
             // look new on re-drop and book a second transaction for it.
             let month = month_key(posted_at);
             let (line_kind, suggested_type) = classify(&row.action, row.amount);
-            let amount = match line_kind {
-                LineKind::Trade => 0.0,
-                LineKind::TransferOut | LineKind::Fee => -row.amount.abs(),
-                LineKind::TransferIn | LineKind::Dividend | LineKind::Interest => row.amount.abs(),
+            let trade = if line_kind == LineKind::Trade {
+                TradeSide::from_action(&row.action).map(|side| TradeDetails {
+                    side,
+                    symbol: row.symbol.clone(),
+                    quantity: row.quantity.map(f64::abs),
+                    price: row.price,
+                })
+            } else {
+                None
+            };
+            let amount = match (&trade, line_kind) {
+                (Some(trade), _) => trade.cash_amount(Some(row.amount)),
+                (None, LineKind::Trade) => row.amount,
+                (_, LineKind::TransferOut | LineKind::Fee) => -row.amount.abs(),
+                (_, LineKind::TransferIn | LineKind::Dividend | LineKind::Interest) => {
+                    row.amount.abs()
+                }
                 _ => row.amount,
+            };
+            // A trade's identity was taken with a zero amount, from when trades
+            // carried none. It stays zero, for the same reason as the month: a
+            // trade staged before keeps its id, and an older export of the
+            // same trades still reads as a duplicate of this one.
+            let identity_amount = if line_kind == LineKind::Trade {
+                0.0
+            } else {
+                amount
             };
             let key = (
                 month.clone(),
                 row.action.clone(),
                 row.symbol.clone(),
-                format!("{:.4}:{}", amount, row.description),
+                format!("{:.4}:{}", identity_amount, row.description),
             );
             let occurrence = occurrences.entry(key).or_insert(0);
             let index = *occurrence;
@@ -124,7 +147,7 @@ impl Parser for FirstradeSource {
                 &month,
                 &row.action,
                 &row.symbol,
-                &format!("{amount:.4}"),
+                &format!("{identity_amount:.4}"),
                 &row.description,
                 &index.to_string(),
             ]);
@@ -157,6 +180,7 @@ impl Parser for FirstradeSource {
                     "reference": row.reference,
                     "raw": row.raw,
                 }),
+                trade,
                 fingerprint,
                 dedupe_key,
             });
@@ -536,9 +560,46 @@ mod tests {
         assert_eq!(lines[0].line_kind, LineKind::TransferIn);
         assert_eq!(lines[0].amount, 1000.0);
         assert_eq!(lines[1].line_kind, LineKind::Trade);
-        assert_eq!(lines[1].amount, 0.0);
+        // A trade carries the cash it moved and what it bought.
+        assert_eq!(lines[1].amount, -200.0);
+        assert_eq!(
+            lines[1].trade,
+            Some(TradeDetails {
+                side: TradeSide::Buy,
+                symbol: "VWCE".to_string(),
+                quantity: Some(2.0),
+                price: Some(100.0),
+            })
+        );
         assert_eq!(lines[2].line_kind, LineKind::Dividend);
         assert_eq!(lines[2].amount, 12.34);
+    }
+
+    /// A trade's identity was taken when trades carried no amount, so it must
+    /// not start depending on one: the trade keeps the id it was staged with,
+    /// and an older export of it still reads as a duplicate.
+    #[test]
+    fn a_trades_identity_does_not_depend_on_its_amount() {
+        let parse = |amount: &str| {
+            let csv = format!(
+                "Date,Action,Symbol,Description,Quantity,Price,Amount\n\
+                 10/17/2026,BUY,VWCE,Bought 2 shares,2,100.00,{amount}\n"
+            );
+            let doc =
+                RawDocument::file(DocumentKind::Csv, csv.into_bytes(), PathBuf::from("x.csv"));
+            FirstradeSource::new(PathBuf::from("x.csv"))
+                .parse(&[doc], &ctx())
+                .unwrap()
+                .remove(0)
+                .lines
+                .remove(0)
+        };
+        let reported = parse("-200.00");
+        let missing = parse("");
+        assert_eq!(reported.fingerprint, missing.fingerprint);
+        assert_eq!(reported.dedupe_key, missing.dedupe_key);
+        // With no amount in the row, the cash falls back to quantity × price.
+        assert_eq!(missing.amount, -200.0);
     }
 
     #[test]
@@ -580,7 +641,25 @@ mod tests {
             .flat_map(|s| &s.lines)
             .find(|l| l.line_kind == LineKind::Trade)
             .unwrap();
-        assert_eq!(buy.amount, 0.0, "a firstrade trade is informational only");
+        assert_eq!(buy.amount, -370.35, "a buy spends cash");
+        assert_eq!(
+            buy.trade,
+            Some(TradeDetails {
+                side: TradeSide::Buy,
+                symbol: "TECV".to_string(),
+                quantity: Some(3.0),
+                price: Some(123.45),
+            })
+        );
+        // The export writes a sale's quantity negative; the side carries the
+        // direction, so the quantity is kept positive.
+        let sale = statements
+            .iter()
+            .flat_map(|s| &s.lines)
+            .find(|l| l.trade.as_ref().is_some_and(|t| t.side == TradeSide::Sell))
+            .unwrap();
+        assert_eq!(sale.amount, 156.93, "a sale receives cash");
+        assert_eq!(sale.trade.as_ref().unwrap().quantity, Some(3.0));
         assert_eq!(buy.metadata.get("symbol"), Some(&serde_json::json!("TECV")));
 
         let deposit = statements

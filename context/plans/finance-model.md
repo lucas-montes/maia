@@ -142,8 +142,14 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Note: a leaf whose root is gone (the two lists came from different moments) is kept aside rather than dropped — an account that vanishes from the view is worse than one that looks unfiled ✓.
 
 ### Stage 3 — trades (migration v14)
-- [ ] T14 Parsers keep the trade amount + structured `{side, symbol, quantity, price}`
-      (`firstrade.rs:96`, `t212_csv.rs:286`).
+- [x] T14 Parsers keep the trade amount + structured `{side, symbol, quantity, price}`
+      (`firstrade.rs:96`, `t212_csv.rs:286`). (status:done)
+  - Completed: 2026-11-14
+  - Boundaries: In — `draft.rs` (`TradeSide`, `TradeDetails`, `StatementLineDraft.trade`), the three trade parsers (Firstrade, T212 CSV, and the T212 API feed, which also staged trades at 0), and the store writing the details into `metadata_json` under `"trade"` with `store::stored_trade` to read them back. Out — the schema (T15), booking (T16), the review's display (T17).
+  - Note: the amount is the cash the trade moved, signed by the side (buy negative, sale positive), because exports disagree on the sign. Firstrade falls back to quantity × price when the row has no amount; T212 does not, because its price is in the instrument's currency and its Total in the account's.
+  - Note: a trade's **identity keeps the zero amount** it always had, so a trade staged before keeps its line id and dedupe key, and an older export of the same trades still reads as a duplicate.
+  - Note: for T16 — trades already staged keep amount 0 and no details until their statement is read again, and the "already ingested" no-op (T3) means re-dropping the Firstrade file does **not** re-read it (it holds pending entries). T16 needs a way to re-read it, or the booking must refuse a trade with no stored details.
+  - Note: for T16 — `match_pending` matches any `pending` line by amount. Once trades become pending with real amounts, it must skip `line_kind = 'trade'`, or a buy could pair with a deposit of the same sum.
 - [ ] T15 Schema: `transactions.kind ∈ movement|trade` + trade details (columns or `trades` table).
 - [ ] T16 Import books a selected trade as cash leaf ↔ securities leaf (securities leaf auto-created
       under the root); the review proposes it, so there are no 15 manual decisions.
@@ -277,4 +283,4 @@ Not fixed: a phone-created account arrives as `cash`, because the phone no longe
 Fixing it needs a phone change that sends the type on creation.
 
 ### Still to come
-- **Stage 2 is complete.** Stage 3 starts with migration v14: the trades.
+- **Stage 2 is complete; T14 is done.** Next is T15, migration v14: the trade columns on `transactions`.

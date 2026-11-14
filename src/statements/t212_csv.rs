@@ -22,15 +22,15 @@
 //! Card debits and credits are the money lines; `Spending cashback` is income;
 //! `Deposit` is a transfer in, deliberately `TransferIn` so the CA↔T212
 //! matching in the store can link it to a bank outgoing. `Market buy` /
-//! `Market sell` are informational trades: shown for review, never turned into
-//! transactions, with amount 0 because the CSV's Total is the wallet impact
-//! including fees the user does not want twice-counted.
+//! `Market sell` are trades: their amount is the Total, the cash the order
+//! moved with its fees, signed by the side, and they carry the ticker, shares
+//! and price. They are still staged informational, never imported yet.
 
 use std::{collections::BTreeMap, future::Future, path::PathBuf};
 
 use super::{
     DocumentKind, ParseContext, Parser, RawDocument, SourceError, SourceId, ToDatabaseRecord,
-    draft::{LineKind, StatementDraft, StatementLineDraft, SuggestedType},
+    draft::{LineKind, StatementDraft, StatementLineDraft, SuggestedType, TradeDetails, TradeSide},
     sha256_hex,
     t212::{PROVIDER, line_fingerprint},
 };
@@ -348,11 +348,24 @@ fn collect_statement(rows: Vec<Row>, ctx: &ParseContext) -> Vec<T212CsvStatement
             warnings.push(format!("row with an unreadable date {when_raw:?}"));
             continue;
         };
-        let amount = if row.action == "Market buy" || row.action == "Market sell" {
-            0.0
-        } else {
-            row.amount()
+        let trade = TradeSide::from_action(&row.action)
+            .filter(|_| row.action == "Market buy" || row.action == "Market sell")
+            .map(|side| TradeDetails {
+                side,
+                symbol: row.ticker.clone(),
+                quantity: row.shares.parse::<f64>().ok().map(f64::abs),
+                price: row.price.parse::<f64>().ok(),
+            });
+        // A trade's amount is its Total: the cash the order moved, fees
+        // included, in the account's currency. No fallback to shares × price,
+        // because the price is in the instrument's currency.
+        let amount = match &trade {
+            Some(trade) => trade.side.cash_sign() * row.amount().abs(),
+            None => row.amount(),
         };
+        // The identity keeps the zero amount trades used to carry, so a trade
+        // staged before keeps its id (the feed's ID usually decides it anyway).
+        let identity_amount = if trade.is_some() { 0.0 } else { amount };
         let (line_kind, suggested_type) = classify(&row.action, amount);
         let source_ref = if row.id.is_empty() {
             None
@@ -368,7 +381,7 @@ fn collect_statement(rows: Vec<Row>, ctx: &ParseContext) -> Vec<T212CsvStatement
             source_ref.as_deref(),
             &type_token,
             posted_at,
-            amount,
+            identity_amount,
             None,
         );
         let dedupe_key = sha256_hex(&[PROVIDER, &account_number, &fingerprint]);
@@ -402,6 +415,7 @@ fn collect_statement(rows: Vec<Row>, ctx: &ParseContext) -> Vec<T212CsvStatement
             suggested_type,
             suggested_category: hint,
             metadata,
+            trade,
             fingerprint,
             dedupe_key,
         });
@@ -548,7 +562,16 @@ mod tests {
         assert_eq!(deposit.suggested_type, Some(SuggestedType::Transfer));
 
         let trade = &lines[3];
-        assert_eq!(trade.amount, 0.0, "a trade line is informational only");
+        assert_eq!(trade.amount, -1.37, "a buy's Total is the cash it spent");
+        assert_eq!(
+            trade.trade,
+            Some(TradeDetails {
+                side: TradeSide::Buy,
+                symbol: "VWCE".to_string(),
+                quantity: Some(0.00939772),
+                price: Some(145.78),
+            })
+        );
         assert_eq!(trade.line_kind, LineKind::Trade);
         assert_eq!(trade.description, "Buy 0.009398 VWCE");
     }
@@ -673,7 +696,9 @@ mod tests {
             .flat_map(|s| &s.lines)
             .find(|l| l.line_kind == LineKind::Trade)
             .unwrap();
-        assert_eq!(trade.amount, 0.0);
+        assert_eq!(trade.amount, -150.17);
+        assert_eq!(trade.trade.as_ref().unwrap().side, TradeSide::Buy);
+        assert_eq!(trade.trade.as_ref().unwrap().quantity, Some(1.5));
         assert_eq!(trade.description, "Buy 1.500000 TECH");
         assert_eq!(
             trade.metadata.get("ticker"),

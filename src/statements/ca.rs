@@ -183,6 +183,7 @@ impl CaStatement {
                     suggested_type: Some(suggested_type),
                     suggested_category,
                     metadata,
+                    trade: None,
                     fingerprint,
                     dedupe_key,
                 }

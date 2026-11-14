@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use super::SourceId;
 
 /// What the source says the line is, independent of how the user will classify
-/// it. `Trade` is informational: brokerage fills are shown in the review screen
-/// but never become transactions.
+/// it. `Trade` is informational for now: brokerage fills are shown in the
+/// review screen and carry their cash amount and [`TradeDetails`], but are not
+/// yet booked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LineKind {
@@ -139,11 +140,77 @@ pub struct StatementLineDraft {
     pub suggested_type: Option<SuggestedType>,
     pub suggested_category: Option<String>,
     pub metadata: serde_json::Value,
+    /// What a `Trade` line bought or sold; `None` for every other kind. The
+    /// line's `amount` is the cash the trade moved (negative for a buy,
+    /// positive for a sale), so the trade can be booked as a movement.
+    pub trade: Option<TradeDetails>,
     /// Identity within one statement. `UNIQUE(statement_id, fingerprint)`.
     pub fingerprint: String,
     /// Identity across overlapping statements. A re-import of the same line in
     /// a different file is stored as a `duplicate` rather than imported twice.
     pub dedupe_key: String,
+}
+
+/// Which way a trade went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradeSide {
+    Buy,
+    Sell,
+}
+
+impl TradeSide {
+    /// The side a broker's action names (`Bought`, `Market sell`, `BUY`,
+    /// `Reinvest`...), or `None` when it names neither.
+    pub fn from_action(action: &str) -> Option<Self> {
+        let lower = action.to_lowercase();
+        if lower.contains("sell") || lower.contains("sold") {
+            Some(Self::Sell)
+        } else if ["buy", "bought", "reinvest"]
+            .iter()
+            .any(|needle| lower.contains(needle))
+        {
+            Some(Self::Buy)
+        } else {
+            None
+        }
+    }
+
+    /// The sign a cash amount has for this side: a buy spends, a sale receives.
+    pub fn cash_sign(self) -> f64 {
+        match self {
+            Self::Buy => -1.0,
+            Self::Sell => 1.0,
+        }
+    }
+}
+
+/// The structured part of a trade line, kept so the trade can be booked and
+/// the positions derived without re-reading the provider's raw row. The store
+/// writes it into the line's `metadata_json` under `"trade"`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TradeDetails {
+    pub side: TradeSide,
+    pub symbol: String,
+    /// Always positive: the side says which way the shares went.
+    pub quantity: Option<f64>,
+    pub price: Option<f64>,
+}
+
+impl TradeDetails {
+    /// The cash a trade moved, signed by its side: the broker's figure when it
+    /// gives one, otherwise quantity × price, otherwise zero. The broker's own
+    /// sign is not trusted -- exports disagree on it -- the side is.
+    pub fn cash_amount(&self, reported: Option<f64>) -> f64 {
+        let magnitude = match reported {
+            Some(value) if value != 0.0 => value.abs(),
+            _ => match (self.quantity, self.price) {
+                (Some(quantity), Some(price)) => (quantity * price).abs(),
+                _ => 0.0,
+            },
+        };
+        self.side.cash_sign() * magnitude
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -160,4 +227,48 @@ pub struct SaveOutcome {
     pub warnings: Vec<String>,
     /// Set when the exact same input was already ingested. The call is a no-op.
     pub skipped_reason: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_side_is_read_from_every_broker_wording() {
+        for action in ["Bought", "BUY", "Market buy", "Reinvest"] {
+            assert_eq!(
+                TradeSide::from_action(action),
+                Some(TradeSide::Buy),
+                "{action}"
+            );
+        }
+        for action in ["Sold", "SELL", "Market sell"] {
+            assert_eq!(
+                TradeSide::from_action(action),
+                Some(TradeSide::Sell),
+                "{action}"
+            );
+        }
+        assert_eq!(TradeSide::from_action("Dividend"), None);
+    }
+
+    /// Exports disagree on the sign of a trade's cash; the side decides it.
+    #[test]
+    fn a_trades_cash_is_signed_by_its_side() {
+        let trade = |side| TradeDetails {
+            side,
+            symbol: "VOO".to_string(),
+            quantity: Some(2.0),
+            price: Some(100.0),
+        };
+        assert_eq!(trade(TradeSide::Buy).cash_amount(Some(201.5)), -201.5);
+        assert_eq!(trade(TradeSide::Buy).cash_amount(Some(-201.5)), -201.5);
+        assert_eq!(trade(TradeSide::Sell).cash_amount(Some(-199.0)), 199.0);
+        assert_eq!(trade(TradeSide::Sell).cash_amount(None), 200.0);
+        let unknown = TradeDetails {
+            price: None,
+            ..trade(TradeSide::Buy)
+        };
+        assert_eq!(unknown.cash_amount(Some(0.0)), 0.0);
+    }
 }
