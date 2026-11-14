@@ -2,6 +2,7 @@ import { api, isEnvelopeFailure, unwrapList, type FinanceAccount, type FinanceTr
 import { escapeHtml, setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
 import { transactionsAtom } from "../lib/stores";
+import { transactionKind, transactionLabel } from "../lib/transactionLabel";
 import { backToDashboard, panelClose, panelOpen, statusBanner } from "./shared";
 
 function money(value: number): string {
@@ -12,15 +13,18 @@ const TYPE_CLASS: Record<string, string> = {
   expense: "text-err-400",
   income: "text-ok-400",
   transfer: "text-ink-100",
+  trade: "text-ink-100",
 };
 
 const TYPE_BADGE: Record<string, string> = {
   expense: "badge-err",
   income: "badge-ok",
   transfer: "badge-ghost",
+  trade: "badge-info",
 };
 
-/** Transactions — a real ledger view: type and account filters, transfers
+/** Transactions — a real ledger view: type and account filters, rows labelled
+ *  by what they did (a trade, a transfer, a dividend), transfers
  *  named with both sides, and amounts that stop announcing `→ X base
  *  (rate 1)` for entries already in the base currency. */
 export function mount(root: HTMLElement): () => void {
@@ -39,6 +43,7 @@ export function mount(root: HTMLElement): () => void {
           <option value="expense">Expenses</option>
           <option value="income">Income</option>
           <option value="transfer">Transfers</option>
+          <option value="trade">Trades</option>
         </select>
         <select class="select select-sm select-bordered" data-filter="account">
           <option value="">All accounts</option>
@@ -78,17 +83,22 @@ export function mount(root: HTMLElement): () => void {
   }
 
   function rowHtml(t: FinanceTransaction): string {
-    const label = t.note || t.category || "";
-    const colored = TYPE_CLASS[t.type] ?? "text-ink-100";
+    const kind = transactionKind(t);
+    const label = transactionLabel(t);
+    // The statement's own wording, when the label replaced it: a dividend's
+    // label is "Dividend", and the note says which fund paid it.
+    const detail = t.note && t.note !== label ? t.note : "";
+    const colored = TYPE_CLASS[kind] ?? "text-ink-100";
     return `
       <div class="flex items-start justify-between gap-3 py-1.5">
         <div class="min-w-0 flex-1">
           <div class="flex flex-wrap items-center gap-2">
-            <span class="badge badge-xs ${TYPE_BADGE[t.type] ?? "badge-ghost"}">${escapeHtml(t.type)}</span>
+            <span class="badge badge-xs ${TYPE_BADGE[kind] ?? "badge-ghost"}">${escapeHtml(kind)}</span>
             ${t.isDraft ? `<span class="badge badge-xs badge-warn">draft</span>` : ""}
-            ${label ? `<span class="truncate text-sm text-ink-200">${escapeHtml(label)}</span>` : ""}
+            <span class="truncate text-sm text-ink-200">${escapeHtml(label)}</span>
           </div>
           <div class="mt-0.5 text-xs text-ink-500">${accountLeg(t)}${t.category ? ` • ${escapeHtml(t.category)}` : ""}</div>
+          ${detail ? `<div class="truncate text-xs text-ink-500">${escapeHtml(detail)}</div>` : ""}
         </div>
         <div class="shrink-0 text-right">
           <div class="font-mono text-sm ${colored}">
@@ -107,12 +117,12 @@ export function mount(root: HTMLElement): () => void {
     let filtered = tr.items as FinanceTransaction[];
     if (q) {
       filtered = filtered.filter((t) =>
-        `${t.note || ""} ${t.category || ""} ${t.type} ${t.accountName || ""} ${t.toAccountName || ""}`
+        `${transactionLabel(t)} ${t.note || ""} ${t.category || ""} ${transactionKind(t)} ${t.accountName || ""} ${t.toAccountName || ""}`
           .toLowerCase()
           .includes(q),
       );
     }
-    if (typeFilter) filtered = filtered.filter((t) => t.type === typeFilter);
+    if (typeFilter) filtered = filtered.filter((t) => transactionKind(t) === typeFilter);
     if (accountFilter) {
       filtered = filtered.filter(
         (t) => t.accountId === accountFilter || t.toAccountId === accountFilter,

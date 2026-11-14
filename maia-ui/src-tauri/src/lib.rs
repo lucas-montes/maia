@@ -1602,23 +1602,55 @@ fn list_transactions(state: tauri::State<AppState>) -> CommandResult<Vec<serde_j
     // Both sides are named straight from the join: a transfer without its
     // account names ("transfer 500") told the reader nothing about where the
     // money moved, and a spend without the account it left is equally blind.
+    //
+    // A trade is a transfer with a `trades` row saying what it bought or
+    // sold. The table is the server's (migration v14); a database from before
+    // it simply has no trades, so the join is left out rather than failing.
+    let has_trades: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='trades')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    let trade_columns = if has_trades {
+        "tr.side, tr.symbol, tr.quantity, tr.price"
+    } else {
+        "NULL, NULL, NULL, NULL"
+    };
+    let trade_join = if has_trades {
+        "LEFT JOIN trades tr ON tr.transaction_id = t.id"
+    } else {
+        ""
+    };
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT t.id, t.type, t.amount, t.currency_code, t.amount_base, t.rate_used,
                     t.category, t.date, t.note, t.receipt_id, t.is_draft,
-                    t.account_id, t.to_account_id, a.name, b.name
+                    t.account_id, t.to_account_id, a.name, b.name, {trade_columns}
              FROM transactions t
              LEFT JOIN accounts a ON t.account_id = a.id
              LEFT JOIN accounts b ON t.to_account_id = b.id
+             {trade_join}
              WHERE t.deleted_at IS NULL
-             ORDER BY t.date DESC LIMIT 500",
-        )
+             ORDER BY t.date DESC LIMIT 500"
+        ))
         .unwrap();
     let rows: Vec<serde_json::Value> = stmt
         .query_map([], |r| {
             let account_id: Option<String> = r.get(11)?;
             let note: Option<String> = r.get(8)?;
             let category: Option<String> = r.get(6)?;
+            let side: Option<String> = r.get(15)?;
+            let trade = match side {
+                Some(side) => serde_json::json!({
+                    "side": side,
+                    "symbol": r.get::<_, Option<String>>(16)?.unwrap_or_default(),
+                    "quantity": r.get::<_, Option<f64>>(17)?,
+                    "price": r.get::<_, Option<f64>>(18)?,
+                }),
+                None => serde_json::Value::Null,
+            };
             Ok(serde_json::json!({
                 "id": r.get::<_, String>(0)?,
                 "type": r.get::<_, String>(1)?,
@@ -1635,6 +1667,7 @@ fn list_transactions(state: tauri::State<AppState>) -> CommandResult<Vec<serde_j
                 "toAccountId": r.get::<_, Option<String>>(12)?,
                 "accountName": r.get::<_, Option<String>>(13)?,
                 "toAccountName": r.get::<_, Option<String>>(14)?,
+                "trade": trade,
             }))
         })
         .unwrap()

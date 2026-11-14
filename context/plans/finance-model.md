@@ -164,8 +164,12 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Note: **re-reading** — the same bytes are no longer a no-op while the statement holds an `informational` trade with no `$.trade` in its metadata. That is what lets the live Firstrade file recover its details: only `dump/` is watched, so after deploying, **drop `staged/firstrade/fristrade.csv` into `dump/` again**. Once the trades have their details the same bytes are a no-op again (tested).
   - Note: `match_pending` skips `line_kind='trade'`. The test for it was checked to fail without the filter, and the re-read test without the no-op change.
   - Note: the preview's snapshot test now covers `trades`, and the preview reports the securities account as an account to create.
-- [ ] T17 Transactions view labels each row: `Bought 7 VOO @ …`, `Transfer → Livret A`, `Dividend`,
-      `Interest`, expense.
+- [x] T17 Transactions view labels each row: `Bought 7 VOO @ …`, `Transfer → Livret A`, `Dividend`,
+      `Interest`, expense. (status:done)
+  - Completed: 2026-11-14
+  - Boundaries: In — the desktop's `list_transactions` (joins `trades`, returns `trade`), `FinanceTransaction.trade` and `TradeDetails` in `api.ts`, `lib/transactionLabel.ts` (`transactionKind`, `transactionLabel`) and `views/transactions.ts` (the label, a `trade` badge, a Trades filter). Out — the phone, positions (T18).
+  - Note: the desktop reads the database itself, so `list_transactions` checks `sqlite_master` for `trades` and leaves the join out on a database from before v14 rather than failing. Both forms were run against a copy of the live database.
+  - Note: a trade is still a `transfer` row; it reads as `trade` and the Transfers filter no longer lists it. The statement's own wording stays under the label when the label replaced it (a dividend's note names the fund).
 - [ ] T18 Positions (Rust, average cost): qty, cost basis, avg price, realised gain per symbol, plus
       an `opening_positions` seed and its desktop form.
 
@@ -294,4 +298,4 @@ Not fixed: a phone-created account arrives as `cash`, because the phone no longe
 Fixing it needs a phone change that sends the type on creation.
 
 ### Still to come
-- **Stage 2 is complete; T14–T16 are done.** Next is T17, the transactions view labels. Deploying needs the Firstrade file dropped again (see T16).
+- **Stage 2 is complete; T14–T17 are done.** Next is T18, positions and the opening seed. Deploying needs the Firstrade file dropped again (see T16).

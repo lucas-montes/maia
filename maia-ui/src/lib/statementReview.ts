@@ -1,4 +1,4 @@
-import type { StatementDetail, TransferMatch } from "./api";
+import type { StatementDetail, TradeDetails, TransferMatch } from "./api";
 
 /** Which entries of a staged statement the review screen can actually act on.
  *
@@ -138,14 +138,6 @@ export function selectableLineIds(details: StatementDetail[]): Set<string> {
     if (id) ids.add(id);
   }
   return ids;
-}
-
-/** What a trade line bought or sold, as the server stored it. */
-export interface TradeDetails {
-  side: "buy" | "sell";
-  symbol: string;
-  quantity: number | null;
-  price: number | null;
 }
 
 /** The trade a line describes, read from its metadata; `null` for a line

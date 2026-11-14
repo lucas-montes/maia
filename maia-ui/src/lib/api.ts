@@ -47,6 +47,15 @@ export interface FinanceAccountRoot {
   source: string | null;
 }
 
+/** What a trade bought or sold, as the server stores it: on a staged trade
+ *  line (its metadata's `trade`) and on a booked one (the `trades` table). */
+export interface TradeDetails {
+  side: "buy" | "sell";
+  symbol: string;
+  quantity: number | null;
+  price: number | null;
+}
+
 /** One row of the desktop `list_transactions` command. */
 export interface FinanceTransaction {
   id: string;
@@ -64,6 +73,9 @@ export interface FinanceTransaction {
   toAccountId: string | null;
   accountName: string | null;
   toAccountName: string | null;
+  /** What the transaction traded, when it is a trade (a transfer between a
+   *  broker's cash and securities accounts); `null` for a movement. */
+  trade: TradeDetails | null;
 }
 
 // ---- Shared record shapes ----
