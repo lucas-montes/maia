@@ -117,6 +117,20 @@ pub fn create_router(state: AppState) -> Router {
             "/accounts/:id/identity",
             axum::routing::put(crate::handlers::accounts::put_account_identity),
         )
+        // Desktop-only too: the roots are server-only state, and the phone
+        // neither sees them nor moves leaves between them.
+        .route(
+            "/accounts/:id/root",
+            axum::routing::put(crate::handlers::accounts::move_account_to_root),
+        )
+        .route(
+            "/account-roots",
+            axum::routing::post(crate::handlers::accounts::create_account_root),
+        )
+        .route(
+            "/account-roots/:id",
+            axum::routing::put(crate::handlers::accounts::rename_account_root),
+        )
         .route("/statements", get(crate::handlers::statements::list_statements))
         .route("/statements/scan", post(crate::handlers::statements::scan_statements))
         .route(

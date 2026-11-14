@@ -131,8 +131,15 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Note: the phone does not push the type at all — the pull sends it down — and the server ignores a pushed type it does not know, so a phone still carrying the old vocabulary cannot revert the rename either.
   - Note: the desktop's editor now offers only `cash`/`savings`/`securities`. It has to: the server ignores an unknown type, so offering `bank` would be an edit that silently does nothing. That is one line of T13 done early.
   - Note: **the mobile app was changed**, against this plan's "server + desktop only" header, because the human chose it: the alternative was a desktop-only endpoint the desktop could use instead of the phone's push surface.
-- [ ] T13 Desktop accounts view: roots with leaves under them, root total, type editor offers
-      cash/savings/securities, create/rename root, move a leaf (same source only).
+- [x] T13 Desktop accounts view: roots with leaves under them, root total, type editor offers
+      cash/savings/securities, create/rename root, move a leaf (same source only). (status:done)
+  - Completed: 2026-11-14
+  - Goal: the accounts screen shows the tree — Crédit Agricole {Eko, Livret A, LDD} — not a flat list.
+  - Boundaries: In — three desktop-only server endpoints (`POST /account-roots`, `PUT /account-roots/:id`, `PUT /accounts/:id/root`), the desktop's `list_account_roots` command and `rootId` on `list_accounts`, the tree in the accounts view, and `maia-ui/src/lib/accountTree.ts`. Out — the phone, the server's roots API, schema.
+  - Note: the roots are read from the database by the desktop's own command, not over the sync API — roots are server-only state the phone must neither see nor push ✓.
+  - Note: a leaf can only go under a root of its own source, and a leaf with a provider number cannot be unfiled — the same rule the identity endpoint follows ✓.
+  - Note: the type editor's vocabulary was narrowed in T12, so what is left here is the tree ✓.
+  - Note: a leaf whose root is gone (the two lists came from different moments) is kept aside rather than dropped — an account that vanishes from the view is worse than one that looks unfiled ✓.
 
 ### Stage 3 — trades (migration v14)
 - [ ] T14 Parsers keep the trade amount + structured `{side, symbol, quantity, price}`
@@ -209,42 +216,35 @@ the number of snapshots kept, breaking three tests that hard-coded `v1`.
 
 Stage 1 is complete: every task above is done and the suite is green.
 
-### T9 (2026-11-13)
-- `cargo test`: 240 passed.
-  `migration_v13_builds_the_account_tree_and_remaps_the_types` covers the roots, the re-parenting,
-  the type remap and the `updated_at` bump. The v12 test now stamps version 11 explicitly, so a
-  later version cannot shift it.
-- **The real database was migrated on a copy** to check it end to end: v11 → v13 produced one root,
-  "Crédit Agricole" (kind `bank`, source `credit_agricole`), with all four accounts under it —
-  "Eko by CA" → cash, "Livret A" → savings, "LDD Solidaire" → savings, "Eko by CA (external)" →
-  cash (the deleted one). The live database itself was not touched.
+### T9–T13 (2026-11-13/14)
 
-### T10 (2026-11-13)
-- `cargo test`: 243 passed. The three new tests fail when the root resolution is removed: no root
-  is created and the account has no root to hang under.
-  - `an_import_creates_the_root_and_parents_the_account_under_it` — a Livret A makes the
-    "Crédit Agricole" bank root and a `savings` leaf.
-  - `a_brokerage_import_makes_a_broker_root_with_a_cash_leaf` — the plan's example.
-  - `two_accounts_of_one_institution_share_one_root` — one institution, one root, two leaves.
-- `cargo clippy --all-targets`: no new warnings and no new errors. The new code is rustfmt-clean.
+Each task's new test was checked against the code it replaces, so each fails without its fix.
 
-### T11 (2026-11-13)
-- `cargo test`: 247 passed. `a_number_from_another_institution_is_refused` fails when the
-  source/root check is disabled — the Firstrade number lands on a Crédit Agricole leaf. The other
-  three cover the same institution, a rootless account joining its source's root, and clearing.
-- `cargo clippy --all-targets`: no new warnings and no new errors. The new code is rustfmt-clean.
+| Task | Test that fails without the fix | Suite after |
+|---|---|---|
+| T9 | `migration_v13_builds_the_account_tree_and_remaps_the_types` | 240 Rust |
+| T10 | `an_import_creates_the_root_and_parents_the_account_under_it`, `a_brokerage_import_makes_a_broker_root_with_a_cash_leaf`, `two_accounts_of_one_institution_share_one_root` | 243 Rust |
+| T11 | `a_number_from_another_institution_is_refused` | 247 Rust |
+| T12 | `a_push_cannot_revert_the_account_type` | 249 Rust |
+| T13 | `a_leaf_moves_under_a_root_of_its_own_source`, `a_leaf_goes_under_a_root_that_shares_its_source_or_lacks_one` | 252 Rust |
 
-### T12 (2026-11-13)
-- `cargo test`: 249 passed. `a_push_cannot_revert_the_account_type` fails when the vocabulary
-  filter is removed: the push writes "bank" over "savings". The other covers the phone's push (no
-  type — the account is left alone) and the desktop's (a known type — it lands).
-- `flutter analyze lib/src/sync/data_push_service.dart`: no issues. The phone's suite gives the same
-  result with and without the change (190 passed, 156 failed — the failures are pre-existing and
-  environmental: `libsqlite3.so` cannot be loaded in this shell, and they fail identically at HEAD).
-- `npx tsc --noEmit`: clean. `npx vitest run`: 49 passed. `cargo clippy --all-targets`: no new
-  warnings and no new errors. The new code is rustfmt-clean.
+**The real database was migrated on a copy** to check T9 end to end: v11 → v13 produced one root,
+"Crédit Agricole" (kind `bank`, source `credit_agricole`), with all four accounts under it — "Eko
+by CA" → cash, "Livret A" → savings, "LDD Solidaire" → savings, "Eko by CA (external)" → cash (the
+deleted one). The live database itself was not touched.
+
+T12's phone change: `flutter analyze` on the changed file reports no issues, and the phone's suite
+gives the same result with and without it (190 passed, 156 failed — the failures are pre-existing
+and environmental: `libsqlite3.so` cannot be loaded in this shell, and they fail identically at
+HEAD). T13's `accountTree` tests include one that caught a real bug: a leaf whose root was not in
+the list was dropped from the view instead of being kept aside.
+
+For every task: `cargo clippy --all-targets` (no new warnings), `cargo build`, `npx tsc --noEmit`,
+and rustfmt (the new code is clean).
+
+**One pre-existing failure, not from this work:**
+`tests::receipt_ocr_parse_and_picture_endpoints` polls for 12 seconds for an upstream call whose
+own timeout is 90, so it fails wherever the upstream call is slow. It fails identically at HEAD.
 
 ### Still to come
-- **T13** — the desktop accounts view: roots with leaves under them, the root's total, creating and
-  renaming a root, and moving a leaf (same source only). The type editor's vocabulary was narrowed
-  in T12, so what is left is the tree itself.
+- **Stage 2 is complete.** Stage 3 starts with migration v14: the trades.

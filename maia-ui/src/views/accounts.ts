@@ -4,9 +4,11 @@ import {
   isEnvelopeFailure,
   unwrapList,
   type FinanceAccount,
+  type FinanceAccountRoot,
   type FinanceTransaction,
   type StatementSummary,
 } from "../lib/api";
+import { buildAccountTree, rootsForLeaf } from "../lib/accountTree";
 import { escapeHtml, formatEpoch, setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
 import { accountsAtom } from "../lib/stores";
@@ -66,9 +68,14 @@ export function mount(root: HTMLElement): () => void {
   let selectedId: string | null = null;
   /** The account whose edit panel is open, when one is. */
   let editingAccountId: string | null = null;
+  /** The root whose name is being edited, when one is. */
+  let renamingRootId: string | null = null;
+  /** Whether the "new root" form is open. */
+  let newRootOpen = false;
   let baseCurrency = "EUR";
   let statementItems: StatementSummary[] = [];
   let transactionItems: FinanceTransaction[] = [];
+  let rootItems: FinanceAccountRoot[] = [];
   let chart: Chart | null = null;
   let series: SeriesPoint[] = [];
   let seriesPeriod: Period = "month";
@@ -109,35 +116,111 @@ export function mount(root: HTMLElement): () => void {
     });
   }
 
+  /** One account row: a leaf under a root, or an account with none. */
+  function accountRowHtml(ac: FinanceAccount): string {
+    const source = ac.source ? SOURCE_LABELS[ac.source] ?? ac.source : null;
+    const statements = statementCount(ac.id);
+    const negative = ac.balance < 0;
+    return `
+      <button class="list-row w-full text-left" type="button" data-account-id="${escapeHtml(ac.id)}">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="truncate text-sm font-medium text-ink-100">${escapeHtml(ac.name)}</span>
+          <span class="badge badge-ghost badge-xs">${escapeHtml(ac.type)}</span>
+          ${source ? `<span class="badge badge-xs badge-outline">${escapeHtml(source)}</span>` : ""}
+          ${statements > 0 ? `<span class="badge badge-xs badge-muted">${statements} statement${statements !== 1 ? "s" : ""}</span>` : ""}
+        </div>
+        <div class="text-sm font-mono ${negative ? "text-err-400" : "text-ok-400"}">
+          ${ac.balance < 0 ? "−" : ""}${headlineBalance(Math.abs(ac.balance))} ${escapeHtml(baseCurrency)}
+        </div>
+      </button>`;
+  }
+
+  /** A root and the accounts under it, with the root's total. */
+  function rootRowHtml(node: ReturnType<typeof buildAccountTree>["roots"][number]): string {
+    const { root, leaves, total } = node;
+    const renaming = renamingRootId === root.id;
+    const negative = total < 0;
+    return `
+      <div class="rounded-lg border border-base-300 bg-base-100">
+        <div class="flex flex-wrap items-center gap-2 px-3 py-2">
+          ${
+            renaming
+              ? `<input class="input input-bordered input-sm w-56" data-root-name-input="${escapeHtml(root.id)}" value="${escapeHtml(root.name)}" />`
+              : `<span class="text-sm font-medium text-ink-100">${escapeHtml(root.name)}</span>`
+          }
+          <span class="badge badge-ghost badge-xs">${escapeHtml(root.kind)}</span>
+          ${root.source ? `<span class="badge badge-xs badge-outline">${escapeHtml(SOURCE_LABELS[root.source] ?? root.source)}</span>` : ""}
+          <span class="flex-1"></span>
+          ${
+            renaming
+              ? `<button class="btn btn-primary btn-xs" type="button" data-action="root-rename-save" data-root-id="${escapeHtml(root.id)}">Save</button>
+                 <button class="btn btn-ghost btn-xs" type="button" data-action="root-rename-cancel">Cancel</button>`
+              : `<button class="btn btn-ghost btn-xs" type="button" data-action="root-rename" data-root-id="${escapeHtml(root.id)}">Rename</button>`
+          }
+          <span class="font-mono text-sm ${negative ? "text-err-400" : "text-ok-400"}">
+            ${total < 0 ? "−" : ""}${headlineBalance(Math.abs(total))} ${escapeHtml(baseCurrency)}
+          </span>
+        </div>
+        ${
+          leaves.length > 0
+            ? `<div class="space-y-0.5 border-t border-base-300 p-1">${leaves.map(accountRowHtml).join("")}</div>`
+            : `<div class="border-t border-base-300 px-3 py-2 text-xs text-ink-500">No accounts under this root yet.</div>`
+        }
+      </div>`;
+  }
+
   function listHtml(items: FinanceAccount[]): string {
-    if (items.length === 0) {
+    if (items.length === 0 && rootItems.length === 0) {
       return `
         <div class="rounded border border-surface-800 bg-base-100 p-4 text-sm text-ink-400">
           No accounts yet. Import a statement on the
           <a class="link" href="#/statements">Statements</a> page and its accounts appear here with their real balance.
         </div>`;
     }
+    const tree = buildAccountTree(rootItems, items);
     return `
       <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
-        ${items
-          .map((ac) => {
-            const source = ac.source ? SOURCE_LABELS[ac.source] ?? ac.source : null;
-            const statements = statementCount(ac.id);
-            const negative = ac.balance < 0;
-            return `
-            <button class="list-row w-full text-left" type="button" data-account-id="${escapeHtml(ac.id)}">
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="truncate text-sm font-medium text-ink-100">${escapeHtml(ac.name)}</span>
-                <span class="badge badge-ghost badge-xs">${escapeHtml(ac.type)}</span>
-                ${source ? `<span class="badge badge-xs badge-outline">${escapeHtml(source)}</span>` : ""}
-                ${statements > 0 ? `<span class="badge badge-xs badge-muted">${statements} statement${statements !== 1 ? "s" : ""}</span>` : ""}
-              </div>
-              <div class="text-sm font-mono ${negative ? "text-err-400" : "text-ok-400"}">
-                ${ac.balance < 0 ? "−" : ""}${headlineBalance(Math.abs(ac.balance))} ${escapeHtml(baseCurrency)}
-              </div>
-            </button>`;
-          })
-          .join("")}
+        ${newRootFormHtml()}
+        ${tree.roots.map(rootRowHtml).join("")}
+        ${
+          tree.loose.length > 0
+            ? `<div class="rounded-lg border border-base-300 bg-base-100">
+                 <div class="px-3 py-2 text-xs text-ink-500">Not under a root</div>
+                 <div class="space-y-0.5 border-t border-base-300 p-1">${tree.loose.map(accountRowHtml).join("")}</div>
+               </div>`
+            : ""
+        }
+        <button class="btn btn-ghost btn-sm self-start" type="button" data-action="root-new">
+          ${newRootOpen ? "Cancel" : "New root"}
+        </button>
+      </div>`;
+  }
+
+  /** The form that makes a root: a name and what kind of institution it is. */
+  function newRootFormHtml(): string {
+    if (!newRootOpen) return "";
+    return `
+      <div class="rounded-lg border border-base-300 bg-base-100 p-3">
+        <h3 class="mb-2 text-sm font-medium text-ink-200">New root</h3>
+        <div class="flex flex-wrap items-end gap-2">
+          <label class="space-y-1">
+            <span class="text-xs text-ink-500">Name</span>
+            <input class="input input-bordered input-sm" data-new-root-name placeholder="e.g. Our money" />
+          </label>
+          <label class="space-y-1">
+            <span class="text-xs text-ink-500">Kind</span>
+            <select class="select select-bordered select-sm" data-new-root-kind>
+              ${["bank", "broker", "neobank"]
+                .map(
+                  (kind) =>
+                    `<option value="${kind}" ${kind === "neobank" ? "selected" : ""}>${kind}</option>`,
+                )
+                .join("")}
+            </select>
+          </label>
+          <button class="btn btn-primary btn-sm" type="button" data-action="root-create">Create</button>
+        </div>
+        <p class="mt-2 text-xs text-ink-500">A root you make has no provider of its own, so it holds the accounts that have no number — the ones an import did not create.</p>
       </div>`;
   }
 
@@ -243,9 +326,22 @@ export function mount(root: HTMLElement): () => void {
             <span class="text-xs text-ink-500">Account number at that source</span>
             <input class="input input-bordered input-sm w-full font-mono" data-edit-field="externalId" value="${escapeHtml(ac.externalId ?? "")}" placeholder="e.g. 84890097587" />
           </label>
+          <label class="space-y-1">
+            <span class="text-xs text-ink-500">Root</span>
+            <select class="select select-bordered select-sm w-full" data-edit-field="root">
+              <option value="" ${!ac.rootId ? "selected" : ""}>— not under a root —</option>
+              ${rootsForLeaf(rootItems, ac)
+                .map(
+                  (root) =>
+                    `<option value="${escapeHtml(root.id)}" ${root.id === ac.rootId ? "selected" : ""}>${escapeHtml(root.name)}</option>`,
+                )
+                .join("")}
+            </select>
+          </label>
         </div>
         <p class="text-xs text-ink-500">You set what the account holds today; the opening balance is derived from it and the net of this account's transactions.</p>
         <p class="text-xs text-ink-500">The source and number say which provider account this is, so dropped statements land here instead of creating a new account. Changing them keeps this account's id and every transaction on it — only where the next import looks changes. Clear both to unlink.</p>
+        <p class="text-xs text-ink-500">The root says which institution the account belongs under. It can only go under a root of its own source: a Firstrade number on a Crédit Agricole leaf would say otherwise.</p>
         <div class="flex justify-end gap-2">
           <button class="btn btn-ghost btn-sm" type="button" data-action="account-edit-cancel">Cancel</button>
           <button class="btn btn-primary btn-sm" type="button" data-action="account-edit-save" data-account-id="${escapeHtml(ac.id)}">Save</button>
@@ -403,7 +499,7 @@ export function mount(root: HTMLElement): () => void {
   const load = async (): Promise<void> => {
     accountsAtom.set({ ...accountsAtom.get(), status: "loading", message: "" });
     try {
-      const res = await api.listAccounts();
+      const [res, rootsRes] = await Promise.all([api.listAccounts(), api.listAccountRoots()]);
       const failure = isEnvelopeFailure(res);
       if (failure) {
         accountsAtom.set({ ...accountsAtom.get(), status: "error", message: failure });
@@ -411,6 +507,11 @@ export function mount(root: HTMLElement): () => void {
         return;
       }
       const data = (res as { data?: unknown })?.data ?? res;
+      // The roots are a view of the same accounts: a failure to read them
+      // leaves the tree flat rather than blank.
+      if (!isEnvelopeFailure(rootsRes)) {
+        rootItems = (unwrapList(rootsRes) as FinanceAccountRoot[]) ?? [];
+      }
       accountsAtom.set({ ...accountsAtom.get(), items: Array.isArray(data) ? data : [], status: "idle", message: "" });
     } catch (e) {
       accountsAtom.set({ ...accountsAtom.get(), status: "error", message: String(e) });
@@ -463,11 +564,83 @@ export function mount(root: HTMLElement): () => void {
       render();
       return;
     }
+    if (target.closest("[data-action='root-new']")) {
+      newRootOpen = !newRootOpen;
+      render();
+      return;
+    }
+    const renameButton = target.closest<HTMLElement>("[data-action='root-rename']");
+    if (renameButton?.dataset.rootId) {
+      renamingRootId = renameButton.dataset.rootId;
+      render();
+      return;
+    }
+    if (target.closest("[data-action='root-rename-cancel']")) {
+      renamingRootId = null;
+      render();
+      return;
+    }
+    if (target.closest("[data-action='root-create']")) {
+      void createRoot();
+      return;
+    }
+    const renameSave = target.closest<HTMLElement>("[data-action='root-rename-save']");
+    if (renameSave?.dataset.rootId) {
+      void renameRoot(renameSave.dataset.rootId);
+      return;
+    }
     const saveButton = target.closest<HTMLElement>("[data-action='account-edit-save']");
     if (saveButton?.dataset.accountId) {
       void saveAccountEdits(saveButton.dataset.accountId);
     }
   });
+
+  /** Makes a root: the institution a set of accounts belongs to. */
+  const createRoot = async (): Promise<void> => {
+    const nameEl = root.querySelector<HTMLInputElement>("[data-new-root-name]");
+    const kindEl = root.querySelector<HTMLSelectElement>("[data-new-root-kind]");
+    const name = nameEl?.value.trim() ?? "";
+    if (!name) {
+      accountsAtom.set({ ...accountsAtom.get(), status: "error", message: "A root needs a name" });
+      return;
+    }
+    accountsAtom.set({ ...accountsAtom.get(), status: "saving", message: "" });
+    try {
+      const res = await api.createAccountRoot({ name, kind: kindEl?.value ?? "neobank" });
+      if (!res.success) {
+        accountsAtom.set({ ...accountsAtom.get(), status: "error", message: res.error ?? "Could not create the root" });
+        return;
+      }
+      newRootOpen = false;
+      await load();
+      accountsAtom.set({ ...accountsAtom.get(), status: "saved", message: `Root "${name}" created.` });
+    } catch (e) {
+      accountsAtom.set({ ...accountsAtom.get(), status: "error", message: String(e) });
+    }
+  };
+
+  /** Renames a root. The name is the only thing the user changes about it. */
+  const renameRoot = async (id: string): Promise<void> => {
+    const nameEl = root.querySelector<HTMLInputElement>(`[data-root-name-input="${CSS.escape(id)}"]`);
+    const name = nameEl?.value.trim() ?? "";
+    if (!name) {
+      accountsAtom.set({ ...accountsAtom.get(), status: "error", message: "A root needs a name" });
+      return;
+    }
+    accountsAtom.set({ ...accountsAtom.get(), status: "saving", message: "" });
+    try {
+      const res = await api.renameAccountRoot({ id, name });
+      if (!res.success) {
+        accountsAtom.set({ ...accountsAtom.get(), status: "error", message: res.error ?? "Could not rename the root" });
+        return;
+      }
+      renamingRootId = null;
+      await load();
+      accountsAtom.set({ ...accountsAtom.get(), status: "saved", message: `Root renamed to "${name}".` });
+    } catch (e) {
+      accountsAtom.set({ ...accountsAtom.get(), status: "error", message: String(e) });
+    }
+  };
 
   /** Reads the open edit panel, validates it client-side, and pushes the
    *  change server-ward. Reuses `load()` so the new balance/name arrive the
@@ -490,6 +663,7 @@ export function mount(root: HTMLElement): () => void {
     const noteEl = root.querySelector<HTMLInputElement>("[data-edit-field='note']");
     const sourceEl = root.querySelector<HTMLSelectElement>("[data-edit-field='source']");
     const externalIdEl = root.querySelector<HTMLInputElement>("[data-edit-field='externalId']");
+    const rootEl = root.querySelector<HTMLSelectElement>("[data-edit-field='root']");
     const before = accountById(id);
     const source = sourceEl?.value.trim() ?? "";
     const externalId = externalIdEl?.value.trim() ?? "";
@@ -538,6 +712,22 @@ export function mount(root: HTMLElement): () => void {
             ...accountsAtom.get(),
             status: "saved",
             message: `Account saved — ${resolved} staged statement${resolved !== 1 ? "s" : ""} now point here.`,
+          });
+          return;
+        }
+      }
+      // So does the root: it is server-only state too, and a leaf can only go
+      // under a root of its own source — the server refuses the rest, and its
+      // refusal says which institution the leaf would be filed under wrongly.
+      const targetRoot = rootEl?.value ?? "";
+      if (targetRoot !== (before?.rootId ?? "")) {
+        const moved = await api.moveAccountToRoot({ id, rootId: targetRoot });
+        if (!moved.success) {
+          await load();
+          accountsAtom.set({
+            ...accountsAtom.get(),
+            status: "error",
+            message: moved.error ?? "Could not move the account",
           });
           return;
         }

@@ -1508,7 +1508,7 @@ fn list_accounts(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json:
     };
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, type, opening_balance, note, created_at, source, external_id
+            "SELECT id, name, type, opening_balance, note, created_at, source, external_id, root_id
              FROM accounts WHERE deleted_at IS NULL ORDER BY name",
         )
         .unwrap();
@@ -1530,7 +1530,52 @@ fn list_accounts(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json:
                 // identity; hand-created ones have neither.
                 "source": r.get::<_, Option<String>>(6)?,
                 "externalId": r.get::<_, Option<String>>(7)?,
+                // The root it hangs under: the institution it belongs to.
+                "rootId": r.get::<_, Option<String>>(8)?,
                 "balance": balance,
+            }))
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    CommandResult {
+        success: true,
+        data: Some(rows),
+        error: None,
+    }
+}
+
+/// The account roots: the institutions the accounts belong under.
+///
+/// Roots are server-only state — the phone neither sees them nor pushes them —
+/// so the desktop reads them from the database rather than over the sync API.
+#[tauri::command]
+fn list_account_roots(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Value>> {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return CommandResult {
+                success: false,
+                data: None,
+                error: Some(format!("{e}")),
+            };
+        }
+    };
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, kind, source FROM account_roots
+             WHERE deleted_at IS NULL ORDER BY name",
+        )
+        .unwrap();
+    let rows: Vec<serde_json::Value> = stmt
+        .query_map([], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "name": r.get::<_, String>(1)?,
+                "kind": r.get::<_, String>(2)?,
+                // The provider the root's leaves come from; null for a root
+                // the user made.
+                "source": r.get::<_, Option<String>>(3)?,
             }))
         })
         .unwrap()
@@ -2691,6 +2736,80 @@ async fn set_account_identity(
         "externalId": if external_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(external_id.to_string()) },
     });
     match api::put::<_, serde_json::Value>(&format!("/accounts/{id}/identity"), &body).await {
+        Ok(data) => Ok(CommandResult {
+            success: true,
+            data: Some(data),
+            error: None,
+        }),
+        Err(error) => Ok(CommandResult {
+            success: false,
+            data: None,
+            error: Some(error.to_message()),
+        }),
+    }
+}
+
+/// Creates an account root: the institution a set of accounts belongs to.
+///
+/// The roots are server-only state, so this goes through the server's own
+/// endpoint rather than writing the database here — the desktop never writes
+/// `maia.db` directly.
+#[tauri::command]
+async fn create_account_root(
+    name: String,
+    kind: Option<String>,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let body = serde_json::json!({
+        "name": name.trim(),
+        "kind": kind.unwrap_or_else(|| "neobank".to_string()),
+    });
+    match api::post::<_, serde_json::Value>("/account-roots", &body).await {
+        Ok(data) => Ok(CommandResult {
+            success: true,
+            data: Some(data),
+            error: None,
+        }),
+        Err(error) => Ok(CommandResult {
+            success: false,
+            data: None,
+            error: Some(error.to_message()),
+        }),
+    }
+}
+
+/// Renames an account root.
+#[tauri::command]
+async fn rename_account_root(
+    id: String,
+    name: String,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let body = serde_json::json!({ "name": name.trim() });
+    match api::put::<_, serde_json::Value>(&format!("/account-roots/{id}"), &body).await {
+        Ok(data) => Ok(CommandResult {
+            success: true,
+            data: Some(data),
+            error: None,
+        }),
+        Err(error) => Ok(CommandResult {
+            success: false,
+            data: None,
+            error: Some(error.to_message()),
+        }),
+    }
+}
+
+/// Moves an account under another root.
+///
+/// A leaf can only go under a root of its own source. The server's refusal is
+/// passed through verbatim — it says which institution the leaf would be filed
+/// under wrongly.
+#[tauri::command]
+async fn move_account_to_root(
+    id: String,
+    root_id: String,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let body = serde_json::json!({ "rootId": root_id });
+    match api::put::<_, serde_json::Value>(&format!("/accounts/{id}/root"), &body).await {
         Ok(data) => Ok(CommandResult {
             success: true,
             data: Some(data),
@@ -4675,6 +4794,10 @@ pub fn run() {
             list_body_metrics,
             list_tags,
             list_accounts,
+            list_account_roots,
+            create_account_root,
+            rename_account_root,
+            move_account_to_root,
             list_transactions,
             get_base_currency,
             upload_receipt_files,

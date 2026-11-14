@@ -27,8 +27,24 @@ export interface FinanceAccount {
   /** Non-null for accounts a statement import created. */
   source: string | null;
   externalId: string | null;
+  /** The root it hangs under: the institution it belongs to. */
+  rootId: string | null;
   /** Opening balance plus the net of every transaction touching the account. */
   balance: number;
+}
+
+/** One row of the desktop `list_account_roots` command.
+ *
+ *  Roots are server-only state — the phone neither sees them nor pushes them
+ *  — so the desktop reads them from the database rather than over the sync
+ *  API. */
+export interface FinanceAccountRoot {
+  id: string;
+  name: string;
+  /** What the institution is: bank, broker or neobank. */
+  kind: string;
+  /** The provider the root's leaves come from; null for a root the user made. */
+  source: string | null;
 }
 
 /** One row of the desktop `list_transactions` command. */
@@ -762,6 +778,9 @@ export const api = {
 
   listAccounts: () => invoke<unknown>("list_accounts"),
 
+  /** The account roots: the institutions the accounts belong under. */
+  listAccountRoots: () => invoke<unknown>("list_account_roots"),
+
   listTransactions: () => invoke<unknown>("list_transactions"),
 
   /** The deployment's base currency, so finance rows do not show
@@ -891,6 +910,27 @@ export const api = {
         statementsResolved: number;
       }>
     >("set_account_identity", args),
+
+  /** Creates an account root: the institution a set of accounts belongs to.
+   *
+   *  Its own endpoint rather than part of `/budget-accounts`: roots are
+   *  server-only state, and the phone must neither see them nor push them. */
+  createAccountRoot: (args: { name: string; kind?: string }) =>
+    invoke<Envelope<{ id: string; name: string; kind: string; source: string | null }>>(
+      "create_account_root",
+      args,
+    ),
+
+  /** Renames an account root. */
+  renameAccountRoot: (args: { id: string; name: string }) =>
+    invoke<Envelope<{ id: string; name: string }>>("rename_account_root", args),
+
+  /** Moves an account under another root.
+   *
+   *  A leaf can only go under a root of its own source: the tree says which
+   *  institution an account belongs to. A refusal names the reason. */
+  moveAccountToRoot: (args: { id: string; rootId: string }) =>
+    invoke<Envelope<{ id: string; rootId: string }>>("move_account_to_root", args),
 
   /** Uploads one or many picked receipt pictures to the server's OCR
    *  endpoint, one request per file, and reports per-file: `id` when the

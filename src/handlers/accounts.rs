@@ -49,6 +49,189 @@ pub struct IdentityRequest {
     pub external_id: Option<String>,
 }
 
+/// The kinds a root can be: what the institution *is*, not what an account
+/// holds.
+const ROOT_KINDS: [&str; 3] = ["bank", "broker", "neobank"];
+
+/// A root as the desktop names it.
+#[derive(Debug, Deserialize)]
+pub struct RootRequest {
+    pub name: String,
+    /// Only a new root needs a kind; renaming leaves it as it is.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// Where a leaf goes.
+#[derive(Debug, Deserialize)]
+pub struct MoveRootRequest {
+    #[serde(rename = "rootId")]
+    pub root_id: String,
+}
+
+/// `POST /account-roots` — creates a root.
+///
+/// Desktop-only, and deliberately not part of `/budget-accounts`: roots are
+/// server-only state, and the phone must neither see them nor push them.
+pub async fn create_account_root(
+    State(state): State<AppState>,
+    Json(request): Json<RootRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err(error(StatusCode::BAD_REQUEST, "a root needs a name"));
+    }
+    let kind = request.kind.as_deref().unwrap_or("neobank");
+    if !ROOT_KINDS.contains(&kind) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            format!("unknown root kind {kind:?}"),
+        ));
+    }
+
+    let conn = state
+        .db
+        .get()
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let now = db::server_time_ms();
+    let id = uuid::Uuid::now_v7().to_string();
+    conn.execute(
+        "INSERT INTO account_roots (id, name, kind, source, created_at, updated_at)
+         VALUES (?1, ?2, ?3, NULL, ?4, ?4)",
+        rusqlite::params![id, name, kind, now],
+    )
+    .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "id": id,
+        "name": name,
+        "kind": kind,
+        "source": serde_json::Value::Null,
+    })))
+}
+
+/// `PUT /account-roots/:id` — renames a root.
+///
+/// Desktop-only, like the create.
+pub async fn rename_account_root(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<RootRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err(error(StatusCode::BAD_REQUEST, "a root needs a name"));
+    }
+
+    let conn = state
+        .db
+        .get()
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let now = db::server_time_ms();
+    let changed = conn
+        .execute(
+            "UPDATE account_roots SET name=?1, updated_at=?2
+             WHERE id=?3 AND deleted_at IS NULL",
+            rusqlite::params![name, now, id],
+        )
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if changed == 0 {
+        return Err(error(StatusCode::NOT_FOUND, format!("root {id} not found")));
+    }
+
+    Ok(Json(serde_json::json!({ "id": id, "name": name })))
+}
+
+/// `PUT /accounts/:id/root` — moves a leaf under another root.
+///
+/// A leaf can only go under a root of its own source: the tree says which
+/// institution an account belongs to, and a Firstrade number on a Crédit
+/// Agricole leaf would say otherwise.
+pub async fn move_account_to_root(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<MoveRootRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut conn = state
+        .db
+        .get()
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let leaf: Option<(Option<String>, Option<String>)> = tx
+        .query_row(
+            "SELECT a.source, r.source FROM accounts a
+             LEFT JOIN account_roots r ON r.id = a.root_id
+             WHERE a.id=?1 AND a.deleted_at IS NULL",
+            rusqlite::params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some((leaf_source, _)) = leaf else {
+        return Err(error(
+            StatusCode::NOT_FOUND,
+            format!("account {id} not found"),
+        ));
+    };
+
+    let target_source: Option<String> = if request.root_id.trim().is_empty() {
+        // No root: the leaf goes back to being unfiled. A leaf with a provider
+        // number cannot — its number says which institution it is.
+        None
+    } else {
+        let found: Option<Option<String>> = tx
+            .query_row(
+                "SELECT source FROM account_roots WHERE id=?1 AND deleted_at IS NULL",
+                rusqlite::params![request.root_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let Some(source) = found else {
+            return Err(error(
+                StatusCode::NOT_FOUND,
+                format!("root {} not found", request.root_id),
+            ));
+        };
+        source
+    };
+
+    if leaf_source != target_source {
+        let where_ = match (&leaf_source, &target_source) {
+            (Some(leaf), Some(target)) => {
+                format!("a {leaf} account cannot go under a {target} root")
+            }
+            (Some(_), None) => {
+                "an account with a provider number cannot go under a root with none".to_string()
+            }
+            (None, Some(_)) => {
+                "an account with no provider number cannot go under a root with one".to_string()
+            }
+            (None, None) => String::new(),
+        };
+        return Err(error(StatusCode::CONFLICT, where_));
+    }
+
+    let now = db::server_time_ms();
+    let root_id = if request.root_id.trim().is_empty() {
+        None
+    } else {
+        Some(request.root_id.as_str())
+    };
+    tx.execute(
+        "UPDATE accounts SET root_id=?1, updated_at=?2 WHERE id=?3",
+        rusqlite::params![root_id, now, id],
+    )
+    .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    tx.commit()
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "id": id, "rootId": root_id })))
+}
+
 /// `PUT /accounts/:id/identity`
 pub async fn put_account_identity(
     State(state): State<AppState>,
@@ -525,6 +708,22 @@ mod tests {
         .unwrap()
     }
 
+    async fn move_to_root(
+        state: &AppState,
+        id: &str,
+        root_id: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        move_account_to_root(
+            State(state.clone()),
+            Path(id.to_string()),
+            Json(MoveRootRequest {
+                root_id: root_id.to_string(),
+            }),
+        )
+        .await
+        .map(|Json(body)| body)
+    }
+
     /// A leaf's source must equal its root's: an account filed under Crédit
     /// Agricole cannot carry Firstrade's number, or the tree would say one
     /// thing and the identity another.
@@ -721,9 +920,107 @@ mod tests {
             .db
             .get()
             .unwrap()
-            .query_row("SELECT type FROM accounts WHERE id='acc-1'", [], |r| r.get(0))
+            .query_row("SELECT type FROM accounts WHERE id='acc-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(type_, "savings", "the desktop's edit landed");
+    }
+
+    /// A root is created and renamed through the desktop's own endpoints. It
+    /// has no source: it is the user's own grouping, not a provider's.
+    #[tokio::test]
+    async fn a_root_can_be_created_and_renamed() {
+        let state = state();
+
+        let Json(created) = create_account_root(
+            State(state.clone()),
+            Json(RootRequest {
+                name: "My money".to_string(),
+                kind: Some("neobank".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created["name"], "My money");
+        assert_eq!(created["kind"], "neobank");
+        assert!(
+            created["source"].is_null(),
+            "a root the user made has no source"
+        );
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let Json(renamed) = rename_account_root(
+            State(state.clone()),
+            Path(id.clone()),
+            Json(RootRequest {
+                name: "Our money".to_string(),
+                kind: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(renamed["name"], "Our money");
+
+        let conn = state.db.get().unwrap();
+        let (name, kind, source): (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT name, kind, source FROM account_roots WHERE id=?1",
+                rusqlite::params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(name, "Our money");
+        assert_eq!(kind, "neobank", "renaming leaves the kind alone");
+        assert_eq!(source, None);
+    }
+
+    /// A leaf goes under a root of its own source — and only that one.
+    #[tokio::test]
+    async fn a_leaf_moves_under_a_root_of_its_own_source() {
+        let state = state();
+        root(&state, "r-ca", "Crédit Agricole", "credit_agricole");
+        leaf(&state, "acc-1", "Eko by CA", "credit_agricole", "r-ca");
+
+        // Another institution's root is refused.
+        root(&state, "r-fr", "Firstrade", "firstrade");
+        let error = move_to_root(&state, "acc-1", "r-fr").await.unwrap_err();
+        assert_eq!(error.0, axum::http::StatusCode::CONFLICT);
+        assert_eq!(root_of(&state, "acc-1").as_deref(), Some("r-ca"));
+    }
+
+    /// A leaf with a provider number cannot go under a root with none: the
+    /// tree would say it belongs to an institution it does not. A leaf with no
+    /// number goes under a root with no source — both are the user's own.
+    #[tokio::test]
+    async fn a_leaf_goes_under_a_root_that_shares_its_source_or_lacks_one() {
+        let state = state();
+        root(&state, "r-ca", "Crédit Agricole", "credit_agricole");
+        leaf(&state, "acc-1", "Eko by CA", "credit_agricole", "r-ca");
+
+        let Json(mine) = create_account_root(
+            State(state.clone()),
+            Json(RootRequest {
+                name: "My money".to_string(),
+                kind: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let mine_id = mine["id"].as_str().unwrap().to_string();
+
+        let error = move_to_root(&state, "acc-1", &mine_id).await.unwrap_err();
+        assert_eq!(error.0, axum::http::StatusCode::CONFLICT);
+        assert_eq!(root_of(&state, "acc-1").as_deref(), Some("r-ca"));
+
+        // A leaf with no number of its own may join the user's root.
+        account(&state, "acc-2", "Groceries");
+        move_to_root(&state, "acc-2", &mine_id).await.unwrap();
+        assert_eq!(root_of(&state, "acc-2").as_deref(), Some(mine_id.as_str()));
+
+        // And leave it again: no root at all.
+        move_to_root(&state, "acc-2", "").await.unwrap();
+        assert_eq!(root_of(&state, "acc-2"), None);
     }
 
     /// A number a *deleted* account still holds is refused to everyone else —

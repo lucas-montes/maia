@@ -111,6 +111,27 @@ The leaf's type follows the root's **kind**: a bank has savings products — a
 Livret A, an LDD, an épargne — and everything else it holds is cash. A broker's
 account is cash, and so is a bank without branches.
 
+## The desktop's view
+
+The accounts screen shows the tree: a root with its leaves under it and the
+root's total beside it, then the accounts that belong to no root.
+
+- **Read** — the desktop's `list_account_roots` command reads the roots from
+  the database, and `list_accounts` carries each account's `rootId`. The roots
+  are not fetched over the sync API: they are server-only state the phone
+  must neither see nor push.
+- **Write** — three desktop-only endpoints, `POST /account-roots`,
+  `PUT /account-roots/:id` and `PUT /accounts/:id/root`. The desktop never
+  writes `maia.db` directly.
+- **The rule the picker follows** — a leaf can only go under a root of its own
+  source, and a leaf with a provider number cannot be unfiled. The server
+  enforces the same rule, so the picker never offers a move that would be
+  refused.
+- **The tree is a view, not a second set of numbers** — a root's total is the
+  sum of its leaves' balances. A leaf whose root has gone is kept aside rather
+  than dropped: an account that vanishes from the view is worse than one that
+  looks unfiled.
+
 ## Where the code lives
 
 | Concern | File |
@@ -120,6 +141,8 @@ account is cash, and so is a bank without branches.
 | the type a new account gets | `src/statements/store.rs` (`default_account_type`) |
 | resolving and creating roots on import | `src/statements/store.rs` |
 | the identity endpoint | `src/handlers/accounts.rs` |
+| the roots: create, rename, move a leaf | `src/handlers/accounts.rs` |
+| the desktop's view of the tree | `maia-ui/src/views/accounts.ts`, `maia-ui/src/lib/accountTree.ts` |
 | the phone's read and write | `src/handlers/pull.rs`, `src/handlers/push.rs` |
 
 See also: [entry-lifecycle.md](entry-lifecycle.md), [overview.md](../overview.md),
