@@ -14,6 +14,7 @@ pub mod receipt_ocr;
 pub mod seed;
 pub mod server;
 pub mod statements;
+pub mod trades;
 
 pub use config::Config;
 pub use server::{create_router, start_server, AppState};

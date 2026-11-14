@@ -150,7 +150,11 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Note: a trade's **identity keeps the zero amount** it always had, so a trade staged before keeps its line id and dedupe key, and an older export of the same trades still reads as a duplicate.
   - Note: for T16 — trades already staged keep amount 0 and no details until their statement is read again, and the "already ingested" no-op (T3) means re-dropping the Firstrade file does **not** re-read it (it holds pending entries). T16 needs a way to re-read it, or the booking must refuse a trade with no stored details.
   - Note: for T16 — `match_pending` matches any `pending` line by amount. Once trades become pending with real amounts, it must skip `line_kind = 'trade'`, or a buy could pair with a deposit of the same sum.
-- [ ] T15 Schema: `transactions.kind ∈ movement|trade` + trade details (columns or `trades` table).
+- [x] T15 Schema: `transactions.kind ∈ movement|trade` + trade details (columns or `trades` table). (status:done)
+  - Completed: 2026-11-14
+  - Boundaries: In — migration v14 (`src/db.rs`): a server-only `trades(transaction_id PK → transactions ON DELETE CASCADE, side CHECK buy|sell, symbol, quantity, price, created_at, updated_at)` with an index on `symbol`; `src/trades.rs` with `record_trade` (an upsert, so re-booking rewrites the row) and `trade_of`. Out — booking (T16), the view (T17), positions and `opening_positions` (T18).
+  - Note: the `trades` table, not columns — and **no `transactions.kind` column**: `transactions` is synced, so a column there would have to be kept out of the push or the phone could rewrite it. A transaction is a trade when it has a `trades` row; with none it is a movement.
+  - Note: for T18 — the phone can soft-delete a trade's transfer (`deleted_at`), which leaves its `trades` row in place. Positions must join on live transactions.
 - [ ] T16 Import books a selected trade as cash leaf ↔ securities leaf (securities leaf auto-created
       under the root); the review proposes it, so there are no 15 manual decisions.
 - [ ] T17 Transactions view labels each row: `Bought 7 VOO @ …`, `Transfer → Livret A`, `Dividend`,
@@ -283,4 +287,4 @@ Not fixed: a phone-created account arrives as `cash`, because the phone no longe
 Fixing it needs a phone change that sends the type on creation.
 
 ### Still to come
-- **Stage 2 is complete; T14 is done.** Next is T15, migration v14: the trade columns on `transactions`.
+- **Stage 2 is complete; T14–T15 are done.** Next is T16: booking a trade as cash leaf ↔ securities leaf, with a `trades` row.

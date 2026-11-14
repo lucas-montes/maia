@@ -214,13 +214,35 @@ pub const MIGRATIONS: &[(i64, Step)] = &[
     // themselves; a root's balance is the sum of its leaves. Roots are
     // server-only: the phone never sees them.
     (13, Step::Guarded(add_account_roots)),
+    // Trades. A trade is booked as a transfer between a broker's cash and
+    // securities accounts, at the cash it moved; this table says what that
+    // transfer bought or sold, so positions can be derived from it. One row
+    // per transaction, gone with it. Server-only, like the account roots: the
+    // phone sees the transfer, never this table, and a transaction with no
+    // row here is an ordinary movement.
+    (
+        14,
+        Step::Sql(
+            "CREATE TABLE IF NOT EXISTS trades (
+                transaction_id TEXT PRIMARY KEY
+                    REFERENCES transactions(id) ON DELETE CASCADE,
+                side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+                symbol TEXT NOT NULL,
+                quantity REAL,
+                price REAL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);",
+        ),
+    ),
 ];
 
 /// Highest version in `MIGRATIONS`.
 ///
 /// A database newer than this means the data is newer than the binary, which is
 /// what a Nix rollback looks like. `migrate` refuses rather than serving.
-pub const LATEST_VERSION: i64 = 13;
+pub const LATEST_VERSION: i64 = 14;
 
 /// The v1 schema, exactly as it shipped.
 ///
