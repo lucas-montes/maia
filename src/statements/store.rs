@@ -578,8 +578,12 @@ pub struct ImportRequest {
     /// suggestions".
     #[serde(default)]
     pub lines: Vec<ImportLine>,
-    #[serde(rename = "accountId", default)]
-    pub account_id: Option<String>,
+    /// The institution the statement's entries go under. The user picks the
+    /// institution, never the account: the server decides which of its
+    /// accounts each entry lands in. `None` means the institution of the
+    /// statement's own source, created on first import.
+    #[serde(rename = "rootId", default)]
+    pub root_id: Option<String>,
     #[serde(rename = "counterpartAccountId", default)]
     pub counterpart_account_id: Option<String>,
     /// High-confidence pairs are expanded and imported together by default.
@@ -596,8 +600,6 @@ pub struct ImportLine {
     pub type_: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
-    #[serde(rename = "accountId", default)]
-    pub account_id: Option<String>,
     #[serde(rename = "counterpartAccountId", default)]
     pub counterpart_account_id: Option<String>,
 }
@@ -716,6 +718,36 @@ pub fn import_statement(
     request: ImportRequest,
     base_currency: &str,
 ) -> anyhow::Result<ImportOutcome> {
+    let roots = root_choices([(statement_id, &request)]);
+    import_statement_with(tx, statement_id, request, &roots, base_currency)
+}
+
+/// The institution chosen for each statement of a batch, by statement id.
+///
+/// A transfer pair can span two statements, and each side goes under its own
+/// statement's institution, so the import of one statement has to know what
+/// was chosen for the others in the same batch.
+pub fn root_choices<'a>(
+    requests: impl IntoIterator<Item = (&'a str, &'a ImportRequest)>,
+) -> HashMap<String, String> {
+    requests
+        .into_iter()
+        .filter_map(|(id, request)| {
+            let root = request.root_id.as_deref()?.trim();
+            (!root.is_empty()).then(|| (id.to_string(), root.to_string()))
+        })
+        .collect()
+}
+
+/// [`import_statement`], with the institutions chosen for every statement of
+/// the batch it belongs to.
+pub fn import_statement_with(
+    tx: &Transaction<'_>,
+    statement_id: &str,
+    request: ImportRequest,
+    roots: &HashMap<String, String>,
+    base_currency: &str,
+) -> anyhow::Result<ImportOutcome> {
     let statement = load_statement(tx, statement_id)?;
     let now = db::server_time_ms();
 
@@ -742,7 +774,6 @@ pub fn import_statement(
                 action: ImportAction::Import,
                 type_: None,
                 category: None,
-                account_id: None,
                 counterpart_account_id: None,
             })
             .collect()
@@ -805,7 +836,6 @@ pub fn import_statement(
                         action: ImportAction::Import,
                         type_: None,
                         category: None,
-                        account_id: None,
                         counterpart_account_id: None,
                     });
                 }
@@ -920,6 +950,7 @@ pub fn import_statement(
                             &line,
                             &counterpart,
                             &match_id,
+                            roots,
                             base_currency,
                             now,
                         );
@@ -963,7 +994,7 @@ pub fn import_statement(
             &statement,
             &line,
             request_line,
-            request.account_id.as_deref(),
+            roots.get(&statement.id).map(String::as_str),
             request.counterpart_account_id.as_deref(),
             base_currency,
             now,
@@ -1070,13 +1101,12 @@ fn import_single(
     statement: &StatementRow,
     line: &LineRow,
     request: &ImportLine,
-    statement_account_override: Option<&str>,
+    root_choice: Option<&str>,
     statement_counterpart_override: Option<&str>,
     base_currency: &str,
     now: i64,
 ) -> anyhow::Result<String> {
-    let account_override = request.account_id.as_deref().or(statement_account_override);
-    let account_id = resolve_account(tx, statement, account_override, now)?
+    let account_id = resolve_account(tx, statement, root_choice, now)?
         .with_context(|| format!("no account for {}", statement.account_name))?;
 
     let type_ = request
@@ -1179,6 +1209,7 @@ fn import_pair(
     a: &LineRow,
     b: &LineRow,
     match_id: &str,
+    roots: &HashMap<String, String>,
     base_currency: &str,
     now: i64,
 ) -> anyhow::Result<String> {
@@ -1199,9 +1230,23 @@ fn import_pair(
     } else {
         load_statement(tx, &credit.statement_id)?
     };
-    let debit_account = resolve_account(tx, &debit_statement, None, now)?
-        .with_context(|| format!("no account for {}", debit_statement.account_name))?;
-    let credit_account = resolve_account(tx, &credit_statement, None, now)?
+    // Each side goes under the institution chosen for its own statement, so a
+    // pair books onto the same accounts as the rest of its statements. It
+    // used to resolve both sides with no choice at all, and a pair landed
+    // somewhere other than the statement it came from.
+    let debit_account = resolve_account(
+        tx,
+        &debit_statement,
+        roots.get(&debit_statement.id).map(String::as_str),
+        now,
+    )?
+    .with_context(|| format!("no account for {}", debit_statement.account_name))?;
+    let credit_account = resolve_account(
+        tx,
+        &credit_statement,
+        roots.get(&credit_statement.id).map(String::as_str),
+        now,
+    )?
         .with_context(|| format!("no account for {}", credit_statement.account_name))?;
 
     let (first, second) = if debit.dedupe_key <= credit.dedupe_key {
@@ -1326,8 +1371,18 @@ fn rate_for(tx: &Transaction<'_>, code: &str, base: &str, date_ms: i64) -> anyho
 /// the one this import finds: there is one root per institution, and the
 /// accounts are its leaves. A root's id is minted, never derived — it means
 /// nothing, and the source is what identifies it.
+///
+/// A deleted root is revived rather than duplicated: `idx_account_roots_source`
+/// keeps one row per source, deleted or not, so inserting a second one would
+/// fail, and the deleted one is the institution the import is about anyway.
 pub(crate) fn resolve_root(tx: &Transaction<'_>, source: &str, now: i64) -> anyhow::Result<String> {
-    if let Some(id) = lookup_root(tx, source)? {
+    if let Some((id, deleted)) = lookup_root(tx, source)? {
+        if deleted {
+            tx.execute(
+                "UPDATE account_roots SET deleted_at=NULL, updated_at=?1 WHERE id=?2",
+                params![now, id],
+            )?;
+        }
         return Ok(id);
     }
     let (name, kind) = root_for_source(source);
@@ -1340,23 +1395,115 @@ pub(crate) fn resolve_root(tx: &Transaction<'_>, source: &str, now: i64) -> anyh
     Ok(id)
 }
 
-/// The root for a source, if there is one.
-pub(crate) fn lookup_root(tx: &Transaction<'_>, source: &str) -> anyhow::Result<Option<String>> {
+/// The root for a source, if there is one, and whether it is deleted.
+pub(crate) fn lookup_root(
+    tx: &Transaction<'_>,
+    source: &str,
+) -> anyhow::Result<Option<(String, bool)>> {
     tx.query_row(
-        "SELECT id FROM account_roots WHERE source=?1",
+        "SELECT id, deleted_at IS NOT NULL FROM account_roots WHERE source=?1",
         params![source],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )
     .optional()
     .map_err(Into::into)
 }
 
+/// The root a statement's entries go under: the one the user chose, or the
+/// one of the statement's own source.
+///
+/// The user chooses an institution, never an account. The chosen root must be
+/// the statement's institution — its source's root — or a root the user made
+/// by hand, with no source yet. Choosing a hand-made root adopts it: it becomes
+/// the institution of this source, and the accounts the user filed under it
+/// become that institution's too. A root of another institution is refused.
+pub(crate) fn resolve_target_root(
+    tx: &Transaction<'_>,
+    source: &str,
+    chosen: Option<&str>,
+    now: i64,
+) -> anyhow::Result<String> {
+    let Some(chosen) = chosen else {
+        return resolve_root(tx, source, now);
+    };
+    let (name, root_source): (String, Option<String>) = tx
+        .query_row(
+            "SELECT name, source FROM account_roots WHERE id=?1 AND deleted_at IS NULL",
+            params![chosen],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .with_context(|| format!("institution {chosen} not found"))?;
+    match root_source.as_deref() {
+        Some(root_source) if root_source == source => Ok(chosen.to_string()),
+        Some(root_source) => bail!("{name} is a {root_source} institution, not a {source} one"),
+        None => {
+            if let Some((holder, _)) = lookup_root(tx, source)? {
+                let holder_name: String = tx.query_row(
+                    "SELECT name FROM account_roots WHERE id=?1",
+                    params![holder],
+                    |r| r.get(0),
+                )?;
+                bail!("{source} is already the institution {holder_name}; import into it instead");
+            }
+            tx.execute(
+                "UPDATE account_roots SET source=?1, updated_at=?2 WHERE id=?3",
+                params![source, now, chosen],
+            )?;
+            // A leaf's source must equal its root's: the accounts the user
+            // filed under the hand-made root are now this institution's.
+            tx.execute(
+                "UPDATE accounts SET source=?1, updated_at=?2
+                 WHERE root_id=?3 AND source IS NULL",
+                params![source, now, chosen],
+            )?;
+            Ok(chosen.to_string())
+        }
+    }
+}
+
+/// Files an account under a root when it has none, and refuses one that sits
+/// under another.
+///
+/// An account the import reaches without a root — one the user made, or one
+/// the phone made and the user then gave a number — belongs to the
+/// statement's institution from now on, so the tree stays complete.
+fn file_under_root(
+    tx: &Transaction<'_>,
+    account_id: &str,
+    root_id: &str,
+    source: &str,
+    now: i64,
+) -> anyhow::Result<()> {
+    let (name, current): (String, Option<String>) = tx.query_row(
+        "SELECT name, root_id FROM accounts WHERE id=?1",
+        params![account_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    match current.as_deref() {
+        Some(current) if current == root_id => Ok(()),
+        Some(_) => bail!("{name} belongs to another institution"),
+        None => {
+            tx.execute(
+                "UPDATE accounts SET root_id=?1, source=COALESCE(source, ?2), updated_at=?3
+                 WHERE id=?4",
+                params![root_id, source, now, account_id],
+            )?;
+            Ok(())
+        }
+    }
+}
+
 /// Resolve the budget account for a statement, creating it on first import.
 ///
-/// Fetch, then create: the exact `(source, external_id)` lookup runs before
-/// anything is minted, so reusing an account the user already has is always
-/// the first answer. A created account is an *ordinary* account — its id is a
-/// fresh `Uuid::now_v7()` and means nothing. It used to be
+/// The user picks the institution; this picks the account inside it. Fetch,
+/// then create: the account the statement already points at, then the exact
+/// `(source, external_id)` lookup, and only then a new leaf under the root —
+/// so reusing an account the user already has is always the first answer.
+/// Whichever account it lands on is filed under the root if it had none.
+///
+/// A created account is an *ordinary* account — its id is a fresh
+/// `Uuid::now_v7()` and means nothing. It used to be
 /// `stable_uuid(ACCOUNT_NS, "account:<source>:<external_id>")`, which welded
 /// the row's identity to the provider's: correcting an account number silently
 /// re-pointed the next import at a different id and stranded everything
@@ -1369,16 +1516,15 @@ pub(crate) fn lookup_root(tx: &Transaction<'_>, source: &str) -> anyhow::Result<
 fn resolve_account(
     tx: &Transaction<'_>,
     statement: &StatementRow,
-    override_id: Option<&str>,
+    root_choice: Option<&str>,
     now: i64,
 ) -> anyhow::Result<Option<String>> {
-    if let Some(id) = override_id {
-        ensure_account_live(tx, id)?;
-        return Ok(Some(id.to_string()));
-    }
+    let root_id = resolve_target_root(tx, &statement.source, root_choice, now)?;
+
     if let Some(id) = statement.account_id.as_deref() {
         if account_exists(tx, id)? {
             ensure_account_live(tx, id)?;
+            file_under_root(tx, id, &root_id, &statement.source, now)?;
             return Ok(Some(id.to_string()));
         }
     }
@@ -1387,12 +1533,10 @@ fn resolve_account(
     };
     if let Some(id) = lookup_external_account(tx, &statement.source, external_id)? {
         ensure_account_live(tx, &id)?;
+        file_under_root(tx, &id, &root_id, &statement.source, now)?;
         return Ok(Some(id));
     }
 
-    // The account is a leaf of its institution's root, and the root is
-    // created with it if this is the first import from that source.
-    let root_id = resolve_root(tx, &statement.source, now)?;
     let type_ = default_account_type(&statement.source, &statement.account_name);
     tx.execute(
         "INSERT INTO accounts
@@ -1412,7 +1556,6 @@ fn resolve_account(
             root_id,
         ],
     )?;
-    let _ = root_id;
     // Read the id back rather than trusting the one just minted: on the
     // conflict path (the same identity resolved twice inside one transaction)
     // nothing was inserted, and the account's real id is the existing row's.
@@ -1650,7 +1793,7 @@ mod tests {
             statement_id,
             ImportRequest {
                 lines: Vec::new(),
-                account_id: None,
+                root_id: None,
                 counterpart_account_id: None,
                 auto_link: Some(false),
             },
@@ -1774,7 +1917,7 @@ mod tests {
                     id,
                     ImportRequest {
                         lines: Vec::new(),
-                        account_id: None,
+                        root_id: None,
                         counterpart_account_id: None,
                         auto_link: Some(false),
                     },

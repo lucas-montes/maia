@@ -263,9 +263,10 @@ export const statementsAtom = atom<
     /** True while a re-preview is in flight, so the summary can say it is
      *  catching up rather than silently showing stale numbers. */
     previewing: boolean;
-    /** Per-statement account override picked in the review, keyed by statement
-     *  id — sent as `accountId` with the import and the preview alike. */
-    accountOverrides: Record<string, string>;
+    /** Per-statement institution picked in the review, keyed by statement id —
+     *  sent as `rootId` with the import and the preview alike. The user picks
+     *  the institution; the server picks the account inside it. */
+    rootChoices: Record<string, string>;
     /** Statement ids picked on the list page for bulk import/delete. */
     selectedStatements: string[];
     /** Last source the drop form placed files under, so the dropdown stays on it. */
@@ -281,7 +282,7 @@ export const statementsAtom = atom<
   fileReview: null,
   preview: null,
   previewing: false,
-  accountOverrides: {},
+  rootChoices: {},
   selectedStatements: [],
   lastDropSource: localStorage.getItem("maia.statements.lastDropSource") ?? "credit_agricole",
 });

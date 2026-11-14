@@ -427,12 +427,21 @@ pub async fn import_statements(
     let tx = conn
         .transaction()
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Every statement's institution, known before any of them is imported: a
+    // transfer pair can span two statements of the batch, and each side goes
+    // under its own statement's institution.
+    let roots = store::root_choices(
+        body.statements
+            .iter()
+            .map(|statement| (statement.id.as_str(), &statement.request)),
+    );
     let mut outcomes = Vec::new();
     for statement in body.statements {
-        let outcome = store::import_statement(
+        let outcome = store::import_statement_with(
             &tx,
             &statement.id,
             statement.request,
+            &roots,
             &state.config.base_currency,
         )
         .map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;

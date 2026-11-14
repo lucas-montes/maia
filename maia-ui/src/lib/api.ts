@@ -201,9 +201,10 @@ export interface StatementImportBatchEntry {
   id: string;
   lines: StatementImportLine[];
   autoLink?: boolean;
-  /** The account to book this statement's entries onto, overriding whatever
-   *  the import would otherwise resolve. */
-  accountId?: string;
+  /** The institution this statement's entries go under. The server picks the
+   *  account inside it; omitted means the institution of the statement's own
+   *  source. */
+  rootId?: string;
 }
 
 /** What an import would do, reported by the import itself. */
@@ -235,6 +236,10 @@ export interface PreviewAccount {
   accountType: string;
   source: string;
   externalId: string | null;
+  /** The institution the account goes under. */
+  institution: string;
+  /** Whether the import would create that institution. */
+  institutionIsNew: boolean;
   resolution: "existing" | "willCreate" | "untouched";
   statementIds: string[];
   files: string[];

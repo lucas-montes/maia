@@ -1,6 +1,7 @@
 import {
   api,
   isEnvelopeFailure,
+  type FinanceAccountRoot,
   type ImportPreview,
   type PreviewAccount,
   type StatementDetail,
@@ -548,13 +549,13 @@ function accountGroupsHtml(
   statements: StatementDetail[],
   selected: Set<string>,
   selectable: Set<string>,
-  accounts: { id: string; name: string; type: string }[],
   overrides: Record<string, string>,
+  roots: FinanceAccountRoot[],
 ): string {
   // The panel is built from the *file's* accounts, not from the preview's.
   //
   // The preview only describes statements with something selected, so driving
-  // the panel off it made an account's whole row — checkbox, "Import into"
+  // the panel off it made an account's whole row — checkbox, "Institution"
   // picker, adopt-identity buttons — disappear the moment its entries were
   // unticked, which is exactly when the user is most likely to want them. The
   // rows are stable; the preview fills in what the import would do with each.
@@ -574,6 +575,8 @@ function accountGroupsHtml(
       const described = preview?.accounts.find((candidate) =>
         candidate.statementIds.some((id) => ids.has(id)),
       );
+      // The institution of the statement's own source, if it exists yet.
+      const sourceRoot = roots.find((root) => root.source === first.source);
       // Nothing selected from this account: say so rather than guessing what
       // an import that excludes it would have done with it.
       const account: PreviewAccount = described ?? {
@@ -582,6 +585,8 @@ function accountGroupsHtml(
         accountType: "",
         source: first.source,
         externalId: first.accountNumber,
+        institution: sourceRoot?.name ?? first.institution,
+        institutionIsNew: !sourceRoot,
         resolution: "untouched",
         statementIds: [...ids],
         files: details
@@ -593,21 +598,29 @@ function accountGroupsHtml(
       const lines = details.flatMap((detail) => detail.lines.filter((line) => selectable.has(line.id)));
       const allPicked = lines.length > 0 && lines.every((line) => selected.has(line.id));
       const somePicked = lines.some((line) => selected.has(line.id));
+      const under = ` <span class="text-ink-500">under</span> <span class="text-ink-200">${escapeHtml(account.institution)}</span>${account.institutionIsNew ? ` <span class="badge badge-warn">new institution</span>` : ""}`;
       const resolution =
         account.resolution === "existing"
-          ? `<span class="text-ink-400">uses existing account</span> <span class="text-ink-200">${escapeHtml(account.name)}</span>`
+          ? `<span class="text-ink-400">uses existing account</span> <span class="text-ink-200">${escapeHtml(account.name)}</span>${under}`
           : account.resolution === "willCreate"
-            ? `<span class="badge badge-warn">will be created</span> <span class="text-ink-200">${escapeHtml(account.name)}</span> <span class="text-ink-500">(${escapeHtml(account.accountType)})</span>`
+            ? `<span class="badge badge-warn">will be created</span> <span class="text-ink-200">${escapeHtml(account.name)}</span> <span class="text-ink-500">(${escapeHtml(account.accountType)})</span>${under}`
               : `<span class="text-ink-200">${escapeHtml(account.name)}</span> <span class="text-ink-500">— nothing selected${previewing ? ", checking…" : ""}</span>`;
       const override = details
         .map((detail) => overrides[detail.statement.id])
         .find((value) => value !== undefined);
-      const options = accounts
+      // The user picks the institution, never the account: the server decides
+      // which of its accounts each entry lands in. Offered: the statement's own
+      // institution (the default) and the ones made by hand, with no source yet,
+      // which the import adopts. Another institution's root is never offered —
+      // the server would refuse it.
+      const options = roots
+        .filter((root) => root.source === null)
         .map(
           (candidate) =>
-            `<option value="${escapeHtml(candidate.id)}" ${candidate.id === override ? "selected" : ""}>${escapeHtml(candidate.name)} (${escapeHtml(candidate.type)})</option>`,
+            `<option value="${escapeHtml(candidate.id)}" ${candidate.id === override ? "selected" : ""}>${escapeHtml(candidate.name)} (${escapeHtml(candidate.kind)})</option>`,
         )
         .join("");
+      const defaultInstitution = sourceRoot?.name ?? first.institution;
       // Accepting a suggestion writes the number onto the chosen account, so a
       // guess becomes an exact match from then on and never has to be trusted
       // twice.
@@ -643,9 +656,9 @@ function accountGroupsHtml(
               ${suggestions ? `<div class="mt-2 flex flex-wrap items-center gap-2"><span class="text-xs text-ink-500">Already have it?</span>${suggestions}</div>` : ""}
             </div>
             <label class="flex items-center gap-2 text-xs text-ink-500">
-              Import into
-              <select class="select select-xs select-bordered w-48" data-account-override="${escapeHtml(details.map((d) => d.statement.id).join(","))}">
-                <option value="">${account.resolution === "willCreate" ? "— a new account —" : "— the account above —"}</option>
+              Institution
+              <select class="select select-xs select-bordered w-48" data-root-choice="${escapeHtml(details.map((d) => d.statement.id).join(","))}">
+                <option value="">${escapeHtml(defaultInstitution)}${sourceRoot ? "" : " (new)"}</option>
                 ${options}
               </select>
             </label>
@@ -676,6 +689,7 @@ function fileHtml(
   preview: ImportPreview | null,
   previewing: boolean,
   overrides: Record<string, string>,
+  roots: FinanceAccountRoot[],
 ): string {
   const localIds = new Set<string>();
   const trades: StatementLine[] = [];
@@ -772,7 +786,7 @@ function fileHtml(
         <button class="btn btn-ghost btn-xs" type="button" data-action="select-none" ${selected.size === 0 ? "disabled" : ""}>Clear</button>
       </div>
 
-      ${accountGroupsHtml(preview, previewing, statements, selected, selectable, accounts, overrides)}
+      ${accountGroupsHtml(preview, previewing, statements, selected, selectable, overrides, roots)}
 
       ${previewErrorsHtml(preview)}
 
@@ -837,10 +851,16 @@ export function mount(root: HTMLElement): () => void {
   /** Existing accounts for the transfer counterpart picker; `listAccounts`
    *  is the desktop's local read, so it is cheap and always current. */
   let accounts: { id: string; name: string; type: string }[] = [];
+  /** The institutions an import can go under. The user picks one of these,
+   *  never an account: the server picks the account inside it. */
+  let roots: FinanceAccountRoot[] = [];
 
   const loadAccounts = async (): Promise<void> => {
     try {
-      const res = await api.listAccounts();
+      const [res, rootsRes] = await Promise.all([api.listAccounts(), api.listAccountRoots()]);
+      if (!isEnvelopeFailure(rootsRes)) {
+        roots = ((rootsRes as { data?: unknown }).data ?? []) as FinanceAccountRoot[];
+      }
       if (isEnvelopeFailure(res)) return;
       accounts = ((res as { data?: unknown }).data ?? []) as { id: string; name: string; type: string }[];
       // A late list must not silently keep showing a stale or empty picker.
@@ -986,7 +1006,8 @@ export function mount(root: HTMLElement): () => void {
             accountOptions,
             state.preview as ImportPreview | null,
             state.previewing,
-            state.accountOverrides,
+            state.rootChoices,
+            roots,
           )}
         ${panelClose}`,
       );
@@ -1169,7 +1190,7 @@ export function mount(root: HTMLElement): () => void {
 
         previewing: false,
 
-        accountOverrides: {},
+        rootChoices: {},
         status: "error",
         message: `Failed to load the file: ${e}`,
       });
@@ -1201,7 +1222,7 @@ export function mount(root: HTMLElement): () => void {
       // An override picked in the review wins over whatever the import would
       // otherwise resolve, and the server honours it as the statement's
       // account for every line of it.
-      ...(state.accountOverrides[id] ? { accountId: state.accountOverrides[id] } : {}),
+      ...(state.rootChoices[id] ? { rootId: state.rootChoices[id] } : {}),
     }));
   };
 
@@ -1350,7 +1371,7 @@ export function mount(root: HTMLElement): () => void {
 
             previewing: false,
 
-            accountOverrides: {},
+            rootChoices: {},
             selectedLines: [],
           });
           await loadList();
@@ -1545,7 +1566,7 @@ export function mount(root: HTMLElement): () => void {
 
         previewing: false,
 
-        accountOverrides: {},
+        rootChoices: {},
         selectedLines: [],
         status: "saved",
         message: kind === "ignore" ? "Statement ignored." : "Statement deleted.",
@@ -1640,19 +1661,19 @@ export function mount(root: HTMLElement): () => void {
       schedulePreview();
       return;
     }
-    // The account an account group's entries are booked onto, overriding what
-    // the import would otherwise resolve. Applies to every statement of the
-    // group, and re-previews so the summary catches up.
-    if (target.matches("[data-account-override]")) {
+    // The institution an account group's entries go under; the server picks
+    // the account inside it. Applies to every statement of the group, and
+    // re-previews so the summary catches up.
+    if (target.matches("[data-root-choice]")) {
       const select = target as HTMLSelectElement;
-      const ids = (select.dataset.accountOverride ?? "").split(",").filter(Boolean);
+      const ids = (select.dataset.rootChoice ?? "").split(",").filter(Boolean);
       const state = statementsAtom.get();
-      const overrides = { ...state.accountOverrides };
+      const overrides = { ...state.rootChoices };
       for (const id of ids) {
         if (select.value) overrides[id] = select.value;
         else delete overrides[id];
       }
-      statementsAtom.set({ ...state, accountOverrides: overrides });
+      statementsAtom.set({ ...state, rootChoices: overrides });
       render();
       schedulePreview();
       return;
@@ -1737,7 +1758,7 @@ export function mount(root: HTMLElement): () => void {
 
           previewing: false,
 
-          accountOverrides: {},
+          rootChoices: {},
           selectedId: null,
           detail: null,
           selectedLines: [],

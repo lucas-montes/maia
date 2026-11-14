@@ -81,12 +81,42 @@ written, so it is where the rule could be broken — and it refuses:
 | under a root with no source | any | **refused** (409) — there is no institution to file it under |
 | with no root | any | it **joins** the root for that source, made if need be |
 
-Clearing an identity leaves the root alone: the account is still that
-institution's, it just has no provider number any more.
+Clearing an identity removes the **number only**. A leaf under a root keeps
+that root's source, so the rule above still holds and the account is simply
+one with no provider number, like a securities leaf. An unfiled leaf loses its
+source with its number.
 
 A leaf with no root is the normal case for an account the phone made — the
 push writes no root — so joining one is what keeps the tree complete rather
 than refusing the one identity the desktop can actually set.
+
+## Importing: the user picks the institution
+
+An import asks for an **institution**, never an account: each statement of
+`POST /statements/import` (and `/statements/preview`) may carry a `rootId`,
+and the server picks the account inside it. With no `rootId` the statement goes
+under its source's root, made if need be.
+
+| The chosen root | What happens |
+|---|---|
+| none | the root of the statement's source |
+| the root of the statement's source | used |
+| a root with no source (made by hand) | **adopted**: it takes the statement's source, and so do its leaves without one — refused if another root already holds that source |
+| a root of another source | **refused**, per entry, with the reason |
+
+Inside the root the account is, in order: the one the statement already points
+at, then the `(source, external_id)` match, then a new leaf. Whichever it is,
+an account with no root is **filed under the chosen root**; one under another
+root is refused.
+
+The choice is batch-wide: a transfer pair can span two statements, and each
+side goes under the institution chosen for its own statement. A deleted root
+is revived rather than duplicated, because `idx_account_roots_source` covers
+deleted rows too.
+
+The preview reports, per account, the `institution` it goes under and whether
+the import would create it (`institutionIsNew`). The review's dropdown offers
+the statement's own institution and the hand-made ones only.
 
 ## How a root is made
 

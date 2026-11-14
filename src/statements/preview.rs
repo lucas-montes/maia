@@ -21,8 +21,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Serialize;
 
+use super::root_for_source;
 use super::store::{
-    ImportOutcome, ImportRequest, default_account_type, import_statement, lookup_external_account,
+    ImportOutcome, ImportRequest, default_account_type, import_statement_with, lookup_external_account,
+    lookup_root, root_choices,
 };
 
 /// One statement of the batch, with the decisions the user has made so far.
@@ -89,6 +91,11 @@ pub struct PreviewAccount {
     pub account_type: String,
     pub source: String,
     pub external_id: Option<String>,
+    /// The institution the account goes under: the root the user chose, or
+    /// the one of the statement's source.
+    pub institution: String,
+    /// Whether the import would create that institution.
+    pub institution_is_new: bool,
     pub resolution: AccountResolution,
     pub statement_ids: Vec<String>,
     /// The dropped files feeding this account, so "created once" can show its
@@ -175,37 +182,35 @@ pub fn preview_import(
     let tx = conn.transaction()?;
 
     let accounts_before = id_set(&tx, "SELECT id FROM accounts")?;
+    let roots_before = id_set(&tx, "SELECT id FROM account_roots")?;
     let linked_before = id_set(
         &tx,
         "SELECT id FROM transfer_matches WHERE status='linked'",
     )?;
 
     let statement_ids: Vec<String> = requests.iter().map(|r| r.id.clone()).collect();
-    // An account the user picked for a statement is a decision, not something
-    // to infer afterwards: `resolve_account` honours an override without
-    // writing it to `bank_statements.account_id` (an override is for this
-    // import, not a permanent re-pointing), so reading the row back would
-    // describe the identity's account while the import booked onto another.
-    let overrides: HashMap<String, String> = requests
-        .iter()
-        .filter_map(|r| {
-            r.request
-                .account_id
-                .clone()
-                .map(|account_id| (r.id.clone(), account_id))
-        })
-        .collect();
+    // The same batch-wide choice the import makes, so a pair spanning two
+    // statements previews onto the accounts the import would book it on.
+    let roots = root_choices(requests.iter().map(|r| (r.id.as_str(), &r.request)));
     let mut outcomes = Vec::with_capacity(requests.len());
     for request in requests {
-        outcomes.push(import_statement(
+        outcomes.push(import_statement_with(
             &tx,
             &request.id,
             request.request,
+            &roots,
             base_currency,
         )?);
     }
 
-    let accounts = describe_accounts(&tx, &statement_ids, &outcomes, &accounts_before, &overrides)?;
+    let accounts = describe_accounts(
+        &tx,
+        &statement_ids,
+        &outcomes,
+        &accounts_before,
+        &roots_before,
+        &roots,
+    )?;
     let transfers = describe_transfers(&tx, &linked_before)?;
     let duplicates = describe_duplicates(&tx, &statement_ids)?;
     let informational = describe_informational(&tx, &statement_ids)?;
@@ -272,7 +277,8 @@ fn describe_accounts(
     statement_ids: &[String],
     outcomes: &[ImportOutcome],
     accounts_before: &HashSet<String>,
-    overrides: &HashMap<String, String>,
+    roots_before: &HashSet<String>,
+    roots: &HashMap<String, String>,
 ) -> anyhow::Result<Vec<PreviewAccount>> {
     let mut booked: HashMap<&str, usize> = HashMap::new();
     for outcome in outcomes {
@@ -290,20 +296,23 @@ fn describe_accounts(
         let Some(statement) = load_statement_after(tx, statement_id)? else {
             continue;
         };
-        // The user's override wins, then the account the import resolved;
-        // failing both, ask the same lookup the import would have asked.
-        let resolved = match overrides.get(&statement.id).cloned() {
+        // The account the import resolved; failing that, ask the same lookup
+        // the import would have asked. The user picks the institution, never
+        // the account, so there is no override to honour here.
+        let resolved = match statement.account_id.clone() {
             Some(id) => Some(id),
-            None => match statement.account_id.clone() {
-                Some(id) => Some(id),
-                None => match statement.account_number.as_deref() {
-                    Some(external_id) => {
-                        lookup_external_account(tx, &statement.source, external_id)?
-                    }
-                    None => None,
-                },
+            None => match statement.account_number.as_deref() {
+                Some(external_id) => lookup_external_account(tx, &statement.source, external_id)?,
+                None => None,
             },
         };
+        let (institution, institution_is_new) = describe_institution(
+            tx,
+            resolved.as_deref(),
+            &statement,
+            roots,
+            roots_before,
+        )?;
 
         let transactions = booked.get(statement.id.as_str()).copied().unwrap_or(0);
         // An account this run minted inside the rollback does not exist from
@@ -337,6 +346,8 @@ fn describe_accounts(
                         account_type,
                         source: statement.source.clone(),
                         external_id: statement.account_number.clone(),
+                        institution: institution.clone(),
+                        institution_is_new,
                         resolution: AccountResolution::Existing,
                         statement_ids: Vec::new(),
                         files: Vec::new(),
@@ -373,6 +384,8 @@ fn describe_accounts(
                         account_type,
                         source: statement.source.clone(),
                         external_id: statement.account_number.clone(),
+                        institution: institution.clone(),
+                        institution_is_new,
                         resolution,
                         statement_ids: Vec::new(),
                         files: Vec::new(),
@@ -440,6 +453,43 @@ fn account_row(tx: &Transaction<'_>, id: &str) -> anyhow::Result<Option<(String,
         )
         .optional()?;
     Ok(row)
+}
+
+/// The institution a statement's account goes under, and whether the import
+/// would create it.
+///
+/// Read after the rolled-back import, so it is the import's own answer: the
+/// root of the account it booked onto, then the root the user chose, then the
+/// root of the statement's source. A root that was not there before the dry
+/// run is one the import would create.
+fn describe_institution(
+    tx: &Transaction<'_>,
+    account_id: Option<&str>,
+    statement: &StatementAfter,
+    roots: &HashMap<String, String>,
+    roots_before: &HashSet<String>,
+) -> anyhow::Result<(String, bool)> {
+    let account_root: Option<String> = match account_id {
+        Some(id) => tx
+            .query_row("SELECT root_id FROM accounts WHERE id=?1", params![id], |r| r.get(0))
+            .optional()?
+            .flatten(),
+        None => None,
+    };
+    let root_id = match account_root.or_else(|| roots.get(&statement.id).cloned()) {
+        Some(id) => Some(id),
+        None => lookup_root(tx, &statement.source)?.map(|(id, _)| id),
+    };
+    let Some(root_id) = root_id else {
+        return Ok((root_for_source(&statement.source).0, true));
+    };
+    let name: Option<String> = tx
+        .query_row("SELECT name FROM account_roots WHERE id=?1", params![root_id], |r| r.get(0))
+        .optional()?;
+    Ok(match name {
+        Some(name) => (name, !roots_before.contains(&root_id)),
+        None => (root_for_source(&statement.source).0, true),
+    })
 }
 
 /// Existing accounts the user might have meant, for an identity with none.
@@ -688,7 +738,7 @@ mod tests {
             id: id.to_string(),
             request: ImportRequest {
                 lines: Vec::new(),
-                account_id: None,
+                root_id: None,
                 counterpart_account_id: None,
                 auto_link: Some(true),
             },
@@ -799,12 +849,12 @@ mod tests {
         let outcome = {
             let mut conn = pool.get().unwrap();
             let tx = conn.transaction().unwrap();
-            let outcome = import_statement(
+            let outcome = super::super::store::import_statement(
                 &tx,
                 &id,
                 ImportRequest {
                     lines: Vec::new(),
-                    account_id: None,
+                    root_id: None,
                     counterpart_account_id: None,
                     auto_link: Some(true),
                 },
@@ -886,12 +936,12 @@ mod tests {
         assert_eq!(result.totals.accounts_reused, 1);
     }
 
-    /// Picking an account for a statement changes what the preview promises,
-    /// because it changes what the import does. `resolve_account` honours an
-    /// override without writing it onto the statement row, so reading the row
-    /// back would have described the identity's account instead.
+    /// Picking an institution for a statement changes what the preview
+    /// promises, because it changes what the import does: the account is
+    /// created under the institution the user chose, and the preview names it.
+    /// The dry run adopts a hand-made institution only inside its rollback.
     #[test]
-    fn an_account_override_is_what_the_preview_reports() {
+    fn an_institution_choice_is_what_the_preview_reports() {
         let pool = crate::db::init_memory().unwrap();
         let id = stage(
             &pool,
@@ -901,8 +951,8 @@ mod tests {
         {
             let conn = pool.get().unwrap();
             conn.execute(
-                "INSERT INTO accounts (id, name, type, opening_balance, note, created_at, updated_at)
-                 VALUES ('chosen','Somewhere else','bank',0.0,NULL,1,1)",
+                "INSERT INTO account_roots (id, name, kind, source, created_at, updated_at)
+                 VALUES ('chosen','My broker','broker',NULL,1,1)",
                 [],
             )
             .unwrap();
@@ -915,7 +965,7 @@ mod tests {
                 id: id.clone(),
                 request: ImportRequest {
                     lines: Vec::new(),
-                    account_id: Some("chosen".to_string()),
+                    root_id: Some("chosen".to_string()),
                     counterpart_account_id: None,
                     auto_link: Some(true),
                 },
@@ -926,13 +976,31 @@ mod tests {
 
         assert_eq!(result.accounts.len(), 1);
         let account = &result.accounts[0];
-        assert_eq!(account.account_id.as_deref(), Some("chosen"));
-        assert_eq!(account.name, "Somewhere else");
-        assert_eq!(account.resolution, AccountResolution::Existing);
-        assert_eq!(
-            result.totals.accounts_to_create, 0,
-            "nothing is created when the entries are sent somewhere that exists"
+        assert_eq!(account.institution, "My broker");
+        assert!(!account.institution_is_new, "the chosen institution already exists");
+        assert_eq!(account.resolution, AccountResolution::WillCreate);
+
+        let source: Option<String> = conn
+            .query_row("SELECT source FROM account_roots WHERE id='chosen'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(source, None, "a dry run adopts nothing for real");
+    }
+
+    /// With no choice, the account goes under its source's institution, which
+    /// the preview reports as new when the import would create it.
+    #[test]
+    fn the_preview_names_the_institution_it_would_create() {
+        let pool = crate::db::init_memory().unwrap();
+        let id = stage(
+            &pool,
+            &csv(&[("Card debit", "a", "2026-02-01", -10.0)]),
+            "one.csv",
         );
+
+        let result = preview(&pool, &[&id]);
+        let account = &result.accounts[0];
+        assert_eq!(account.institution, "Trading 212");
+        assert!(account.institution_is_new);
     }
 
     /// An identity with no account lists candidates, and never acts on them.
@@ -1200,10 +1268,9 @@ mod tests {
                         action: ImportAction::Skip,
                         type_: None,
                         category: None,
-                        account_id: None,
                         counterpart_account_id: None,
                     }],
-                    account_id: None,
+                    root_id: None,
                     counterpart_account_id: None,
                     auto_link: Some(true),
                 },

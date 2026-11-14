@@ -2145,7 +2145,7 @@ mod statement_tests {
     fn empty_request() -> ImportRequest {
         ImportRequest {
             lines: Vec::<ImportLine>::new(),
-            account_id: None,
+            root_id: None,
             counterpart_account_id: None,
             auto_link: None,
         }
@@ -2240,6 +2240,253 @@ mod statement_tests {
         assert_eq!(name, "Livret A");
         assert_eq!(type_, "savings", "a Livret A holds savings");
         assert!(root_id.is_some(), "the account is a leaf of the root");
+    }
+
+    /// A batch import with an institution chosen per statement.
+    fn import_batch(
+        pool: &db::DbPool,
+        requests: Vec<(String, ImportRequest)>,
+    ) -> anyhow::Result<Vec<store::ImportOutcome>> {
+        let mut conn = pool.get().unwrap();
+        let tx = conn.transaction().unwrap();
+        let roots = store::root_choices(requests.iter().map(|(id, r)| (id.as_str(), r)));
+        let mut outcomes = Vec::new();
+        for (id, request) in requests {
+            outcomes.push(store::import_statement_with(&tx, &id, request, &roots, "EUR")?);
+        }
+        tx.commit().unwrap();
+        Ok(outcomes)
+    }
+
+    fn request_under(root: Option<&str>) -> ImportRequest {
+        ImportRequest {
+            lines: Vec::new(),
+            root_id: root.map(str::to_string),
+            counterpart_account_id: None,
+            auto_link: Some(true),
+        }
+    }
+
+    fn insert_root(pool: &db::DbPool, id: &str, name: &str, source: Option<&str>) {
+        pool.get()
+            .unwrap()
+            .execute(
+                "INSERT INTO account_roots (id, name, kind, source, created_at, updated_at)
+                 VALUES (?1, ?2, 'bank', ?3, 1, 1)",
+                rusqlite::params![id, name, source],
+            )
+            .unwrap();
+    }
+
+    fn roots_of_accounts(pool: &db::DbPool) -> Vec<(String, Option<String>, Option<String>)> {
+        let conn = pool.get().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name, root_id, source FROM accounts ORDER BY name")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    /// A transfer pair spans two statements, and each side goes under the
+    /// institution chosen for its own statement. The pair used to resolve
+    /// both sides with no choice at all, so it landed under a fresh root for
+    /// the source while the rest of the batch went where the user said.
+    #[test]
+    fn a_transfer_pair_goes_under_the_chosen_institution() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 16);
+        let mut debit = draft(
+            "credit_agricole:111:hash-out",
+            "hash-out",
+            "111",
+            vec![line("Virement émis VIR", -1000.0, day, "out")],
+        );
+        debit.account_name = "Eko".to_string();
+        let mut credit = draft(
+            "credit_agricole:222:hash-in",
+            "hash-in",
+            "222",
+            vec![line("Virement en votre faveur", 1000.0, day, "in")],
+        );
+        credit.account_name = "Livret A".to_string();
+        let outcomes = save(&pool, vec![debit, credit]);
+        insert_root(&pool, "mine", "Mes comptes", None);
+
+        let created = import_batch(
+            &pool,
+            vec![
+                (outcomes[0].statement_id.clone(), request_under(Some("mine"))),
+                (outcomes[1].statement_id.clone(), request_under(Some("mine"))),
+            ],
+        )
+        .unwrap();
+        assert_eq!(created[0].created, 1, "the pair is one transfer");
+
+        assert_eq!(
+            roots_of_accounts(&pool),
+            vec![
+                ("Eko".to_string(), Some("mine".to_string()), Some("credit_agricole".to_string())),
+                (
+                    "Livret A".to_string(),
+                    Some("mine".to_string()),
+                    Some("credit_agricole".to_string())
+                ),
+            ],
+            "both sides of the pair are under the institution the user chose"
+        );
+        let roots: i64 = pool
+            .get()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM account_roots", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(roots, 1, "no second institution was made for the pair");
+    }
+
+    /// An account the statement already points at — one the user made by hand
+    /// and gave the statement's number — is filed under the statement's
+    /// institution when it has none, so the tree stays complete.
+    #[test]
+    fn a_hand_picked_account_with_no_institution_is_filed_under_it() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let outcomes = save(
+            &pool,
+            vec![draft(
+                "credit_agricole:111:hash",
+                "hash",
+                "111",
+                vec![line("Card", -10.0, day, "card")],
+            )],
+        );
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, name, type, opening_balance, note, created_at, updated_at)
+                 VALUES ('hand', 'My current account', 'cash', 0.0, NULL, 1, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE bank_statements SET account_id='hand' WHERE id=?1",
+                rusqlite::params![outcomes[0].statement_id],
+            )
+            .unwrap();
+        }
+
+        import(&pool, &outcomes[0].statement_id, empty_request());
+
+        let accounts = roots_of_accounts(&pool);
+        assert_eq!(accounts.len(), 1, "the hand-made account was used, not a new one");
+        let (name, root, source) = &accounts[0];
+        assert_eq!(name, "My current account");
+        assert!(root.is_some(), "it is filed under the institution");
+        assert_eq!(source.as_deref(), Some("credit_agricole"));
+    }
+
+    /// The institution must be the statement's own. Another institution's
+    /// root is refused rather than mixing two banks in one tree.
+    #[test]
+    fn another_institutions_root_is_refused() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let outcomes = save(
+            &pool,
+            vec![draft(
+                "credit_agricole:111:hash",
+                "hash",
+                "111",
+                vec![line("Card", -10.0, day, "card")],
+            )],
+        );
+        insert_root(&pool, "ft", "Firstrade", Some("firstrade"));
+
+        let refused = import_batch(
+            &pool,
+            vec![(outcomes[0].statement_id.clone(), request_under(Some("ft")))],
+        )
+        .unwrap();
+        assert_eq!(refused[0].created, 0, "a Crédit Agricole statement cannot go under Firstrade");
+        let error = refused[0].lines[0].error.clone().unwrap_or_default();
+        assert!(error.contains("Firstrade"), "the entry says why: {error}");
+        assert!(roots_of_accounts(&pool).is_empty(), "no account was made");
+    }
+
+    /// A deleted institution is revived, not duplicated: the unique index on
+    /// the root's source covers deleted rows too, so a second one would fail.
+    #[test]
+    fn a_deleted_institution_is_revived_by_an_import() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let outcomes = save(
+            &pool,
+            vec![draft(
+                "credit_agricole:111:hash",
+                "hash",
+                "111",
+                vec![line("Card", -10.0, day, "card")],
+            )],
+        );
+        insert_root(&pool, "ca", "Crédit Agricole", Some("credit_agricole"));
+        pool.get()
+            .unwrap()
+            .execute("UPDATE account_roots SET deleted_at=5 WHERE id='ca'", [])
+            .unwrap();
+
+        import(&pool, &outcomes[0].statement_id, empty_request());
+
+        let deleted: Option<i64> = pool
+            .get()
+            .unwrap()
+            .query_row("SELECT deleted_at FROM account_roots WHERE id='ca'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(deleted, None, "the institution is live again");
+        assert_eq!(roots_of_accounts(&pool)[0].1.as_deref(), Some("ca"));
+    }
+
+    /// Choosing a hand-made institution adopts it: it becomes the institution
+    /// of the statement's source, and the accounts already under it take that
+    /// source too, so a leaf's source still equals its root's.
+    #[test]
+    fn a_hand_made_institution_is_adopted_with_its_accounts() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 10, 1);
+        let outcomes = save(
+            &pool,
+            vec![draft(
+                "credit_agricole:111:hash",
+                "hash",
+                "111",
+                vec![line("Card", -10.0, day, "card")],
+            )],
+        );
+        insert_root(&pool, "mine", "Mes comptes", None);
+        pool.get()
+            .unwrap()
+            .execute(
+                "INSERT INTO accounts (id, name, type, opening_balance, note, created_at, updated_at, root_id)
+                 VALUES ('cash-box', 'Cash box', 'cash', 0.0, NULL, 1, 1, 'mine')",
+                [],
+            )
+            .unwrap();
+
+        import_batch(
+            &pool,
+            vec![(outcomes[0].statement_id.clone(), request_under(Some("mine")))],
+        )
+        .unwrap();
+
+        let source: Option<String> = pool
+            .get()
+            .unwrap()
+            .query_row("SELECT source FROM account_roots WHERE id='mine'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(source.as_deref(), Some("credit_agricole"));
+        for (name, root, source) in roots_of_accounts(&pool) {
+            assert_eq!(root.as_deref(), Some("mine"), "{name} is under the chosen institution");
+            assert_eq!(source.as_deref(), Some("credit_agricole"), "{name} took its source");
+        }
     }
 
     /// The plan's example: a Firstrade export makes a broker root with a cash
@@ -2437,10 +2684,9 @@ mod statement_tests {
                 action: store::ImportAction::Import,
                 type_: None,
                 category: None,
-                account_id: None,
                 counterpart_account_id: None,
             }],
-            account_id: None,
+            root_id: None,
             counterpart_account_id: None,
             auto_link: None,
         };
@@ -2912,7 +3158,6 @@ mod statement_tests {
                         action: store::ImportAction::Import,
                         type_: None,
                         category: None,
-                        account_id: None,
                         counterpart_account_id: None,
                     },
                     ImportLine {
@@ -2920,11 +3165,10 @@ mod statement_tests {
                         action: store::ImportAction::Import,
                         type_: None,
                         category: None,
-                        account_id: None,
                         counterpart_account_id: None,
                     },
                 ],
-                account_id: None,
+                root_id: None,
                 counterpart_account_id: None,
                 auto_link: Some(true),
             },
@@ -2988,10 +3232,9 @@ mod statement_tests {
                 action: store::ImportAction::Import,
                 type_: None,
                 category: None,
-                account_id: None,
                 counterpart_account_id: None,
             }],
-            account_id: None,
+            root_id: None,
             counterpart_account_id: None,
             auto_link: Some(false),
         };

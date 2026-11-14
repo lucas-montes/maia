@@ -373,13 +373,18 @@ pub async fn put_account_identity(
             (Some(id), Some(_)) => Some(id.to_string()),
         },
         // Clearing the identity leaves the root alone: the account is still
-        // that institution's, it just has no provider number any more.
+        // that institution's, it just has no provider number any more (and
+        // keeps the root's source, below).
         None => root_id,
     };
 
+    // Clearing removes the provider number only. An account filed under an
+    // institution keeps that institution's source — a leaf's source must equal
+    // its root's — and is simply an account with no number, like a securities
+    // leaf. Only an unfiled account loses its source with its number.
     let (source, external_id) = match identity.as_ref() {
         Some((source, external_id)) => (Some(source.as_str()), Some(external_id.as_str())),
-        None => (None, None),
+        None => (root_source.as_deref(), None),
     };
     tx.execute(
         "UPDATE accounts SET source=?1, external_id=?2, root_id=?3, updated_at=?4 WHERE id=?5",
@@ -480,8 +485,10 @@ mod tests {
             (Some("firstrade".into()), Some("firstrade".into()))
         );
 
+        // Setting the number filed the account under Firstrade, so clearing it
+        // removes the number and keeps the institution's source.
         put(&state, "acc-1", None, None).await.unwrap();
-        assert_eq!(identity_of(&state, "acc-1"), (None, None));
+        assert_eq!(identity_of(&state, "acc-1"), (Some("firstrade".into()), None));
     }
 
     /// An alias is accepted and stored canonically, so `ca` and
@@ -799,7 +806,8 @@ mod tests {
     }
 
     /// Clearing the identity leaves the root alone: the account is still that
-    /// institution's, it just has no provider number any more.
+    /// institution's, it just has no provider number any more. It keeps the
+    /// institution's source, because a leaf's source must equal its root's.
     #[tokio::test]
     async fn clearing_an_identity_leaves_the_root_alone() {
         let state = state();
@@ -807,7 +815,11 @@ mod tests {
         leaf(&state, "acc-1", "Eko by CA", "credit_agricole", "r-ca");
 
         put(&state, "acc-1", None, None).await.unwrap();
-        assert_eq!(identity_of(&state, "acc-1"), (None, None));
+        assert_eq!(
+            identity_of(&state, "acc-1"),
+            (Some("credit_agricole".into()), None),
+            "the number goes, the institution's source stays"
+        );
         assert_eq!(
             root_of(&state, "acc-1").as_deref(),
             Some("r-ca"),

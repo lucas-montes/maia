@@ -246,5 +246,35 @@ and rustfmt (the new code is clean).
 `tests::receipt_ocr_parse_and_picture_endpoints` polls for 12 seconds for an upstream call whose
 own timeout is 90, so it fails wherever the upstream call is slow. It fails identically at HEAD.
 
+### Review fixes (2026-11-14)
+A review of Stages 1–2 found four problems, fixed before Stage 3 because T16 depends on the first:
+- **An import picks an institution, never an account** (decided by the human). The statement-level
+  `accountId` override became `rootId`, and the unused per-line `accountId` is gone. The server
+  picks the leaf: the statement's account, then the `(source, external_id)` match, then a new leaf.
+  Any account the import reaches without a root is filed under the chosen one, which fixes a
+  hand-picked account staying outside its institution, where T16 could never find its securities
+  sibling. A hand-made root with no source is adopted; another institution's root is refused per
+  entry. The review's "Import into" account dropdown became an "Institution" dropdown, and the
+  preview reports `institution`/`institutionIsNew` per account.
+- **A transfer pair ignored the user's choice.** `import_pair` resolved both sides with no
+  override, so a pair booked onto different accounts than the rest of its statement. The choice is
+  now batch-wide (`root_choices`), and each side uses its own statement's.
+- **Clearing a provider number broke "a leaf's source equals its root's".** It now removes the
+  number only. A filed leaf keeps its root's source.
+- **Dead code and a deleted root.** The no-op `let _ = root_id;` is gone, and `resolve_root`
+  revives a deleted root instead of trying to insert a second one (the unique index on the root's
+  source covers deleted rows too).
+
+Tests: `a_transfer_pair_goes_under_the_chosen_institution`,
+`a_hand_picked_account_with_no_institution_is_filed_under_it`, `another_institutions_root_is_refused`,
+`a_deleted_institution_is_revived_by_an_import`, `a_hand_made_institution_is_adopted_with_its_accounts`,
+`an_institution_choice_is_what_the_preview_reports`, `the_preview_names_the_institution_it_would_create`,
+and the two clear-identity tests updated to the new rule. 259 Rust tests (the receipt OCR test is
+the known flaky one and passes on its own), 56 frontend tests, `tsc` clean. These tests were **not**
+checked against the old code by stashing, unlike the earlier tasks' tests.
+
+Not fixed: a phone-created account arrives as `cash`, because the phone no longer pushes a type.
+Fixing it needs a phone change that sends the type on creation.
+
 ### Still to come
 - **Stage 2 is complete.** Stage 3 starts with migration v14: the trades.
