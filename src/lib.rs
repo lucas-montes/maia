@@ -2265,7 +2265,7 @@ mod statement_tests {
         };
         let (amount, status, metadata) = stored("Bought 7 VOO");
         assert_eq!(amount, -3_500.0);
-        assert_eq!(status, "informational", "trades are not booked yet");
+        assert_eq!(status, "pending", "a trade with its details is offered for import");
         assert_eq!(store::stored_trade(metadata.as_deref()), buy.trade);
         let metadata: serde_json::Value =
             serde_json::from_str(metadata.as_deref().unwrap()).unwrap();
@@ -2274,6 +2274,249 @@ mod statement_tests {
         let (amount, _, metadata) = stored("Sold 3 NVDA");
         assert_eq!(amount, 359.75);
         assert_eq!(store::stored_trade(metadata.as_deref()), sale.trade);
+    }
+
+    fn traded(description: &str, amount: f64, posted_at: i64, key: &str, side: TradeSide) -> StatementLineDraft {
+        let mut line = trade_line(description, posted_at, key);
+        line.amount = amount;
+        line.trade = Some(TradeDetails {
+            side,
+            symbol: "VOO".to_string(),
+            quantity: Some(1.0),
+            price: Some(amount.abs()),
+        });
+        line
+    }
+
+    fn firstrade(hash: &str, lines: Vec<StatementLineDraft>) -> StatementDraft {
+        let mut statement = draft(&format!("firstrade:firstrade:{hash}"), hash, "firstrade", lines);
+        statement.source = SourceId::Firstrade;
+        statement.institution = "Firstrade".to_string();
+        statement.account_name = "Firstrade".to_string();
+        statement
+    }
+
+    /// `(type, amount, from account name, to account name)` of a transaction.
+    fn booked(pool: &db::DbPool, transaction_id: &str) -> (String, f64, String, Option<String>) {
+        let conn = pool.get().unwrap();
+        conn.query_row(
+            "SELECT t.type, t.amount, a.name, b.name FROM transactions t
+             JOIN accounts a ON a.id = t.account_id
+             LEFT JOIN accounts b ON b.id = t.to_account_id
+             WHERE t.id=?1",
+            [transaction_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap()
+    }
+
+    fn imported_ids(outcome: &store::ImportOutcome) -> Vec<String> {
+        outcome
+            .lines
+            .iter()
+            .filter_map(|line| line.transaction_id.clone())
+            .collect()
+    }
+
+    /// A buy moves the cash into the broker's securities account and a sale
+    /// moves it back: two transfers between the institution's own accounts,
+    /// never an expense or an income, with what was traded recorded beside
+    /// each. The securities account is made once, on the first trade.
+    #[test]
+    fn a_trade_books_cash_between_the_brokers_two_accounts() {
+        let pool = db::init_memory().unwrap();
+        let outcomes = save(
+            &pool,
+            vec![firstrade(
+                "hash",
+                vec![
+                    traded("Bought 1 VOO", -500.0, ms(2026, 9, 10), "buy", TradeSide::Buy),
+                    traded("Sold 1 VOO", 520.0, ms(2026, 9, 20), "sale", TradeSide::Sell),
+                ],
+            )],
+        );
+        let outcome = import(&pool, &outcomes[0].statement_id, empty_request());
+        assert_eq!(outcome.errors, 0, "{:?}", outcome.lines);
+        let ids = imported_ids(&outcome);
+        assert_eq!(ids.len(), 2);
+
+        let mut transfers: Vec<_> = ids.iter().map(|id| booked(&pool, id)).collect();
+        transfers.sort_by(|a, b| a.1.total_cmp(&b.1));
+        assert_eq!(
+            transfers,
+            vec![
+                (
+                    "transfer".to_string(),
+                    500.0,
+                    "Firstrade".to_string(),
+                    Some("Firstrade Securities".to_string())
+                ),
+                (
+                    "transfer".to_string(),
+                    520.0,
+                    "Firstrade Securities".to_string(),
+                    Some("Firstrade".to_string())
+                ),
+            ]
+        );
+
+        let conn = pool.get().unwrap();
+        for id in &ids {
+            assert!(crate::trades::trade_of(&conn, id).unwrap().is_some());
+        }
+        // One securities account, a leaf of the institution, with no number.
+        let securities: Vec<(String, Option<String>, Option<String>, String)> = conn
+            .prepare(
+                "SELECT a.source, a.external_id, r.name, a.type FROM accounts a
+                 JOIN account_roots r ON r.id = a.root_id
+                 WHERE a.type='securities'",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            securities,
+            vec![(
+                "firstrade".to_string(),
+                None,
+                Some("Firstrade".to_string()),
+                "securities".to_string()
+            )]
+        );
+        let cash_type: String = conn
+            .query_row("SELECT type FROM accounts WHERE name='Firstrade'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cash_type, "cash");
+    }
+
+    /// A trade's type is not the user's to choose: asking for an expense still
+    /// books the trade, because the money did not leave the user's hands.
+    #[test]
+    fn a_trade_ignores_the_type_the_request_asks_for() {
+        let pool = db::init_memory().unwrap();
+        let outcomes = save(
+            &pool,
+            vec![firstrade(
+                "hash",
+                vec![traded("Bought 1 VOO", -500.0, ms(2026, 9, 10), "buy", TradeSide::Buy)],
+            )],
+        );
+        let line_id = line_ids(&pool, &outcomes[0].statement_id).remove(0);
+        let outcome = import(
+            &pool,
+            &outcomes[0].statement_id,
+            ImportRequest {
+                lines: vec![ImportLine {
+                    id: line_id,
+                    action: store::ImportAction::Import,
+                    type_: Some("expense".to_string()),
+                    category: Some("Shopping".to_string()),
+                    counterpart_account_id: None,
+                }],
+                ..empty_request()
+            },
+        );
+        let id = imported_ids(&outcome).remove(0);
+        assert_eq!(booked(&pool, &id).0, "transfer");
+    }
+
+    /// A trade staged before trades kept their details has nothing to book
+    /// it from. It is refused, never booked as an expense or an income.
+    #[test]
+    fn a_trade_without_details_is_refused_rather_than_booked_as_income() {
+        let pool = db::init_memory().unwrap();
+        let outcomes = save(
+            &pool,
+            vec![firstrade("hash", vec![trade_line("Sold 3 NVDA", ms(2026, 9, 10), "sale")])],
+        );
+        let statement_id = &outcomes[0].statement_id;
+        assert_eq!(line_states(&pool, statement_id)[0].0, "informational");
+        // As if an older build had left it importable.
+        pool.get()
+            .unwrap()
+            .execute("UPDATE bank_statement_lines SET status='pending', amount=359.75", [])
+            .unwrap();
+        let outcome = import(&pool, statement_id, empty_request());
+        assert_eq!(outcome.errors, 1);
+        assert!(imported_ids(&outcome).is_empty());
+        let transactions: i64 = pool
+            .get()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(transactions, 0);
+    }
+
+    /// A trade's other side is the broker's securities account, never a line
+    /// of another statement: a sale must not pair with a bank debit that
+    /// happens to share its amount and day.
+    #[test]
+    fn a_trade_never_pairs_with_a_movement_of_the_same_amount() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 9, 10);
+        // Worded like a transfer on both sides, so the matcher would score the
+        // pair high enough to propose it if it looked at trades at all.
+        let sale = traded("Sold 1 VOO, transfer", 359.75, day, "sale", TradeSide::Sell);
+        save(
+            &pool,
+            vec![
+                firstrade("hash", vec![sale]),
+                draft("credit_agricole:1:h", "h", "1", vec![line("VIREMENT FIRSTRADE", -359.75, day, "debit")]),
+            ],
+        );
+        let matches: i64 = pool
+            .get()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM transfer_matches", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(matches, 0);
+    }
+
+    /// The same file, read again after trades started keeping their details,
+    /// is not a no-op while it holds a trade read without them: the bytes are
+    /// the only place the details can come from.
+    #[test]
+    fn a_statement_holding_a_trade_without_details_is_read_again() {
+        let pool = db::init_memory().unwrap();
+        let day = ms(2026, 9, 10);
+        let old = firstrade(
+            "hash",
+            vec![
+                line("Interest", 0.37, day, "interest"),
+                trade_line("Bought 1 VOO", day, "buy"),
+            ],
+        );
+        let outcomes = save(&pool, vec![old]);
+        let statement_id = outcomes[0].statement_id.clone();
+
+        let new = firstrade(
+            "hash",
+            vec![
+                line("Interest", 0.37, day, "interest"),
+                traded("Bought 1 VOO", -500.0, day, "buy", TradeSide::Buy),
+            ],
+        );
+        let outcomes = save(&pool, vec![new]);
+        assert_eq!(outcomes[0].skipped_reason, None, "read again");
+        let mut states: Vec<String> = line_states(&pool, &statement_id)
+            .into_iter()
+            .map(|(status, _)| status)
+            .collect();
+        states.sort();
+        assert_eq!(states, vec!["pending", "pending"]);
+
+        // Once it holds what the file holds, the same bytes are a no-op again.
+        let again = firstrade(
+            "hash",
+            vec![
+                line("Interest", 0.37, day, "interest"),
+                traded("Bought 1 VOO", -500.0, day, "buy", TradeSide::Buy),
+            ],
+        );
+        let outcomes = save(&pool, vec![again]);
+        assert_eq!(outcomes[0].skipped_reason.as_deref(), Some("already ingested"));
     }
 
     #[test]

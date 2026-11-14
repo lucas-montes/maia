@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 use super::SourceId;
 
 /// What the source says the line is, independent of how the user will classify
-/// it. `Trade` is informational for now: brokerage fills are shown in the
-/// review screen and carry their cash amount and [`TradeDetails`], but are not
-/// yet booked.
+/// it. A `Trade` carries its cash amount and [`TradeDetails`], and is booked
+/// as a transfer between the broker's cash and securities accounts; one with
+/// nothing to book is informational (see [`StatementLineDraft::is_informational`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LineKind {
@@ -58,12 +58,6 @@ impl LineKind {
             "trade" => Self::Trade,
             _ => Self::Other,
         }
-    }
-
-    /// Informational lines are visible in the review screen but are never
-    /// imported, so they must not keep a statement stuck in `staged`.
-    pub fn is_informational(self) -> bool {
-        matches!(self, Self::Trade)
     }
 
     pub fn is_transfer(self) -> bool {
@@ -149,6 +143,15 @@ pub struct StatementLineDraft {
     /// Identity across overlapping statements. A re-import of the same line in
     /// a different file is stored as a `duplicate` rather than imported twice.
     pub dedupe_key: String,
+}
+
+impl StatementLineDraft {
+    /// Whether the line is shown in the review but has nothing to import: a
+    /// trade with no details to book it from, or one that moved no cash. Every
+    /// other line, a trade included, is offered for import.
+    pub fn is_informational(&self) -> bool {
+        self.line_kind == LineKind::Trade && (self.trade.is_none() || self.amount == 0.0)
+    }
 }
 
 /// Which way a trade went.

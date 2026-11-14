@@ -6,6 +6,9 @@ import {
   parsedRowsSummary,
   reviewEmptiness,
   selectableLineIds,
+  isUnbookableTrade,
+  tradeLabel,
+  tradeOf,
 } from "./statementReview";
 
 function line(id: string, over: Partial<StatementLine> = {}): StatementLine {
@@ -100,12 +103,13 @@ describe("selectableLineIds", () => {
     expect([...selectableLineIds([d])]).toEqual(["a"]);
   });
 
-  test("never offers an informational trade, pending or not", () => {
+  test("offers a trade the server can book, never one with nothing to book", () => {
     const d = detail("s1", [
-      line("trade", { lineKind: "trade", status: "pending" }),
+      line("bookable", { lineKind: "trade", status: "pending" }),
+      line("unbookable", { lineKind: "trade", status: "informational" }),
       line("cash"),
     ]);
-    expect([...selectableLineIds([d])]).toEqual(["cash"]);
+    expect([...selectableLineIds([d])].sort()).toEqual(["bookable", "cash"]);
   });
 
   test("a matched pair is offered once, through the side staged here", () => {
@@ -240,5 +244,37 @@ describe("liveMatches / matchedLineIds", () => {  test("deduplicates a pair repo
     const d = detail("s1", [out, inn], [match("m1", out, inn, { status: "dismissed" })]);
     expect(liveMatches([d])).toEqual([]);
     expect(matchedLineIds(liveMatches([d])).size).toBe(0);
+  });
+});
+
+describe("trades", () => {
+  const trade = { side: "buy", symbol: "VOO", quantity: 7, price: 500 };
+
+  test("reads the details the server stored", () => {
+    expect(tradeOf(line("t", { lineKind: "trade", metadata: { action: "Bought", trade } }))).toEqual(
+      trade,
+    );
+  });
+
+  test("has no details for another kind of line, or a trade read without them", () => {
+    expect(tradeOf(line("d", { metadata: { trade } }))).toBeNull();
+    expect(tradeOf(line("t", { lineKind: "trade", metadata: { action: "Bought" } }))).toBeNull();
+    expect(tradeOf(line("t", { lineKind: "trade", metadata: null }))).toBeNull();
+  });
+
+  test("labels a trade by what it bought or sold", () => {
+    expect(tradeLabel({ side: "buy", symbol: "VOO", quantity: 7, price: 500 })).toBe(
+      "Bought 7 VOO @ 500.00",
+    );
+    expect(tradeLabel({ side: "sell", symbol: "VWCE", quantity: 0.0093977, price: null })).toBe(
+      "Sold 0.009398 VWCE",
+    );
+    expect(tradeLabel(null)).toBe("");
+  });
+
+  test("only an informational trade is unbookable", () => {
+    expect(isUnbookableTrade({ lineKind: "trade", status: "informational" })).toBe(true);
+    expect(isUnbookableTrade({ lineKind: "trade", status: "pending" })).toBe(false);
+    expect(isUnbookableTrade({ lineKind: "debit", status: "informational" })).toBe(false);
   });
 });

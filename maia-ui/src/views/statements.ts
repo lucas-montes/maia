@@ -16,12 +16,15 @@ import { escapeHtml, formatEpoch, setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
 import {
   isImportable,
+  isUnbookableTrade,
   liveMatches,
   localMatchSide,
   matchedLineIds,
   parsedRowsSummary,
   reviewEmptiness,
   selectableLineIds,
+  tradeLabel,
+  tradeOf,
 } from "../lib/statementReview";
 import { statementsAtom } from "../lib/stores";
 import { backToDashboard, panelClose, panelOpen, statusBanner } from "./shared";
@@ -200,6 +203,24 @@ function listHtml(
  *  picks can never disagree. */
 function lineRow(line: StatementLine, checked: boolean, selectable: boolean): string {
   const type = line.suggestedType ?? (line.amount < 0 ? "expense" : "income");
+  // A trade is booked between the broker's cash and securities accounts; its
+  // type and category are not the user's to pick, so it shows what it is.
+  const trade = tradeOf(line);
+  const label = tradeLabel(trade);
+  const typeCell = trade
+    ? `<span class="badge">trade</span>`
+    : selectable
+      ? `<select class="select select-xs select-bordered w-full" data-type-for="${escapeHtml(line.id)}">
+            <option value="expense" ${type === "expense" ? "selected" : ""}>expense</option>
+            <option value="income" ${type === "income" ? "selected" : ""}>income</option>
+            <option value="transfer" ${type === "transfer" ? "selected" : ""}>transfer</option>
+          </select>`
+      : "";
+  const categoryCell = trade
+    ? `<span class="text-xs text-ink-500">${trade.side === "buy" ? "cash → securities" : "securities → cash"}</span>`
+    : selectable
+      ? `<input class="input input-xs input-bordered w-full" placeholder="category" value="${escapeHtml(line.suggestedCategory ?? "")}" data-category-for="${escapeHtml(line.id)}" />`
+      : "";
   return `
     <tr data-line-row="${escapeHtml(line.id)}" class="${checked ? "bg-surface-800/40" : ""}">
       <td class="w-8 align-top">
@@ -207,22 +228,14 @@ function lineRow(line: StatementLine, checked: boolean, selectable: boolean): st
       </td>
       <td class="whitespace-nowrap align-top text-xs text-ink-400">${escapeHtml(formatEpoch(line.postedAt))}</td>
       <td class="align-top">
-        <div class="text-sm text-ink-200">${escapeHtml(line.description)}</div>
+        ${label ? `<div class="text-sm text-ink-200">${escapeHtml(label)}</div><div class="text-xs text-ink-500">${escapeHtml(line.description)}</div>` : `<div class="text-sm text-ink-200">${escapeHtml(line.description)}</div>`}
         ${line.importError ? `<div class="mt-1 text-xs text-err-400">${escapeHtml(line.importError)}</div>` : ""}
       </td>
       <td class="whitespace-nowrap text-right align-top font-mono text-sm ${line.amount < 0 ? "text-err-400" : "text-ok-400"}">
         ${escapeHtml(money(line.amount, line.currencyCode))}
       </td>
-      <td class="w-32 align-top">
-        ${selectable ? `<select class="select select-xs select-bordered w-full" data-type-for="${escapeHtml(line.id)}">
-            <option value="expense" ${type === "expense" ? "selected" : ""}>expense</option>
-            <option value="income" ${type === "income" ? "selected" : ""}>income</option>
-            <option value="transfer" ${type === "transfer" ? "selected" : ""}>transfer</option>
-          </select>` : ""}
-      </td>
-      <td class="w-36 align-top">
-        ${selectable ? `<input class="input input-xs input-bordered w-full" placeholder="category" value="${escapeHtml(line.suggestedCategory ?? "")}" data-category-for="${escapeHtml(line.id)}" />` : ""}
-      </td>
+      <td class="w-32 align-top">${typeCell}</td>
+      <td class="w-36 align-top">${categoryCell}</td>
       <td class="whitespace-nowrap align-top">${lineStatusBadge(line)}</td>
     </tr>`;
 }
@@ -311,9 +324,9 @@ function detailHtml(
 ): string {
   const s = detail.statement;
   const matched = matchedLineIds(liveMatches([detail]));
-  const trades = detail.lines.filter((line) => line.lineKind === "trade");
+  const trades = detail.lines.filter(isUnbookableTrade);
   const ordinary = detail.lines.filter(
-    (line) => line.lineKind !== "trade" && !matched.has(line.id),
+    (line) => !isUnbookableTrade(line) && !matched.has(line.id),
   );
   const selectable = selectableLineIds([detail]);
   const pending = detail.lines.filter((line) => line.status === "pending").length;
@@ -358,7 +371,7 @@ function detailHtml(
       ${transferRowsHtml(detail.matches, new Set(detail.lines.map((line) => line.id)), selected, accounts, selectable)}
 
       ${trades.length > 0 ? `<div class="rounded border border-surface-800 bg-base-100 p-4">
-        <h3 class="mb-2 text-sm font-medium text-ink-200">Trades <span class="font-normal text-ink-500">(informational, never imported)</span></h3>
+        <h3 class="mb-2 text-sm font-medium text-ink-200">Trades <span class="font-normal text-ink-500">(nothing to book: read before trades kept their details, or no cash moved)</span></h3>
         <table class="table table-xs w-full">
           <thead><tr><th>Date</th><th>Description</th><th class="text-right">Status</th></tr></thead>
           <tbody>${tradeRows}</tbody>
@@ -695,7 +708,7 @@ function fileHtml(
   const trades: StatementLine[] = [];
   for (const detail of statements) {
     for (const line of detail.lines) localIds.add(line.id);
-    trades.push(...detail.lines.filter((line) => line.lineKind === "trade"));
+    trades.push(...detail.lines.filter(isUnbookableTrade));
   }
   const matches: TransferMatch[] = liveMatches(statements);
   const selectable = selectableLineIds(statements);
@@ -715,7 +728,7 @@ function fileHtml(
     .map((detail) => {
       const s = detail.statement;
       const ordinary = detail.lines.filter(
-        (line) => line.lineKind !== "trade" && !matched.has(line.id),
+        (line) => !isUnbookableTrade(line) && !matched.has(line.id),
       );
       if (ordinary.length === 0) return "";
       // What this account can still add: entries waiting to be reviewed, and
@@ -799,7 +812,7 @@ function fileHtml(
       ${transferRowsHtml(matches, localIds, selected, accounts, selectable)}
 
       ${trades.length > 0 ? `<div class="rounded border border-surface-800 bg-base-100 p-4">
-        <h3 class="mb-2 text-sm font-medium text-ink-200">Trades <span class="font-normal text-ink-500">(informational, never imported)</span></h3>
+        <h3 class="mb-2 text-sm font-medium text-ink-200">Trades <span class="font-normal text-ink-500">(nothing to book: read before trades kept their details, or no cash moved)</span></h3>
         <table class="table table-xs w-full">
           <thead><tr><th>Date</th><th>Description</th><th class="text-right">Status</th></tr></thead>
           <tbody>${tradeRows}</tbody>
@@ -1836,7 +1849,7 @@ export function mount(root: HTMLElement): () => void {
       }
       case "select-all": {
         // Selects every entry the page offers a checkbox for -- not every
-        // pending line. The two differ: a trade is informational, and a
+        // pending line. The two differ: a transfer row ticks one line for two, and a
         // transfer whose counterpart is already settled has no checkbox, so
         // selecting those would inflate "Import selected (N)" past the ticks
         // actually on screen.

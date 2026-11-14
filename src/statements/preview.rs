@@ -417,6 +417,52 @@ fn describe_accounts(
             entry.resolution = AccountResolution::WillCreate;
         }
     }
+    // The securities account a trade books into is no statement's own: the
+    // import makes it beside the cash account on the first trade. It is a new
+    // account all the same, so the preview names it.
+    let mut stmt = tx.prepare(
+        "SELECT a.id, a.name, a.type, a.source, r.id, r.name,
+                (SELECT COUNT(*) FROM transactions t
+                  WHERE t.account_id = a.id OR t.to_account_id = a.id)
+         FROM accounts a JOIN account_roots r ON r.id = a.root_id
+         WHERE a.type = 'securities' AND a.external_id IS NULL
+         ORDER BY a.name",
+    )?;
+    let created = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, i64>(6)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (id, name, account_type, source, root_id, root_name, transactions) in created {
+        if accounts_before.contains(&id) {
+            continue;
+        }
+        groups.insert(
+            format!("new:securities:{root_id}"),
+            PreviewAccount {
+                account_id: None,
+                name,
+                account_type,
+                source: source.unwrap_or_default(),
+                external_id: None,
+                institution: root_name,
+                institution_is_new: !roots_before.contains(&root_id),
+                resolution: AccountResolution::WillCreate,
+                statement_ids: Vec::new(),
+                files: Vec::new(),
+                transactions: transactions.max(0) as usize,
+                suggestions: Vec::new(),
+            },
+        );
+    }
     Ok(groups.into_values().collect())
 }
 
@@ -765,6 +811,7 @@ mod tests {
             "bank_statements",
             "bank_statement_lines",
             "transfer_matches",
+            "trades",
         ] {
             let mut stmt = conn
                 .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
@@ -1001,6 +1048,36 @@ mod tests {
         let account = &result.accounts[0];
         assert_eq!(account.institution, "Trading 212");
         assert!(account.institution_is_new);
+    }
+
+    /// A trade books into a securities account no statement names, made on
+    /// the first trade. The preview names it with the cash account, so the
+    /// accounts it promises are the accounts the import makes.
+    #[test]
+    fn the_preview_names_the_securities_account_a_trade_would_create() {
+        let pool = crate::db::init_memory().unwrap();
+        let id = stage(
+            &pool,
+            &csv(&[
+                ("Deposit", "b", "2026-02-01", 100.0),
+                ("Market buy", "t", "2026-02-02", 50.0),
+            ]),
+            "one.csv",
+        );
+
+        let before = snapshot(&pool);
+        let result = preview(&pool, &[&id]);
+        assert_eq!(snapshot(&pool), before, "the trade was undone too");
+        assert_eq!(result.totals.accounts_to_create, 2, "{:?}", result.accounts);
+        let securities = result
+            .accounts
+            .iter()
+            .find(|account| account.account_type == "securities")
+            .expect("the securities account is named");
+        assert_eq!(securities.name, "Trading 212 Securities");
+        assert_eq!(securities.institution, "Trading 212");
+        assert_eq!(securities.resolution, AccountResolution::WillCreate);
+        assert_eq!(securities.transactions, 1);
     }
 
     /// An identity with no account lists candidates, and never acts on them.

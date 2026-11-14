@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     LINE_NS, STATEMENT_NS, TRANSACTION_NS, TRANSFER_NS,
-    draft::{SaveOutcome, StatementDraft, StatementLineDraft, SuggestedType, TradeDetails},
+    draft::{SaveOutcome, StatementDraft, StatementLineDraft, SuggestedType, TradeDetails, TradeSide},
     root_for_source,
     stable_uuid,
 };
@@ -84,12 +84,18 @@ pub fn save_statement(tx: &Transaction<'_>, draft: StatementDraft) -> anyhow::Re
         .optional()?;
 
     // Whether the same bytes again changes nothing. It does not, as long as
-    // the statement still holds an entry the user can act on or has acted on.
-    // The file sources put the bytes in the `source_key`, so this is the only
-    // way a live statement is ever read again -- and it has to be, because a
-    // duplicate verdict rests on another statement still being alive.
+    // the statement still holds an entry the user can act on or has acted on
+    // -- and was read by a parser that kept what it holds. A trade staged
+    // before trades kept their details cannot be booked, and the bytes are
+    // all there is to recover them from, so a statement holding one is read
+    // again. The file sources put the bytes in the `source_key`, so this is
+    // the only way a live statement is ever read again -- and it has to be,
+    // because a duplicate verdict rests on another statement still being
+    // alive.
     let already_ingested = match &existing {
-        Some((id, hash, false)) if hash == &draft.source_hash => has_user_entry(tx, id)?,
+        Some((id, hash, false)) if hash == &draft.source_hash => {
+            has_user_entry(tx, id)? && !has_trade_without_details(tx, id)?
+        }
         _ => false,
     };
 
@@ -217,7 +223,7 @@ pub fn save_statement(tx: &Transaction<'_>, draft: StatementDraft) -> anyhow::Re
             )
             .optional()?;
 
-        let status = if line.line_kind.is_informational() {
+        let status = if line.is_informational() {
             "informational"
         } else if duplicate_of.is_some() {
             "duplicate"
@@ -365,6 +371,19 @@ fn has_user_entry(conn: &Connection, statement_id: &str) -> anyhow::Result<bool>
     Ok(count > 0)
 }
 
+/// Whether the statement holds a trade staged before trades kept their
+/// details: informational for want of them, though the file has them.
+fn has_trade_without_details(conn: &Connection, statement_id: &str) -> anyhow::Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM bank_statement_lines
+         WHERE statement_id=?1 AND line_kind='trade' AND status='informational'
+           AND json_extract(metadata_json, '$.trade') IS NULL",
+        params![statement_id],
+        |r| r.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 fn counts(conn: &Connection, statement_id: &str) -> anyhow::Result<Counts> {
     let mut counts = Counts::default();
     let mut stmt = conn.prepare(
@@ -431,14 +450,16 @@ struct PendingLine {
 ///
 /// Greedy by confidence: each line participates in at most one match, so a
 /// repeated amount cannot auto-link one debit to two credits. Existing matches
-/// (including dismissed ones) are left alone.
+/// (including dismissed ones) are left alone. A trade never matches: its other
+/// side is the broker's own securities account, not a line of any statement,
+/// and a buy must not pair with a deposit that happens to share its amount.
 pub fn match_pending(tx: &Transaction<'_>) -> anyhow::Result<()> {
     let mut stmt = tx.prepare(
         "SELECT l.id, l.posted_at, l.amount, l.currency_code, l.description,
                 l.metadata_json, s.source, s.account_number, s.account_id
          FROM bank_statement_lines l
          JOIN bank_statements s ON s.id = l.statement_id
-         WHERE l.status='pending' AND s.deleted_at IS NULL
+         WHERE l.status='pending' AND s.deleted_at IS NULL AND l.line_kind <> 'trade'
            AND NOT EXISTS (
              SELECT 1 FROM transfer_matches m
              WHERE (m.debit_line_id=l.id OR m.credit_line_id=l.id)
@@ -670,6 +691,9 @@ struct LineRow {
     suggested_category: Option<String>,
     status: String,
     dedupe_key: String,
+    is_trade: bool,
+    /// What the line bought or sold, when it is a trade that can be booked.
+    trade: Option<TradeDetails>,
 }
 
 #[derive(Debug, Clone)]
@@ -683,10 +707,12 @@ struct StatementRow {
 
 const LINE_COLUMNS: &str = "l.id, l.statement_id, l.posted_at, l.description, l.amount,
             l.currency_code, l.suggested_type, l.suggested_category,
-            l.status, l.dedupe_key";
+            l.status, l.dedupe_key, l.line_kind, l.metadata_json";
 
 fn line_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LineRow> {
     let suggested_type: Option<String> = r.get(6)?;
+    let line_kind: String = r.get(10)?;
+    let metadata_json: Option<String> = r.get(11)?;
     Ok(LineRow {
         id: r.get(0)?,
         statement_id: r.get(1)?,
@@ -698,6 +724,12 @@ fn line_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LineRow> {
         suggested_category: r.get(7)?,
         status: r.get(8)?,
         dedupe_key: r.get(9)?,
+        is_trade: line_kind == "trade",
+        trade: if line_kind == "trade" {
+            stored_trade(metadata_json.as_deref())
+        } else {
+            None
+        },
     })
 }
 
@@ -952,7 +984,7 @@ pub fn import_statement_with(
         // A high-confidence pair is one transfer transaction, not two. With
         // auto-linking off the user asked for this line alone, so the pair is
         // left for a later import of the other side.
-        if auto_link {
+        if auto_link && !line.is_trade {
             if let Some((match_id, counterpart_id)) = auto_match(tx, &line.id)? {
                 if !handled.contains(&counterpart_id) {
                     let counterpart = match all_lines.get(&counterpart_id).cloned() {
@@ -1016,16 +1048,38 @@ pub fn import_statement_with(
         }
 
         handled.insert(line.id.clone());
-        let result = import_single(
-            tx,
-            &statement,
-            &line,
-            request_line,
-            roots.get(&statement.id).map(String::as_str),
-            request.counterpart_account_id.as_deref(),
-            base_currency,
-            now,
-        );
+        let root_choice = roots.get(&statement.id).map(String::as_str);
+        // A trade is booked between the broker's own two accounts, and its
+        // type is not the user's to choose: whatever the request says, it is
+        // a trade. One staged without its details is refused rather than
+        // booked as an expense or an income -- the money did not leave.
+        let result = if line.is_trade {
+            match &line.trade {
+                Some(trade) => import_trade(
+                    tx,
+                    &statement,
+                    &line,
+                    trade,
+                    root_choice,
+                    base_currency,
+                    now,
+                ),
+                None => Err(anyhow::anyhow!(
+                    "this trade was read without its details; drop the file again to read it again"
+                )),
+            }
+        } else {
+            import_single(
+                tx,
+                &statement,
+                &line,
+                request_line,
+                root_choice,
+                request.counterpart_account_id.as_deref(),
+                base_currency,
+                now,
+            )
+        };
         match result {
             Ok(transaction_id) => {
                 outcome.created += 1;
@@ -1227,6 +1281,112 @@ fn import_single(
         now,
     )?;
     mark_imported(tx, &line.id, &id, now)?;
+    Ok(id)
+}
+
+/// Book a trade: one transfer between the broker's cash account and its
+/// securities account, at the cash the trade moved, with the trade's details
+/// recorded beside it.
+///
+/// A buy moves cash into securities and a sale moves it back. The cash
+/// account is the statement's own, found the way any import finds it; the
+/// securities account is its sibling under the same institution, created on
+/// the first trade. Nothing about the trade's gain is decided here: a sale is
+/// a movement, never income, and the positions are derived from the trades.
+fn import_trade(
+    tx: &Transaction<'_>,
+    statement: &StatementRow,
+    line: &LineRow,
+    trade: &TradeDetails,
+    root_choice: Option<&str>,
+    base_currency: &str,
+    now: i64,
+) -> anyhow::Result<String> {
+    let cash_id = resolve_account(tx, statement, root_choice, now)?
+        .with_context(|| format!("no account for {}", statement.account_name))?;
+    let root_id: String = tx
+        .query_row(
+            "SELECT root_id FROM accounts WHERE id=?1",
+            params![cash_id],
+            |r| r.get::<_, Option<String>>(0),
+        )?
+        .with_context(|| format!("{} is not filed under an institution", statement.account_name))?;
+    let securities_id = resolve_securities_account(tx, &root_id, &statement.source, now)?;
+    if securities_id == cash_id {
+        bail!(
+            "{} is the securities account itself; a trade needs a cash account to come from",
+            statement.account_name
+        );
+    }
+    let (from, to) = match trade.side {
+        TradeSide::Buy => (&cash_id, &securities_id),
+        TradeSide::Sell => (&securities_id, &cash_id),
+    };
+
+    let id = stable_uuid(TRANSACTION_NS, &format!("line:{}", line.dedupe_key));
+    let rate = rate_for(tx, &line.currency_code, base_currency, line.posted_at)?;
+    create_transaction(
+        tx,
+        &id,
+        "transfer",
+        line.amount.abs(),
+        &line.currency_code,
+        rate,
+        from,
+        Some(to),
+        None,
+        line.posted_at,
+        &line.description,
+        now,
+    )?;
+    crate::trades::record_trade(tx, &id, trade, now)?;
+    mark_imported(tx, &line.id, &id, now)?;
+    Ok(id)
+}
+
+/// The securities account of an institution, created on its first trade.
+///
+/// It has no provider number -- the broker gives the cash account one, not
+/// the holdings -- so it is found as "the securities leaf of this root". A
+/// deleted one is an error, like any deleted account an import reaches: the
+/// user removed it, and bringing it back is theirs to decide.
+fn resolve_securities_account(
+    tx: &Transaction<'_>,
+    root_id: &str,
+    source: &str,
+    now: i64,
+) -> anyhow::Result<String> {
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT id FROM accounts WHERE root_id=?1 AND type='securities'
+             ORDER BY deleted_at IS NOT NULL, created_at LIMIT 1",
+            params![root_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        ensure_account_live(tx, &id)?;
+        return Ok(id);
+    }
+    let (root_name, root_source): (String, Option<String>) = tx.query_row(
+        "SELECT name, source FROM account_roots WHERE id=?1",
+        params![root_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let id = uuid::Uuid::now_v7().to_string();
+    tx.execute(
+        "INSERT INTO accounts
+            (id, name, type, opening_balance, note, created_at, updated_at,
+             deleted_at, source, external_id, root_id)
+         VALUES (?1,?2,'securities',0.0,NULL,?3,?3,NULL,?4,NULL,?5)",
+        params![
+            id,
+            format!("{root_name} Securities"),
+            now,
+            root_source.as_deref().unwrap_or(source),
+            root_id,
+        ],
+    )?;
     Ok(id)
 }
 

@@ -155,8 +155,15 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Boundaries: In — migration v14 (`src/db.rs`): a server-only `trades(transaction_id PK → transactions ON DELETE CASCADE, side CHECK buy|sell, symbol, quantity, price, created_at, updated_at)` with an index on `symbol`; `src/trades.rs` with `record_trade` (an upsert, so re-booking rewrites the row) and `trade_of`. Out — booking (T16), the view (T17), positions and `opening_positions` (T18).
   - Note: the `trades` table, not columns — and **no `transactions.kind` column**: `transactions` is synced, so a column there would have to be kept out of the push or the phone could rewrite it. A transaction is a trade when it has a `trades` row; with none it is a movement.
   - Note: for T18 — the phone can soft-delete a trade's transfer (`deleted_at`), which leaves its `trades` row in place. Positions must join on live transactions.
-- [ ] T16 Import books a selected trade as cash leaf ↔ securities leaf (securities leaf auto-created
-      under the root); the review proposes it, so there are no 15 manual decisions.
+- [x] T16 Import books a selected trade as cash leaf ↔ securities leaf (securities leaf auto-created
+      under the root); the review proposes it, so there are no 15 manual decisions. (status:done)
+  - Completed: 2026-11-14
+  - Boundaries: In — staging (`StatementLineDraft::is_informational`: only a trade with no details or no cash is informational, so a bookable trade is `pending`), the "already ingested" no-op, `match_pending`, `import_trade` + `resolve_securities_account` in `store.rs`, the preview naming the securities account, and the review (`statementReview.ts`: `tradeOf`, `tradeLabel`, `isUnbookableTrade`; `statements.ts`: trades as entries). Out — the transactions view (T17), positions (T18).
+  - Note: a trade books **one transfer**: a buy from the cash leaf to the securities leaf, a sale back, at `|amount|`, with a `trades` row. Its type is not the user's to choose: a request asking for an expense still books the trade. A trade with no stored details is refused per entry, never booked as an expense or income.
+  - Note: the securities leaf is `"{institution} Securities"`, type `securities`, the root's source, no external id, found as the root's `type='securities'` leaf. A deleted one is an error, like any deleted account an import reaches.
+  - Note: **re-reading** — the same bytes are no longer a no-op while the statement holds an `informational` trade with no `$.trade` in its metadata. That is what lets the live Firstrade file recover its details: only `dump/` is watched, so after deploying, **drop `staged/firstrade/fristrade.csv` into `dump/` again**. Once the trades have their details the same bytes are a no-op again (tested).
+  - Note: `match_pending` skips `line_kind='trade'`. The test for it was checked to fail without the filter, and the re-read test without the no-op change.
+  - Note: the preview's snapshot test now covers `trades`, and the preview reports the securities account as an account to create.
 - [ ] T17 Transactions view labels each row: `Bought 7 VOO @ …`, `Transfer → Livret A`, `Dividend`,
       `Interest`, expense.
 - [ ] T18 Positions (Rust, average cost): qty, cost basis, avg price, realised gain per symbol, plus
@@ -287,4 +294,4 @@ Not fixed: a phone-created account arrives as `cash`, because the phone no longe
 Fixing it needs a phone change that sends the type on creation.
 
 ### Still to come
-- **Stage 2 is complete; T14–T15 are done.** Next is T16: booking a trade as cash leaf ↔ securities leaf, with a `trades` row.
+- **Stage 2 is complete; T14–T16 are done.** Next is T17, the transactions view labels. Deploying needs the Firstrade file dropped again (see T16).

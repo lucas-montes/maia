@@ -3,8 +3,8 @@ import type { StatementDetail, TransferMatch } from "./api";
 /** Which entries of a staged statement the review screen can actually act on.
  *
  *  The review renders a line in one of three places: an ordinary entry row, a
- *  transfer row that stands for a matched pair, or the informational trade
- *  table. Only some of those carry a checkbox, so "every pending line" is not
+ *  transfer row that stands for a matched pair, or the table of trades with
+ *  nothing to book. Only some of those carry a checkbox, so "every pending line" is not
  *  the same set as "every line the page offers to import" -- a pending line
  *  whose transfer counterpart was already imported, for instance, is shown as
  *  a transfer row with no checkbox at all.
@@ -120,9 +120,11 @@ export function selectableLineIds(details: StatementDetail[]): Set<string> {
   const ids = new Set<string>();
   for (const detail of details) {
     for (const line of detail.lines) {
-      // Trades are informational and never imported; a matched line is
+      // A trade the server can book is staged pending and offered like any
+      // other entry; one with nothing to book is informational, so
+      // `isImportable` leaves it out. A matched line is
       // offered through its transfer row instead of here.
-      if (line.lineKind === "trade" || matched.has(line.id)) continue;
+      if (matched.has(line.id)) continue;
       if (isImportable(line)) ids.add(line.id);
     }
   }
@@ -136,4 +138,50 @@ export function selectableLineIds(details: StatementDetail[]): Set<string> {
     if (id) ids.add(id);
   }
   return ids;
+}
+
+/** What a trade line bought or sold, as the server stored it. */
+export interface TradeDetails {
+  side: "buy" | "sell";
+  symbol: string;
+  quantity: number | null;
+  price: number | null;
+}
+
+/** The trade a line describes, read from its metadata; `null` for a line
+ *  that is not a trade, or a trade read before trades kept their details. */
+export function tradeOf(line: { lineKind: string; metadata: unknown }): TradeDetails | null {
+  if (line.lineKind !== "trade" || !line.metadata || typeof line.metadata !== "object") return null;
+  const trade = (line.metadata as Record<string, unknown>).trade;
+  if (!trade || typeof trade !== "object") return null;
+  const record = trade as Record<string, unknown>;
+  if (record.side !== "buy" && record.side !== "sell") return null;
+  return {
+    side: record.side,
+    symbol: typeof record.symbol === "string" ? record.symbol : "",
+    quantity: typeof record.quantity === "number" ? record.quantity : null,
+    price: typeof record.price === "number" ? record.price : null,
+  };
+}
+
+/** A trade the review shows but cannot import: the server had no details to
+ *  book it from, or it moved no cash. It sits in the trades table rather
+ *  than among the entries. */
+export function isUnbookableTrade(line: { lineKind: string; status: string }): boolean {
+  return line.lineKind === "trade" && line.status === "informational";
+}
+
+/** `Bought 7 VOO @ 500.00`, from a trade's details; empty when it has none. */
+export function tradeLabel(trade: TradeDetails | null): string {
+  if (!trade) return "";
+  const verb = trade.side === "buy" ? "Bought" : "Sold";
+  const quantity = trade.quantity === null ? "" : ` ${formatQuantity(trade.quantity)}`;
+  const symbol = trade.symbol ? ` ${trade.symbol}` : "";
+  const price = trade.price === null ? "" : ` @ ${trade.price.toFixed(2)}`;
+  return `${verb}${quantity}${symbol}${price}`;
+}
+
+/** Whole shares as integers, fractional ones without trailing zeros. */
+function formatQuantity(quantity: number): string {
+  return Number.isInteger(quantity) ? String(quantity) : String(Number(quantity.toFixed(6)));
 }
