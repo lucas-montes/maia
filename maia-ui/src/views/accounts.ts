@@ -6,9 +6,11 @@ import {
   type FinanceAccount,
   type FinanceAccountRoot,
   type FinanceTransaction,
+  type Position,
   type StatementSummary,
 } from "../lib/api";
 import { buildAccountTree, rootsForLeaf } from "../lib/accountTree";
+import { heldAtCost, positionCells } from "../lib/positions";
 import { escapeHtml, formatEpoch, setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
 import { accountsAtom } from "../lib/stores";
@@ -76,6 +78,10 @@ export function mount(root: HTMLElement): () => void {
   let statementItems: StatementSummary[] = [];
   let transactionItems: FinanceTransaction[] = [];
   let rootItems: FinanceAccountRoot[] = [];
+  let positionItems: Position[] = [];
+  /** The symbol whose opening position is being stated; `""` for a new one,
+   *  `null` when the form is closed. */
+  let openingSymbol: string | null = null;
   let chart: Chart | null = null;
   let series: SeriesPoint[] = [];
   let seriesPeriod: Period = "month";
@@ -349,6 +355,80 @@ export function mount(root: HTMLElement): () => void {
       </div>`;
   }
 
+  /** The holdings of a securities account, at average cost, with the form
+   *  that states what it held before its trades. Money the trades cannot
+   *  account for reads "unknown", and the row offers an opening position. */
+  function positionsHtml(ac: FinanceAccount): string {
+    if (ac.type !== "securities") return "";
+    const held = positionItems.filter((p) => p.accountId === ac.id);
+    const totals = [...heldAtCost(held).entries()]
+      .map(([currency, total]) =>
+        total === null ? `unknown ${escapeHtml(currency)}` : `${headlineBalance(total)} ${escapeHtml(currency)}`,
+      )
+      .join(" · ");
+    const rows = held
+      .map((p) => {
+        const cells = positionCells(p);
+        return `
+          <tr>
+            <td class="font-medium text-ink-100">${escapeHtml(p.symbol)}</td>
+            <td class="text-right font-mono">${escapeHtml(cells.shares)}</td>
+            <td class="text-right font-mono">${escapeHtml(cells.averagePrice)}</td>
+            <td class="text-right font-mono ${cells.needsOpening ? "text-warn-400" : ""}">${escapeHtml(cells.cost)}</td>
+            <td class="text-right font-mono">${escapeHtml(cells.realisedGain)}</td>
+            <td class="text-xs text-ink-500">${p.trades} trade${p.trades !== 1 ? "s" : ""}${p.opening ? ` · opening ${escapeHtml(String(p.opening.quantity))} on ${escapeHtml(formatEpoch(p.opening.asOf))}` : ""}</td>
+            <td class="text-right">
+              <button class="btn btn-ghost btn-xs" type="button" data-action="position-opening" data-symbol="${escapeHtml(p.symbol)}">${p.opening ? "Edit opening" : cells.needsOpening ? "Set opening" : "Opening"}</button>
+              ${p.opening ? `<button class="btn btn-ghost btn-xs" type="button" data-action="position-opening-clear" data-account-id="${escapeHtml(ac.id)}" data-symbol="${escapeHtml(p.symbol)}">Clear</button>` : ""}
+            </td>
+          </tr>`;
+      })
+      .join("");
+    const editing = openingSymbol !== null;
+    const current = held.find((p) => p.symbol === openingSymbol)?.opening ?? null;
+    const asOf = current ? new Date(current.asOf).toISOString().slice(0, 10) : "";
+    const form = editing
+      ? `
+        <div class="mt-3 grid grid-cols-2 gap-3 rounded border border-surface-800 p-3 md:grid-cols-4">
+          <label class="space-y-1">
+            <span class="text-xs text-ink-500">Symbol</span>
+            <input class="input input-bordered input-sm w-full uppercase" data-opening-field="symbol" value="${escapeHtml(openingSymbol ?? "")}" placeholder="INTC" />
+          </label>
+          <label class="space-y-1">
+            <span class="text-xs text-ink-500">Shares held</span>
+            <input class="input input-bordered input-sm w-full font-mono" type="number" step="any" min="0" data-opening-field="quantity" value="${current ? escapeHtml(String(current.quantity)) : ""}" />
+          </label>
+          <label class="space-y-1">
+            <span class="text-xs text-ink-500">What they cost in all</span>
+            <input class="input input-bordered input-sm w-full font-mono" type="number" step="0.01" min="0" data-opening-field="cost" value="${current ? escapeHtml(String(current.costBasis)) : ""}" />
+          </label>
+          <label class="space-y-1">
+            <span class="text-xs text-ink-500">Held at the end of</span>
+            <input class="input input-bordered input-sm w-full" type="date" data-opening-field="asOf" value="${escapeHtml(asOf)}" />
+          </label>
+          <p class="col-span-full text-xs text-ink-500">What the account held before the trades the statements show. Trades after this day are counted on top of it; the ones on or before it are already in it.</p>
+          <div class="col-span-full flex justify-end gap-2">
+            <button class="btn btn-ghost btn-sm" type="button" data-action="position-opening-cancel">Cancel</button>
+            <button class="btn btn-primary btn-sm" type="button" data-action="position-opening-save" data-account-id="${escapeHtml(ac.id)}">Save opening</button>
+          </div>
+        </div>`
+      : "";
+    return `
+      <div class="rounded border border-surface-800 bg-base-100 p-4">
+        <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <h3 class="text-sm font-medium text-ink-200">Positions <span class="font-normal text-ink-500">(average cost${totals ? ` · held at cost ${totals}` : ""})</span></h3>
+          ${!editing ? `<button class="btn btn-ghost btn-xs" type="button" data-action="position-opening" data-symbol="">State an opening position</button>` : ""}
+        </div>
+        ${held.length > 0
+          ? `<table class="table table-sm w-full">
+              <thead><tr><th>Symbol</th><th class="text-right">Shares</th><th class="text-right">Avg price</th><th class="text-right">Cost</th><th class="text-right">Realised</th><th></th><th></th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>`
+          : `<p class="text-sm text-ink-500">No trades booked into this account yet.</p>`}
+        ${form}
+      </div>`;
+  }
+
   function detailHtml(ac: FinanceAccount): string {
     const source = ac.source ? SOURCE_LABELS[ac.source] ?? ac.source : null;
     const negative = ac.balance < 0;
@@ -390,6 +470,7 @@ export function mount(root: HTMLElement): () => void {
           <div class="h-48"><canvas data-slot="balance-chart"></canvas></div>
         </div>
 
+        ${positionsHtml(ac)}
         ${transactionEntries(ac.id)}
         ${statementEntries(ac.id)}
       </div>`;
@@ -519,6 +600,67 @@ export function mount(root: HTMLElement): () => void {
     render();
   };
 
+  /** The holdings, derived locally by the server's own code. A failure leaves
+   *  the positions card empty rather than the accounts screen broken. */
+  const loadPositions = async (): Promise<void> => {
+    try {
+      const res = await api.listPositions();
+      if (res.success && res.data) positionItems = res.data;
+    } catch {
+      positionItems = [];
+    }
+    if (selectedId !== null) render();
+  };
+
+  /** States what the account held of a symbol before its trades. */
+  const saveOpening = async (accountId: string): Promise<void> => {
+    const field = (name: string): string =>
+      root.querySelector<HTMLInputElement>(`[data-opening-field="${name}"]`)?.value.trim() ?? "";
+    const symbol = field("symbol").toUpperCase();
+    const quantity = Number(field("quantity"));
+    const costBasis = Number(field("cost"));
+    const day = field("asOf");
+    if (!symbol || !(quantity > 0) || !(costBasis >= 0) || !day) {
+      accountsAtom.set({
+        ...accountsAtom.get(),
+        status: "error",
+        message: "An opening position needs a symbol, the shares held, what they cost and the day",
+      });
+      return;
+    }
+    const [year, month, date] = day.split("-").map(Number);
+    const asOf = Date.UTC(year, month - 1, date);
+    accountsAtom.set({ ...accountsAtom.get(), status: "saving", message: "" });
+    try {
+      const res = await api.setOpeningPosition({ accountId, symbol, quantity, costBasis, asOf });
+      if (!res.success) {
+        accountsAtom.set({ ...accountsAtom.get(), status: "error", message: res.error ?? "Could not save the opening position" });
+        return;
+      }
+      openingSymbol = null;
+      await loadPositions();
+      accountsAtom.set({ ...accountsAtom.get(), status: "saved", message: `Opening position of ${symbol} saved.` });
+    } catch (e) {
+      accountsAtom.set({ ...accountsAtom.get(), status: "error", message: String(e) });
+    }
+  };
+
+  /** Forgets an opening position: the holding goes back to the trades alone. */
+  const clearOpening = async (accountId: string, symbol: string): Promise<void> => {
+    accountsAtom.set({ ...accountsAtom.get(), status: "saving", message: "" });
+    try {
+      const res = await api.clearOpeningPosition({ accountId, symbol });
+      if (!res.success) {
+        accountsAtom.set({ ...accountsAtom.get(), status: "error", message: res.error ?? "Could not clear the opening position" });
+        return;
+      }
+      await loadPositions();
+      accountsAtom.set({ ...accountsAtom.get(), status: "saved", message: `Opening position of ${symbol} cleared.` });
+    } catch (e) {
+      accountsAtom.set({ ...accountsAtom.get(), status: "error", message: String(e) });
+    }
+  };
+
   const unsub = accountsAtom.subscribe(render);
 
   const loadBaseCurrency = async (): Promise<void> => {
@@ -545,6 +687,7 @@ export function mount(root: HTMLElement): () => void {
     }
     if (target.matches("[data-action='accounts-back']")) {
       selectedId = null;
+      openingSymbol = null;
       render();
       return;
     }
@@ -578,6 +721,27 @@ export function mount(root: HTMLElement): () => void {
     if (target.closest("[data-action='root-rename-cancel']")) {
       renamingRootId = null;
       render();
+      return;
+    }
+    const openingButton = target.closest<HTMLElement>("[data-action='position-opening']");
+    if (openingButton) {
+      openingSymbol = openingButton.dataset.symbol ?? "";
+      render();
+      return;
+    }
+    if (target.closest("[data-action='position-opening-cancel']")) {
+      openingSymbol = null;
+      render();
+      return;
+    }
+    const openingSave = target.closest<HTMLElement>("[data-action='position-opening-save']");
+    if (openingSave?.dataset.accountId) {
+      void saveOpening(openingSave.dataset.accountId);
+      return;
+    }
+    const openingClear = target.closest<HTMLElement>("[data-action='position-opening-clear']");
+    if (openingClear?.dataset.accountId && openingClear.dataset.symbol) {
+      void clearOpening(openingClear.dataset.accountId, openingClear.dataset.symbol);
       return;
     }
     if (target.closest("[data-action='root-create']")) {
@@ -750,6 +914,7 @@ export function mount(root: HTMLElement): () => void {
   void load();
   void loadTransactionsAndStatements();
   void loadBaseCurrency();
+  void loadPositions();
   render();
   return () => {
     if (chart) chart.destroy();

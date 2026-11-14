@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod positions;
 pub mod agenda;
 pub mod archive;
 pub mod backup;

@@ -56,6 +56,30 @@ export interface TradeDetails {
   price: number | null;
 }
 
+/** What a securities account held of a symbol before its trades, as stated. */
+export interface OpeningPosition {
+  quantity: number;
+  /** The total paid, not a price per share. */
+  costBasis: number;
+  /** Epoch ms: the holding at the end of this day. */
+  asOf: number;
+}
+
+/** One holding, derived by the server's code at average cost. `null` money
+ *  means unknown: a sale took shares nothing says the cost of. */
+export interface Position {
+  accountId: string;
+  accountName: string;
+  symbol: string;
+  currencyCode: string | null;
+  quantity: number;
+  costBasis: number | null;
+  averagePrice: number | null;
+  realisedGain: number | null;
+  trades: number;
+  opening: OpeningPosition | null;
+}
+
 /** One row of the desktop `list_transactions` command. */
 export interface FinanceTransaction {
   id: string;
@@ -948,6 +972,24 @@ export const api = {
    *  institution an account belongs to. A refusal names the reason. */
   moveAccountToRoot: (args: { id: string; rootId: string }) =>
     invoke<Envelope<{ id: string; rootId: string }>>("move_account_to_root", args),
+
+  /** Every holding of every securities account, from the booked trades and
+   *  the opening positions. Read locally, like the roots. */
+  listPositions: () => invoke<Envelope<Position[]>>("list_positions"),
+
+  /** States what a securities account held of a symbol before its trades.
+   *  Server-only state, so it goes through the server's endpoint. */
+  setOpeningPosition: (args: {
+    accountId: string;
+    symbol: string;
+    quantity: number;
+    costBasis: number;
+    asOf: number;
+  }) => invoke<Envelope<unknown>>("set_opening_position", args),
+
+  /** Forgets a stated opening position. */
+  clearOpeningPosition: (args: { accountId: string; symbol: string }) =>
+    invoke<Envelope<unknown>>("clear_opening_position", args),
 
   /** Uploads one or many picked receipt pictures to the server's OCR
    *  endpoint, one request per file, and reports per-file: `id` when the

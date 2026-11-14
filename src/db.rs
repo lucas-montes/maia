@@ -236,13 +236,33 @@ pub const MIGRATIONS: &[(i64, Step)] = &[
             CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);",
         ),
     ),
+    // What a securities account held before the trades the statements show:
+    // an export rarely reaches back to the first purchase, so a sale can take
+    // shares no booked trade bought. The user states the holding and what it
+    // cost as of a day; positions start from it and count only the trades
+    // after. One per account and symbol, gone with the account. Server-only.
+    (
+        15,
+        Step::Sql(
+            "CREATE TABLE IF NOT EXISTS opening_positions (
+                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                symbol TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                cost_basis REAL NOT NULL,
+                as_of INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (account_id, symbol)
+            );",
+        ),
+    ),
 ];
 
 /// Highest version in `MIGRATIONS`.
 ///
 /// A database newer than this means the data is newer than the binary, which is
 /// what a Nix rollback looks like. `migrate` refuses rather than serving.
-pub const LATEST_VERSION: i64 = 14;
+pub const LATEST_VERSION: i64 = 15;
 
 /// The v1 schema, exactly as it shipped.
 ///

@@ -170,8 +170,15 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Boundaries: In — the desktop's `list_transactions` (joins `trades`, returns `trade`), `FinanceTransaction.trade` and `TradeDetails` in `api.ts`, `lib/transactionLabel.ts` (`transactionKind`, `transactionLabel`) and `views/transactions.ts` (the label, a `trade` badge, a Trades filter). Out — the phone, positions (T18).
   - Note: the desktop reads the database itself, so `list_transactions` checks `sqlite_master` for `trades` and leaves the join out on a database from before v14 rather than failing. Both forms were run against a copy of the live database.
   - Note: a trade is still a `transfer` row; it reads as `trade` and the Transfers filter no longer lists it. The statement's own wording stays under the label when the label replaced it (a dividend's note names the fund).
-- [ ] T18 Positions (Rust, average cost): qty, cost basis, avg price, realised gain per symbol, plus
-      an `opening_positions` seed and its desktop form.
+- [x] T18 Positions (Rust, average cost): qty, cost basis, avg price, realised gain per symbol, plus
+      an `opening_positions` seed and its desktop form. (status:done)
+  - Completed: 2026-11-14
+  - Boundaries: In — migration v15 (`opening_positions(account_id → accounts ON DELETE CASCADE, symbol, quantity, cost_basis, as_of, PK(account_id, symbol))`), `trades::positions` / `set_opening_position` / `clear_opening_position`, the desktop-only `PUT`/`DELETE /accounts/:id/opening-positions/:symbol` (`handlers/positions.rs`), the desktop's `list_positions` (calls `maia::trades::positions` on the local database) and its two write commands, and a Positions card on a securities account's page (`lib/positions.ts`, `views/accounts.ts`). Out — market prices and unrealised gain.
+  - Note: average cost. A buy adds its cash to the cost; a sale takes the average cost of what it sold, and the rest of its proceeds is the realised gain — shown, never booked as income. Fees are inside the cash, so in the cost of a buy and out of a sale's proceeds. A buy is counted before a sale on the same day.
+  - Note: a sale of more shares than the trades and the opening account for makes the cost and gain **unknown** (`null`, shown "unknown" with a "Set opening" button), never a number made up from nothing — that is INTC until it is seeded. A trade with no share count does the same.
+  - Note: an opening position is the holding at the **end of its `as_of` day** (UTC); trades on or before that day are taken to be in it and are not counted again. Only live trades and live securities accounts count.
+  - Note: v15 is its own migration rather than part of v14 — v14 is committed, and the migration list is append-only.
+  - Deviation: the Decision says the securities leaf's balance is shown from the positions at cost. The Positions card shows "held at cost" per currency, but the account's **headline balance still sums its transfers**, because the desktop computes balances in the base currency and the cost is in the trades' currency; converting it needs the FX rate, which is left for a later change.
 
 ### Docs
 - [ ] T19 `context/overview.md` + `context-map.md`.
@@ -298,4 +305,4 @@ Not fixed: a phone-created account arrives as `cash`, because the phone no longe
 Fixing it needs a phone change that sends the type on creation.
 
 ### Still to come
-- **Stage 2 is complete; T14–T17 are done.** Next is T18, positions and the opening seed. Deploying needs the Firstrade file dropped again (see T16).
+- **Stages 1–3 are done (T1–T18).** Left: T19 (docs), deploying (v12–v15 on the live database), dropping the Firstrade file again (see T16), seeding INTC, and checking "Done when" against the live data.

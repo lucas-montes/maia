@@ -2782,6 +2782,127 @@ async fn set_account_identity(
     }
 }
 
+/// Every holding of every securities account, derived by the server's own
+/// code from the booked trades and the opening positions.
+///
+/// A database from before the trades (v14) or the opening positions (v15)
+/// has no holdings to show, so it answers an empty list rather than failing.
+#[tauri::command]
+fn list_positions(state: tauri::State<AppState>) -> CommandResult<Vec<maia::trades::Position>> {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return CommandResult {
+                success: false,
+                data: None,
+                error: Some(format!("{e}")),
+            };
+        }
+    };
+    let ready: bool = conn
+        .query_row(
+            "SELECT COUNT(*) = 2 FROM sqlite_master
+             WHERE type='table' AND name IN ('trades', 'opening_positions')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if !ready {
+        return CommandResult {
+            success: true,
+            data: Some(Vec::new()),
+            error: None,
+        };
+    }
+    match maia::trades::positions(&conn) {
+        Ok(positions) => CommandResult {
+            success: true,
+            data: Some(positions),
+            error: None,
+        },
+        Err(e) => CommandResult {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+/// A path segment with everything but the unreserved characters escaped, so
+/// a symbol such as `BRK/B` stays one segment.
+fn path_segment(raw: &str) -> String {
+    let mut out = String::new();
+    for byte in raw.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// States what a securities account held of a symbol before its trades.
+///
+/// Server-only state, so it goes through the server's endpoint: the desktop
+/// never writes `maia.db` directly.
+#[tauri::command]
+async fn set_opening_position(
+    account_id: String,
+    symbol: String,
+    quantity: f64,
+    cost_basis: f64,
+    as_of: i64,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let body = serde_json::json!({
+        "quantity": quantity,
+        "costBasis": cost_basis,
+        "asOf": as_of,
+    });
+    let path = format!(
+        "/accounts/{}/opening-positions/{}",
+        path_segment(&account_id),
+        path_segment(symbol.trim())
+    );
+    match api::put::<_, serde_json::Value>(&path, &body).await {
+        Ok(data) => Ok(CommandResult {
+            success: true,
+            data: Some(data),
+            error: None,
+        }),
+        Err(error) => Ok(CommandResult {
+            success: false,
+            data: None,
+            error: Some(error.to_message()),
+        }),
+    }
+}
+
+/// Forgets a stated opening position.
+#[tauri::command]
+async fn clear_opening_position(
+    account_id: String,
+    symbol: String,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    let path = format!(
+        "/accounts/{}/opening-positions/{}",
+        path_segment(&account_id),
+        path_segment(symbol.trim())
+    );
+    match api::delete::<serde_json::Value>(&path).await {
+        Ok(data) => Ok(CommandResult {
+            success: true,
+            data: Some(data),
+            error: None,
+        }),
+        Err(error) => Ok(CommandResult {
+            success: false,
+            data: None,
+            error: Some(error.to_message()),
+        }),
+    }
+}
+
 /// Creates an account root: the institution a set of accounts belongs to.
 ///
 /// The roots are server-only state, so this goes through the server's own
@@ -4828,6 +4949,9 @@ pub fn run() {
             list_tags,
             list_accounts,
             list_account_roots,
+            list_positions,
+            set_opening_position,
+            clear_opening_position,
             create_account_root,
             rename_account_root,
             move_account_to_root,

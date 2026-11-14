@@ -131,6 +131,13 @@ pub fn create_router(state: AppState) -> Router {
             "/account-roots/:id",
             axum::routing::put(crate::handlers::accounts::rename_account_root),
         )
+        // Desktop-only, like the roots: what a securities account held before
+        // its trades is server-only state.
+        .route(
+            "/accounts/:id/opening-positions/:symbol",
+            axum::routing::put(crate::handlers::positions::put_opening_position)
+                .delete(crate::handlers::positions::delete_opening_position),
+        )
         .route("/statements", get(crate::handlers::statements::list_statements))
         .route("/statements/scan", post(crate::handlers::statements::scan_statements))
         .route(
