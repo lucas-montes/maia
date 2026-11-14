@@ -181,7 +181,9 @@ Chosen: book the **cash leg as a fact** and derive everything else.
   - Deviation: the Decision says the securities leaf's balance is shown from the positions at cost. The Positions card shows "held at cost" per currency, but the account's **headline balance still sums its transfers**, because the desktop computes balances in the base currency and the cost is in the trades' currency; converting it needs the FX rate, which is left for a later change.
 
 ### Docs
-- [ ] T19 `context/overview.md` + `context-map.md`.
+- [x] T19 `context/overview.md` + `context-map.md`. (status:done)
+  - Completed: 2026-11-14
+  - Note: also `context/statements/trades.md` (new), and `entry-lifecycle.md` / `account-tree.md` brought up to date for bookable trades.
 
 ## Done when
 - Discard → re-drop a file stages its entries as `pending`; an all-duplicate file stays in `staged/`.
@@ -305,4 +307,4 @@ Not fixed: a phone-created account arrives as `cash`, because the phone no longe
 Fixing it needs a phone change that sends the type on creation.
 
 ### Still to come
-- **Stages 1–3 are done (T1–T18).** Left: T19 (docs), deploying (v12–v15 on the live database), dropping the Firstrade file again (see T16), seeding INTC, and checking "Done when" against the live data.
+- **Every task is done (T1–T19).** Left: deploying (v12–v15 on the live database), dropping the Firstrade file again (see T16), seeding INTC, and checking "Done when" against the live data.

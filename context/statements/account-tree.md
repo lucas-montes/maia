@@ -67,7 +67,7 @@ revert the rename:
 - **The securities leaf has no external id.** It is found as "the securities
   leaf of this root".
 - **A trade is a movement, not income or expense.** Its cash leg moves between
-  the cash leaf and the securities leaf.
+  the cash leaf and the securities leaf; see [trades.md](trades.md).
 
 ## Setting an identity
 
@@ -135,7 +135,7 @@ fn resolve_root(tx, source, now) -> anyhow::Result<String> {
 So there is **one root per institution**, and the accounts are its leaves: a
 Crédit Agricole import finds the root the migration made, a Firstrade import
 makes a *broker* root with a *cash* leaf. The securities leaf is made later,
-when a trade books.
+when the first trade books (see [trades.md](trades.md)).
 
 The leaf's type follows the root's **kind**: a bank has savings products — a
 Livret A, an LDD, an épargne — and everything else it holds is cash. A broker's

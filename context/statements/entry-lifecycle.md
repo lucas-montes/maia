@@ -13,7 +13,7 @@ kinds:
 | `imported` | user decision | `mark_imported`, once the import books a transaction | yes |
 | `skipped` | user decision | `mark_skipped`, when the user deselects the entry | yes |
 | `pending` | derived | staging, or a re-read | no — recomputed |
-| `informational` | derived | the parser marked the row as carrying no money movement (`LineKind::is_informational`, i.e. a trade) | no — recomputed |
+| `informational` | derived | a trade with nothing to book: staged before trades kept their details, or it moved no cash (`StatementLineDraft::is_informational`). A trade with its details is `pending` like any entry — see [trades.md](trades.md) | no — recomputed |
 | `duplicate` | derived | another **live** statement holds the same `dedupe_key` | no — recomputed |
 | `error` | derived | the import could not book the line (`mark_error`) — retryable | no — recomputed |
 
@@ -62,8 +62,8 @@ file's bytes:
 
 | Branch | When | Effect |
 |---|---|---|
-| no-op | same `source_key`, same `source_hash`, statement not deleted, and it still holds a `pending`/`imported`/`skipped` entry | reports `skipped_reason = "already ingested"`; nothing is re-read |
-| re-read | same `source_key` with different bytes, or the statement was deleted, or it holds no entry the user can act on | header updated, every **derived** line deleted, the fresh lines inserted and their verdicts recomputed |
+| no-op | same `source_key`, same `source_hash`, statement not deleted, it still holds a `pending`/`imported`/`skipped` entry, and no trade read without its details | reports `skipped_reason = "already ingested"`; nothing is re-read |
+| re-read | same `source_key` with different bytes, or the statement was deleted, or it holds no entry the user can act on, or it holds a trade read without its details (the bytes are the only place they are) | header updated, every **derived** line deleted, the fresh lines inserted and their verdicts recomputed |
 | new | no such statement | statement inserted, lines staged |
 
 The re-read branch deletes `pending`, `informational`, `duplicate` and `error`
@@ -195,9 +195,10 @@ Tracked in `context/plans/finance-model.md`:
 - **An informational-only feed month is touched on every sync (accepted).** It
   holds no entry the user can act on, so it is read again. Nothing is lost — the
   entries come back with the same ids — but the statement's `updated_at` moves.
-- **A file with informational entries waits in `staged/` (accepted).** The
-  review offers no way to act on a trade, so such a file has no user action
-  available until trades become movable.
+- **A file with an unbookable trade waits in `staged/` (accepted).** A trade
+  with its details is imported like any entry, so this is only a trade that
+  moved no cash, or one whose file has not been read again since trades kept
+  their details.
 
 ## Where the code lives
 
