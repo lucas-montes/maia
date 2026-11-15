@@ -553,14 +553,17 @@ pub async fn push_stores(
     let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
 
+    // A store the server already has is the server's: receipt matching renames
+    // it, fills in what identifies it, or deletes one it made by mistake. A
+    // phone pushing its copy must not undo any of that, so a push only adds
+    // stores it has not seen, and names the placeholder a price push made for
+    // a store it did not know yet (named by its own id until then).
     for store in payload.stores {
         tx.execute(
             "INSERT INTO stores (id, name, created_at, updated_at, deleted_at)
              VALUES (?1, ?2, ?3, ?4, NULL)
-             ON CONFLICT(id) DO UPDATE SET
-                name=excluded.name,
-                updated_at=excluded.updated_at,
-                deleted_at=NULL",
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at
+                WHERE stores.name = stores.id",
             rusqlite::params![store.id, store.name, store.created_at, server_time],
         )
         .unwrap();

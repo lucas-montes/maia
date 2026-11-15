@@ -389,6 +389,10 @@ pub async fn import_statement(
         .map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
     tx.commit()
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // The booked transactions may be what waiting receipts paid for.
+    if let Err(e) = crate::matching::run_all(&conn, db::server_time_ms()) {
+        tracing::warn!(error = %e, "receipt matching after an import failed");
+    }
     settle_files(&state, conn);
     Ok(Json(outcome))
 }
@@ -449,6 +453,9 @@ pub async fn import_statements(
     }
     tx.commit()
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Err(e) = crate::matching::run_all(&conn, db::server_time_ms()) {
+        tracing::warn!(error = %e, "receipt matching after an import failed");
+    }
     settle_files(&state, conn);
     Ok(Json(serde_json::json!({ "statements": outcomes })))
 }

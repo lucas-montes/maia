@@ -182,6 +182,8 @@ fn find_boundary_end(data: &[u8]) -> usize {
 #[serde(rename_all = "camelCase")]
 pub struct LinkRequest {
     transaction_id: String,
+    #[serde(default)]
+    source: Option<String>,
 }
 
 fn link_error(e: crate::receipt_links::LinkError) -> axum::response::Response {
@@ -202,8 +204,18 @@ pub async fn put_receipt_transaction(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(request): Json<LinkRequest>,
 ) -> axum::response::Response {
+    let source = match crate::handlers::matching::decided_by(request.source.as_deref()) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
     let conn = state.db.get().unwrap();
-    match crate::receipt_links::link(&conn, &id, request.transaction_id.trim(), db::server_time_ms()) {
+    match crate::receipt_links::link(
+        &conn,
+        &id,
+        request.transaction_id.trim(),
+        source,
+        db::server_time_ms(),
+    ) {
         Ok(outcome) => Json(outcome).into_response(),
         Err(e) => link_error(e),
     }

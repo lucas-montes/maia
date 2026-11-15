@@ -31,6 +31,14 @@ pub struct SystemInstruction {
     parts: Vec<TextPart>,
 }
 
+impl SystemInstruction {
+    pub fn new(text: String) -> Self {
+        Self {
+            parts: vec![TextPart::new(text)],
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct TextPart {
     text: String,

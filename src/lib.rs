@@ -5,6 +5,7 @@ pub mod error;
 pub mod finance_scenarios;
 pub mod handlers;
 pub mod logs;
+pub mod matching;
 pub mod notes_mirror;
 pub mod notifier;
 pub mod openapi;
@@ -707,6 +708,121 @@ mod tests {
         let conn = pool.get().unwrap();
         let name: String = conn.query_row("SELECT name FROM stores WHERE id='s1'", [], |r| r.get(0)).unwrap();
         assert_eq!(name, "Carrefour", "pushing must restore the real name");
+        handle.abort();
+    }
+
+    /// The receipt's page over HTTP: a read receipt is matched to its store and
+    /// its card payment, the page lists both as effects, and an undo of the
+    /// link from the page sticks across another matching run.
+    #[tokio::test]
+    async fn a_receipt_is_matched_shown_and_undone_over_http() {
+        let pool = crate::db::init_memory().unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute("INSERT INTO stores (id, name, created_at, updated_at) VALUES ('lidl','lidl',1,1)", []).unwrap();
+            conn.execute(
+                "INSERT INTO transactions (id, type, amount, currency_code, amount_base, rate_used, date, note, is_draft, created_at, updated_at)
+                 VALUES ('t1','expense',23.69,'EUR',23.69,1.0,1785888000000,'Paiement par carte X6510 LIDL HRVATSKA 0196 Z 01/08 - Lidl',0,1,1)",
+                [],
+            )
+            .unwrap();
+            let reading = serde_json::json!({
+                "merchant": "LIDL HRVATSKA d.o.o. k.d.", "brand": "Lidl", "tax_id": "66089976432", "country": "HR",
+                "date": "2026-08-01T18:02:00", "total": 23.69, "currency": "EUR", "card_last4": "6510",
+                "payment_method": "card", "items": [{"name": "BANANE", "price": 1.59, "currency": "EUR"}]
+            });
+            conn.execute(
+                "INSERT INTO receipts (id, local_path, parsed, parsed_json, created_at, updated_at) VALUES ('r1','',1,?1,1,1)",
+                [reading.to_string()],
+            )
+            .unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+        let auth = |b: reqwest::RequestBuilder| b.header("Authorization", "Bearer test-key");
+
+        let page: serde_json::Value = auth(client.post(format!("{base}/receipt-pictures/r1/match")))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(page["store"]["id"], "lidl");
+        assert_eq!(page["storeSource"], "auto");
+        assert_eq!(page["transactionId"], "t1");
+        assert_eq!(page["linkSource"], "auto");
+        assert_eq!(page["recommendations"][0]["kind"], "rename");
+        assert_eq!(page["recommendations"][0]["proposed"], "Lidl Hrvatska");
+        let link = page["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["kind"] == "transaction_linked")
+            .unwrap()
+            .clone();
+        assert_eq!(link["targetLive"], true);
+
+        let undone = auth(client.post(format!("{base}/receipt-pictures/r1/effects/{}/undo", link["id"].as_str().unwrap())))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(undone.status(), 200);
+        let page: serde_json::Value = auth(client.post(format!("{base}/receipt-pictures/match")))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(page["receipts"][0]["transactionId"], serde_json::Value::Null, "the undo sticks");
+
+        // A rename from the page, with the receipt, is one of its effects.
+        let renamed = auth(client.put(format!("{base}/stores/lidl/name")))
+            .json(&serde_json::json!({ "name": "Lidl Hrvatska", "receiptId": "r1" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(renamed.status(), 200);
+        let page: serde_json::Value = auth(client.get(format!("{base}/receipt-pictures/r1/matching")))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(page["effects"].as_array().unwrap().iter().any(|e| e["kind"] == "store_renamed"));
+        assert_eq!(page["recommendations"].as_array().unwrap().len(), 0);
+        handle.abort();
+    }
+
+    /// A store renamed on the server (from a receipt's page) keeps its name
+    /// and stays deleted when a phone pushes its old copy.
+    #[tokio::test]
+    async fn push_stores_never_undoes_the_servers_rename_or_delete() {
+        let pool = crate::db::init_memory().unwrap();
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/stores");
+        {
+            let conn = pool.get().unwrap();
+            conn.execute("INSERT INTO stores (id, name, created_at, updated_at) VALUES ('s1','Lidl Hrvatska',1,1)", []).unwrap();
+            conn.execute("INSERT INTO stores (id, name, created_at, updated_at, deleted_at) VALUES ('s2','Oops',1,2,2)", []).unwrap();
+        }
+        let payload = serde_json::json!({ "stores": [
+            { "id": "s1", "name": "lidl", "createdAt": 1 },
+            { "id": "s2", "name": "Oops", "createdAt": 1 },
+        ]});
+        assert_eq!(
+            client.post(&url).header("Authorization", "Bearer test-key").json(&payload).send().await.unwrap().status(),
+            200
+        );
+        let conn = pool.get().unwrap();
+        let name: String = conn.query_row("SELECT name FROM stores WHERE id='s1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(name, "Lidl Hrvatska");
+        let deleted: Option<i64> = conn.query_row("SELECT deleted_at FROM stores WHERE id='s2'", [], |r| r.get(0)).unwrap();
+        assert_eq!(deleted, Some(2));
         handle.abort();
     }
 

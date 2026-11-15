@@ -297,6 +297,9 @@ async fn run_ocr(
                 "UPDATE receipts SET parsed = 1, parsed_json = ?1, parse_error = NULL, upload_status = ?2, updated_at = ?3 WHERE id = ?4",
                 rusqlite::params![json_text, UPLOAD_STATUS_UPLOADED, now, id],
             );
+            if let Err(e) = crate::matching::after_parse(&conn, &id, now) {
+                tracing::warn!(id = %id, error = %e, "receipt matching after a parse failed");
+            }
             Ok(())
         }
         Ok(None) => {

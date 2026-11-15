@@ -197,6 +197,25 @@ pub fn create_router(state: AppState) -> Router {
         .route("/receipt-pictures/:id/picture", get(crate::handlers::receipt_ocr::get_receipt_picture))
         .route("/receipt-pictures/:id/archive", post(crate::handlers::archive::archive_receipt))
         .route("/receipt-pictures/:id/restore", post(crate::handlers::archive::restore_receipt))
+        .route("/receipt-pictures/match", post(crate::handlers::matching::match_all))
+        .route("/receipt-pictures/:id/match", post(crate::handlers::matching::match_one))
+        .route("/receipt-pictures/:id/matching", get(crate::handlers::matching::get_matching))
+        .route(
+            "/receipt-pictures/:id/store",
+            axum::routing::put(crate::handlers::matching::put_store).post(crate::handlers::matching::post_store),
+        )
+        .route(
+            "/receipt-pictures/:id/lines/:line",
+            axum::routing::put(crate::handlers::matching::put_line).delete(crate::handlers::matching::delete_line),
+        )
+        .route(
+            "/receipt-pictures/:id/effects/:effect/undo",
+            post(crate::handlers::matching::undo_effect),
+        )
+        .route("/receipt-pictures/:id/assist", post(crate::handlers::matching::assist))
+        .route("/receipt-effects", get(crate::handlers::matching::get_target_effects))
+        .route("/stores/:id/name", axum::routing::put(crate::handlers::matching::put_store_name))
+        .route("/stores/:id/details", axum::routing::put(crate::handlers::matching::put_store_details))
         .route(
             "/receipt-pictures/:id/transaction",
             axum::routing::put(crate::handlers::receipts::put_receipt_transaction)

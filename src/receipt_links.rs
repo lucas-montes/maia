@@ -11,6 +11,9 @@
 //! which includes a trade, moves the user's own money and has nothing to prove.
 
 use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::json;
+
+use crate::matching::{MANUAL, effects};
 
 #[derive(Debug, PartialEq)]
 pub enum LinkError {
@@ -78,14 +81,33 @@ pub struct LinkOutcome {
 /// transaction loses its end of the link. When it was a draft that held this
 /// receipt, it only existed because of the receipt, so it is deleted rather than
 /// left in the ledger as a second copy of the same spend.
+///
+/// `source` says who decided: `manual`, `auto` (the matcher) or `ai`. Moving
+/// a receipt off a link the matcher or the AI made rejects that pair, so the
+/// matcher does not make it again. Each link is recorded as an effect of the
+/// receipt (`crate::matching::effects`).
 pub fn link(
     conn: &Connection,
     receipt_id: &str,
     transaction_id: &str,
+    source: &str,
     now: i64,
 ) -> Result<LinkOutcome, LinkError> {
     let tx = conn.unchecked_transaction()?;
-    let previous = live_receipt_link(&tx, receipt_id)?;
+    let outcome = link_in(&tx, receipt_id, transaction_id, source, now)?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+/// [`link`] inside the caller's transaction.
+pub fn link_in(
+    tx: &Connection,
+    receipt_id: &str,
+    transaction_id: &str,
+    source: &str,
+    now: i64,
+) -> Result<LinkOutcome, LinkError> {
+    let previous = live_receipt_link(tx, receipt_id)?;
 
     let found: Option<(String, Option<String>, bool)> = tx
         .query_row(
@@ -118,20 +140,50 @@ pub fn link(
         }
     }
 
-    let previous = previous.filter(|p| p != transaction_id);
+    if previous.as_deref() == Some(transaction_id) {
+        // The same link again. A manual one confirms what the matcher chose.
+        if source == MANUAL {
+            tx.execute(
+                "UPDATE receipts SET link_source = ?1 WHERE id = ?2",
+                params![MANUAL, receipt_id],
+            )?;
+        }
+        return Ok(LinkOutcome {
+            receipt_id: receipt_id.to_string(),
+            transaction_id: Some(transaction_id.to_string()),
+            previous_transaction_id: None,
+            previous_draft_deleted: false,
+        });
+    }
     let previous_draft_deleted = match &previous {
-        Some(p) => release(&tx, p, receipt_id, true, now)?,
+        Some(p) => {
+            leave(tx, receipt_id, p, now)?;
+            release(tx, p, receipt_id, true, now)?
+        }
         None => false,
     };
     tx.execute(
-        "UPDATE receipts SET transaction_id = ?1, updated_at = ?2 WHERE id = ?3 AND transaction_id IS NOT ?1",
-        params![transaction_id, now, receipt_id],
+        "UPDATE receipts SET transaction_id = ?1, link_source = ?2, updated_at = ?3 WHERE id = ?4",
+        params![transaction_id, source, now, receipt_id],
     )?;
     tx.execute(
         "UPDATE transactions SET receipt_id = ?1, updated_at = ?2 WHERE id = ?3 AND receipt_id IS NOT ?1",
         params![receipt_id, now, transaction_id],
     )?;
-    tx.commit()?;
+    effects::record(
+        tx,
+        effects::NewEffect {
+            receipt_id,
+            kind: effects::TRANSACTION_LINKED,
+            target_table: "transactions",
+            target_id: transaction_id,
+            line: None,
+            before: json!({ "transactionId": previous, "draftDeleted": previous_draft_deleted }),
+            after: json!({ "transactionId": transaction_id }),
+            source,
+        },
+        now,
+    )?;
     Ok(LinkOutcome {
         receipt_id: receipt_id.to_string(),
         transaction_id: Some(transaction_id.to_string()),
@@ -145,21 +197,65 @@ pub fn link(
 /// one, not that the spend did not happen.
 pub fn unlink(conn: &Connection, receipt_id: &str, now: i64) -> Result<LinkOutcome, LinkError> {
     let tx = conn.unchecked_transaction()?;
-    let previous = live_receipt_link(&tx, receipt_id)?;
+    let outcome = unlink_in(&tx, receipt_id, now)?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+/// [`unlink`] inside the caller's transaction.
+pub fn unlink_in(tx: &Connection, receipt_id: &str, now: i64) -> Result<LinkOutcome, LinkError> {
+    let previous = live_receipt_link(tx, receipt_id)?;
     if let Some(p) = &previous {
-        release(&tx, p, receipt_id, false, now)?;
+        leave(tx, receipt_id, p, now)?;
+        release(tx, p, receipt_id, false, now)?;
         tx.execute(
-            "UPDATE receipts SET transaction_id = NULL, updated_at = ?1 WHERE id = ?2",
+            "UPDATE receipts SET transaction_id = NULL, link_source = NULL, updated_at = ?1 WHERE id = ?2",
             params![now, receipt_id],
         )?;
     }
-    tx.commit()?;
     Ok(LinkOutcome {
         receipt_id: receipt_id.to_string(),
         transaction_id: None,
         previous_transaction_id: previous,
         previous_draft_deleted: false,
     })
+}
+
+/// The receipt is leaving the link to `transaction_id`: its effect is over,
+/// and a link the matcher or the AI chose is rejected so it is not made again.
+fn leave(
+    tx: &Connection,
+    receipt_id: &str,
+    transaction_id: &str,
+    now: i64,
+) -> Result<(), LinkError> {
+    let source: Option<String> = tx
+        .query_row(
+            "SELECT link_source FROM receipts WHERE id = ?1",
+            params![receipt_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    if source.as_deref() != Some(MANUAL) {
+        effects::reject(
+            tx,
+            receipt_id,
+            effects::REJECT_TRANSACTION,
+            transaction_id,
+            None,
+            now,
+        )?;
+    }
+    effects::supersede(
+        tx,
+        receipt_id,
+        effects::TRANSACTION_LINKED,
+        Some(transaction_id),
+        None,
+        now,
+    )?;
+    Ok(())
 }
 
 /// The live receipt's current link, or an error when there is no such receipt.
@@ -267,24 +363,24 @@ mod tests {
     #[test]
     fn a_link_is_written_at_both_ends() {
         let conn = conn();
-        link(&conn, "r1", "shop", 5).unwrap();
+        link(&conn, "r1", "shop", MANUAL, 5).unwrap();
         assert_eq!(
             ends(&conn, "r1", "shop"),
             (Some("shop".into()), Some("r1".into()))
         );
         // A refund's receipt proves an income.
-        link(&conn, "r2", "refund", 5).unwrap();
+        link(&conn, "r2", "refund", MANUAL, 5).unwrap();
     }
 
     #[test]
     fn a_transfer_or_a_trade_takes_no_receipt() {
         let conn = conn();
         assert!(matches!(
-            link(&conn, "r1", "move", 5),
+            link(&conn, "r1", "move", MANUAL, 5),
             Err(LinkError::NotLinkable { .. })
         ));
         assert_eq!(
-            link(&conn, "r1", "buy", 5),
+            link(&conn, "r1", "buy", MANUAL, 5),
             Err(LinkError::NotLinkable {
                 transaction_id: "buy".into(),
                 kind: "trade".into()
@@ -295,22 +391,22 @@ mod tests {
     #[test]
     fn a_transaction_holds_one_receipt() {
         let conn = conn();
-        link(&conn, "r1", "shop", 5).unwrap();
+        link(&conn, "r1", "shop", MANUAL, 5).unwrap();
         assert!(matches!(
-            link(&conn, "r2", "shop", 6),
+            link(&conn, "r2", "shop", MANUAL, 6),
             Err(LinkError::TransactionTaken { .. })
         ));
         // Once the first receipt is gone, its stale end does not block.
         conn.execute("UPDATE receipts SET deleted_at = 7 WHERE id = 'r1'", [])
             .unwrap();
-        link(&conn, "r2", "shop", 8).unwrap();
+        link(&conn, "r2", "shop", MANUAL, 8).unwrap();
     }
 
     #[test]
     fn relinking_moves_the_receipt_and_drops_its_own_draft() {
         let conn = conn();
-        link(&conn, "r1", "draft", 5).unwrap();
-        let outcome = link(&conn, "r1", "shop", 6).unwrap();
+        link(&conn, "r1", "draft", MANUAL, 5).unwrap();
+        let outcome = link(&conn, "r1", "shop", MANUAL, 6).unwrap();
         assert_eq!(outcome.previous_transaction_id.as_deref(), Some("draft"));
         assert!(outcome.previous_draft_deleted);
         let deleted: Option<i64> = conn
@@ -330,8 +426,8 @@ mod tests {
     #[test]
     fn relinking_off_a_real_transaction_keeps_it() {
         let conn = conn();
-        link(&conn, "r1", "shop", 5).unwrap();
-        let outcome = link(&conn, "r1", "refund", 6).unwrap();
+        link(&conn, "r1", "shop", MANUAL, 5).unwrap();
+        let outcome = link(&conn, "r1", "refund", MANUAL, 6).unwrap();
         assert!(!outcome.previous_draft_deleted);
         assert_eq!(ends(&conn, "r1", "shop").1, None);
         let deleted: Option<i64> = conn
@@ -347,7 +443,7 @@ mod tests {
     #[test]
     fn unlinking_clears_both_ends_and_keeps_a_draft() {
         let conn = conn();
-        link(&conn, "r1", "draft", 5).unwrap();
+        link(&conn, "r1", "draft", MANUAL, 5).unwrap();
         let outcome = unlink(&conn, "r1", 6).unwrap();
         assert_eq!(outcome.previous_transaction_id.as_deref(), Some("draft"));
         assert_eq!(ends(&conn, "r1", "draft"), (None, None));
@@ -364,8 +460,8 @@ mod tests {
     #[test]
     fn linking_again_to_the_same_transaction_changes_nothing() {
         let conn = conn();
-        link(&conn, "r1", "shop", 5).unwrap();
-        link(&conn, "r1", "shop", 9).unwrap();
+        link(&conn, "r1", "shop", MANUAL, 5).unwrap();
+        link(&conn, "r1", "shop", MANUAL, 9).unwrap();
         let updated: i64 = conn
             .query_row("SELECT updated_at FROM receipts WHERE id = 'r1'", [], |r| {
                 r.get(0)
@@ -375,14 +471,64 @@ mod tests {
     }
 
     #[test]
+    fn leaving_an_automatic_link_rejects_it_and_a_manual_one_does_not() {
+        use crate::matching::{AUTO, effects};
+        let conn = conn();
+        link(&conn, "r1", "shop", AUTO, 5).unwrap();
+        let source: String = conn
+            .query_row(
+                "SELECT link_source FROM receipts WHERE id = 'r1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, AUTO);
+        unlink(&conn, "r1", 6).unwrap();
+        assert!(
+            effects::is_rejected(&conn, "r1", effects::REJECT_TRANSACTION, "shop", None).unwrap()
+        );
+
+        link(&conn, "r1", "refund", MANUAL, 7).unwrap();
+        unlink(&conn, "r1", 8).unwrap();
+        assert!(
+            !effects::is_rejected(&conn, "r1", effects::REJECT_TRANSACTION, "refund", None)
+                .unwrap()
+        );
+
+        // Each link is an effect of the receipt; leaving it closes the effect.
+        let all = effects::for_receipt(&conn, "r1").unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(
+            all.iter()
+                .all(|e| e.kind == effects::TRANSACTION_LINKED && e.undone_at.is_some())
+        );
+    }
+
+    #[test]
+    fn confirming_an_automatic_link_makes_it_manual() {
+        use crate::matching::AUTO;
+        let conn = conn();
+        link(&conn, "r1", "shop", AUTO, 5).unwrap();
+        link(&conn, "r1", "shop", MANUAL, 6).unwrap();
+        let source: String = conn
+            .query_row(
+                "SELECT link_source FROM receipts WHERE id = 'r1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, MANUAL);
+    }
+
+    #[test]
     fn unknown_ends_are_reported() {
         let conn = conn();
         assert_eq!(
-            link(&conn, "nope", "shop", 5),
+            link(&conn, "nope", "shop", MANUAL, 5),
             Err(LinkError::ReceiptNotFound("nope".into()))
         );
         assert_eq!(
-            link(&conn, "r1", "nope", 5),
+            link(&conn, "r1", "nope", MANUAL, 5),
             Err(LinkError::TransactionNotFound("nope".into()))
         );
     }

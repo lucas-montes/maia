@@ -256,13 +256,120 @@ pub const MIGRATIONS: &[(i64, Step)] = &[
             );",
         ),
     ),
+    // Receipt matching (context/plans/receipt-matching.md). A store learns
+    // what identifies it — brand, legal name, country, tax and VAT numbers,
+    // address — so two shops of one chain in two countries stay two stores;
+    // the phone's store push names its columns, so it never touches these.
+    // A receipt records the store it is from and how its store and its
+    // transaction were decided (`auto`, `ai`, `manual`). The matchers learn
+    // the names a store is printed under, remember what an undo rejected, and
+    // log every change a receipt made, so the receipt's page can open, edit
+    // and undo each one. All server-only.
+    (
+        16,
+        Step::Guarded(add_receipt_matching),
+    ),
+    // What a receipt line is: the ingredient a printed name (or article code)
+    // stands for at one store, learned from each match, and which line of which
+    // receipt recorded which price. Server-only.
+    (
+        17,
+        Step::Sql(
+            "CREATE TABLE IF NOT EXISTS product_aliases (
+                store_id TEXT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+                printed TEXT NOT NULL,
+                ingredient_id TEXT NOT NULL REFERENCES ingredients(id) ON DELETE CASCADE,
+                package_grams REAL,
+                source TEXT NOT NULL,
+                receipt_id TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (store_id, printed)
+            );
+            CREATE TABLE IF NOT EXISTS receipt_line_matches (
+                receipt_id TEXT NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
+                line INTEGER NOT NULL,
+                printed TEXT NOT NULL,
+                ingredient_id TEXT NOT NULL REFERENCES ingredients(id) ON DELETE CASCADE,
+                ingredient_price_id TEXT REFERENCES ingredient_prices(id) ON DELETE SET NULL,
+                source TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (receipt_id, line)
+            );
+            CREATE INDEX IF NOT EXISTS idx_receipt_line_matches_price ON receipt_line_matches(ingredient_price_id);",
+        ),
+    ),
 ];
+
+const RECEIPT_MATCHING_TABLES: &str = "CREATE TABLE IF NOT EXISTS store_aliases (
+                alias TEXT PRIMARY KEY,
+                store_id TEXT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+                source TEXT NOT NULL,
+                receipt_id TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_store_aliases_store ON store_aliases(store_id);
+            CREATE TABLE IF NOT EXISTS receipt_rejections (
+                receipt_id TEXT NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                line INTEGER NOT NULL DEFAULT -1,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (receipt_id, kind, target_id, line)
+            );
+            CREATE TABLE IF NOT EXISTS receipt_effects (
+                id TEXT PRIMARY KEY,
+                receipt_id TEXT NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                target_table TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                line INTEGER,
+                before_json TEXT,
+                after_json TEXT,
+                source TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                undone_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_receipt_effects_receipt ON receipt_effects(receipt_id);
+            CREATE INDEX IF NOT EXISTS idx_receipt_effects_target ON receipt_effects(target_table, target_id);";
+
+/// v16: the columns receipt matching adds to `stores` and `receipts`, guarded
+/// like v2 because a database can be walked back a version and replayed.
+fn add_receipt_matching(conn: &Connection) -> anyhow::Result<()> {
+    for (table, column) in [
+        ("stores", "brand"),
+        ("stores", "legal_name"),
+        ("stores", "country"),
+        ("stores", "tax_id"),
+        ("stores", "tax_id_kind"),
+        ("stores", "vat_number"),
+        ("stores", "address"),
+        ("stores", "city"),
+        ("stores", "postcode"),
+        ("stores", "website"),
+        ("stores", "details_source"),
+        ("receipts", "store_id"),
+        ("receipts", "store_source"),
+        ("receipts", "link_source"),
+    ] {
+        if !column_exists(conn, table, column)? {
+            // Both names come from the list above, never from input.
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"))?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_stores_tax_id
+             ON stores(tax_id) WHERE tax_id IS NOT NULL AND deleted_at IS NULL;",
+    )?;
+    conn.execute_batch(RECEIPT_MATCHING_TABLES)?;
+    Ok(())
+}
 
 /// Highest version in `MIGRATIONS`.
 ///
 /// A database newer than this means the data is newer than the binary, which is
 /// what a Nix rollback looks like. `migrate` refuses rather than serving.
-pub const LATEST_VERSION: i64 = 15;
+pub const LATEST_VERSION: i64 = 17;
 
 /// The v1 schema, exactly as it shipped.
 ///

@@ -149,6 +149,36 @@ impl Model {
         Self { model }
     }
 
+    /// Asks a text question and reads the answer as JSON matching [schema]
+    /// (Gemini's `responseSchema` dialect). [system] says what the model is
+    /// for; [prompt] carries the data. `None` when the model returns no
+    /// content or content that is not JSON.
+    pub async fn generate_json(
+        &self,
+        system: String,
+        prompt: String,
+        schema: serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, ModelError> {
+        let content = google::Content::new(
+            Some("user".to_string()),
+            vec![google::Part::Text(google::TextPart::new(prompt))],
+        );
+        let generation_config = Some(google::GenerationConfig::new(
+            Some("application/json".to_string()),
+            Some(schema),
+        ));
+        let request = google::GeminiRequest::new(
+            Some(google::SystemInstruction::new(system)),
+            vec![content],
+            generation_config,
+        );
+        self.model
+            .generate_content(&request)
+            .await
+            .map(|r| r.inner_to_struct())
+            .map_err(ModelError::from)
+    }
+
     pub async fn extract_receipt<T: DeserializeOwned>(
         &self,
         image_base64: String,

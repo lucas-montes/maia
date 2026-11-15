@@ -6,6 +6,7 @@ pub mod backup;
 pub mod finance_scenarios;
 pub mod health;
 pub mod lookup;
+pub mod matching;
 pub mod media;
 pub mod pull;
 pub mod push;
