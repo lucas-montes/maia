@@ -80,13 +80,13 @@ pub async fn push_receipt_pictures(
             // client, so it must not disclose the server's directory layout.
             let remote = format!("receipt_pictures/{file_name}");
             conn.execute(
-                "INSERT INTO receipts (id, local_path, remote_path, upload_status, parsed, parsed_json, transaction_id, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL) ON CONFLICT(id) DO UPDATE SET local_path=excluded.local_path, remote_path=excluded.remote_path, upload_status=excluded.upload_status, parsed=excluded.parsed, parsed_json=excluded.parsed_json, transaction_id=excluded.transaction_id, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
+                "INSERT INTO receipts (id, local_path, remote_path, upload_status, parsed, parsed_json, transaction_id, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL) ON CONFLICT(id) DO UPDATE SET local_path=excluded.local_path, remote_path=excluded.remote_path, upload_status=excluded.upload_status, parsed=excluded.parsed, parsed_json=excluded.parsed_json, transaction_id=COALESCE(receipts.transaction_id, excluded.transaction_id), created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
                 rusqlite::params![receipt.id, receipt.local_path, remote, receipt.upload_status, if receipt.parsed {1} else {0}, receipt.parsed_json, receipt.transaction_id, receipt.created_at, server_time],
             )
             .unwrap();
         } else {
             conn.execute(
-                "INSERT INTO receipts (id, local_path, remote_path, upload_status, parsed, parsed_json, transaction_id, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL) ON CONFLICT(id) DO UPDATE SET local_path=excluded.local_path, remote_path=excluded.remote_path, upload_status=excluded.upload_status, parsed=excluded.parsed, parsed_json=excluded.parsed_json, transaction_id=excluded.transaction_id, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
+                "INSERT INTO receipts (id, local_path, remote_path, upload_status, parsed, parsed_json, transaction_id, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL) ON CONFLICT(id) DO UPDATE SET local_path=excluded.local_path, remote_path=excluded.remote_path, upload_status=excluded.upload_status, parsed=excluded.parsed, parsed_json=excluded.parsed_json, transaction_id=COALESCE(receipts.transaction_id, excluded.transaction_id), created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
                 rusqlite::params![receipt.id, receipt.local_path, receipt.remote_path, receipt.upload_status, if receipt.parsed {1} else {0}, receipt.parsed_json, receipt.transaction_id, receipt.created_at, server_time],
             )
             .unwrap();
@@ -103,7 +103,7 @@ pub async fn push_receipt_pictures(
         let tx = conn.unchecked_transaction().unwrap();
         for r in payload.receipts {
             tx.execute(
-                "INSERT INTO receipts (id, local_path, remote_path, upload_status, parsed, parsed_json, transaction_id, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL) ON CONFLICT(id) DO UPDATE SET local_path=excluded.local_path, remote_path=excluded.remote_path, upload_status=excluded.upload_status, parsed=excluded.parsed, parsed_json=excluded.parsed_json, transaction_id=excluded.transaction_id, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
+                "INSERT INTO receipts (id, local_path, remote_path, upload_status, parsed, parsed_json, transaction_id, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL) ON CONFLICT(id) DO UPDATE SET local_path=excluded.local_path, remote_path=excluded.remote_path, upload_status=excluded.upload_status, parsed=excluded.parsed, parsed_json=excluded.parsed_json, transaction_id=COALESCE(receipts.transaction_id, excluded.transaction_id), created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
                 rusqlite::params![r.id, r.local_path, r.remote_path, r.upload_status, if r.parsed {1} else {0}, r.parsed_json, r.transaction_id, r.created_at, server_time],
             )
             .unwrap();

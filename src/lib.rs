@@ -1198,6 +1198,37 @@ mod tests {
         handle.abort();
     }
 
+    /// The link between a receipt and its transaction is the server's: a
+    /// phone pushing the receipt again, holding no link, must not clear it.
+    #[tokio::test]
+    async fn a_receipt_push_keeps_the_servers_transaction_link() {
+        let pool = crate::db::init_memory().unwrap();
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let push = |payload: serde_json::Value| {
+            client
+                .post(format!("http://127.0.0.1:{port}/receipt-pictures"))
+                .header("Authorization", "Bearer test-key")
+                .json(&payload)
+                .send()
+        };
+        let receipt = serde_json::json!({"receipts":[{"id":"r1","localPath":"/tmp/a.jpg","uploadStatus":0,"parsed":false,"createdAt":1000}]});
+        assert_eq!(push(receipt.clone()).await.unwrap().status(), 200);
+        pool.get()
+            .unwrap()
+            .execute("UPDATE receipts SET transaction_id='t1' WHERE id='r1'", [])
+            .unwrap();
+
+        assert_eq!(push(receipt).await.unwrap().status(), 200);
+        let link: Option<String> = pool
+            .get()
+            .unwrap()
+            .query_row("SELECT transaction_id FROM receipts WHERE id='r1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(link.as_deref(), Some("t1"));
+        handle.abort();
+    }
+
     #[tokio::test]
     async fn backup_roundtrip() {
         let dir = std::env::temp_dir().join(format!("maia-test-backup-{}", uuid::Uuid::new_v4()));

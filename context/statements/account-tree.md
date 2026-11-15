@@ -4,8 +4,14 @@ Accounts are two levels: a **root** is the institution a set of accounts
 belongs to, and its **leaves** are the accounts themselves. A root's balance
 is the sum of its leaves.
 
-Roots are **server-only**. The phone never sees them and never pushes them:
-the sync surface (`/budget-accounts`) carries leaves and nothing else.
+Roots are **server-only**. The phone never sees them: the sync surface
+(`/budget-accounts`) carries leaves and nothing else. The phone **only pulls**
+that surface, and `/transactions` too. It never pushes an account or a
+transaction, so it cannot make, change or delete one: both come from the
+desktop and the statement imports. Receipts are separate: the phone only sends
+them, and the server keeps them, with their link to a transaction
+(`receipts.transaction_id`). That link is the server's: a receipt push never
+clears it.
 
 ## The tables
 
@@ -51,7 +57,8 @@ The **server** owns the type. The pull sends it down, and a push only applies
 it when the server knows it, so a phone carrying the old vocabulary cannot
 revert the rename:
 
-- the **phone** does not push the type at all — the pull sends it down;
+- the **phone** pushes no account at all, so never a type: the pull sends it
+  down;
 - the **desktop** pushes one, and it lands, because its editor offers only the
   three types the server knows;
 - a push naming anything else (`bank`, `investment`, …) is ignored rather than
@@ -86,9 +93,10 @@ that root's source, so the rule above still holds and the account is simply
 one with no provider number, like a securities leaf. An unfiled leaf loses its
 source with its number.
 
-A leaf with no root is the normal case for an account the phone made — the
-push writes no root — so joining one is what keeps the tree complete rather
-than refusing the one identity the desktop can actually set.
+A leaf with no root is the normal case for an account made through the push,
+which writes no root (the desktop, or an older phone build), so joining one is
+what keeps the tree complete rather than refusing the one identity the desktop
+can actually set.
 
 ## Importing: the user picks the institution
 
