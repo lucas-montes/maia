@@ -1,5 +1,8 @@
 # Receipt matching: receipts ↔ stores, receipts ↔ transactions, lines ↔ products
 
+**Status:** not started; every task is open. The schema is still at v15, so the v16/v17
+migrations this plan needs do not exist yet.
+
 > Server and desktop, plus one small phone task (TM1). It builds on the manual link
 > (`src/receipt_links.rs`, `PUT`/`DELETE /receipt-pictures/:id/transaction`, abeb509) and the
 > manual line match (`POST /ingredient-prices/match`). It **supersedes** the rule in
@@ -7,18 +10,29 @@
 >
 > The decisions of 2026-11-15 come from the user's answers to the first draft:
 > - Automatic matching is fine, as long as everything stays editable.
-> - The phone only photographs and sends, and keeps track of what it sent.
+> - The phone only photographs and sends. (Its "track of what it sent" was dropped in the second
+>   round.)
 > - The reader reads everything on the receipt: quantities, discounts, all of it.
 > - An undo also forgets the learned name → ingredient match.
 > - Stores must tell Lidl Hrvatska and Lidl France apart, and recommend renaming.
 > - An on-demand AI pass can improve the matching.
+>
+> Second round, the same day:
+> - The store's identifiers (OIB, SIRET, VAT number…) go on `stores` itself.
+> - A receipt's page lists everything that receipt created or edited, each item with a link to
+>   it, Edit, Undo and Improve with AI.
+> - **A receipt is not an expense.** It is a thing of its own, never booked, and only optionally
+>   linked to a transaction that came from a statement.
+> - The phone deletes a receipt as soon as the server has it, and keeps no log.
 
 ## Who does what
 
-- **The phone** photographs a receipt, sends it, and keeps a log of what it sent. It creates no
-  transaction, store or price, and it never reads a parse.
+- **The phone** photographs a receipt and sends it. Once the server accepts it, the phone deletes
+  it: the row and the image. It keeps nothing else, creates no transaction, store or price, and
+  never reads a parse.
 - **The server** owns all the logic: it reads the receipt, resolves the store, links the
-  transaction, prices the lines, and books a cash receipt.
+  transaction, and prices the lines. It never makes a transaction from a receipt.
+  Transactions come from statements only.
 - **The desktop** shows the results and edits them. It holds no matching logic beyond ordering
   its own picker when the server can't be reached.
 
@@ -63,7 +77,9 @@ receipt may not print it. The existing names (`merchant`, `date`, `total`, `curr
 |---|---|
 | `merchant` | the legal name |
 | `brand` | `Lidl` |
-| `taxId` | OIB, SIRET, VAT number |
+| `taxId`, `taxIdKind` | OIB, SIRET or SIREN, and which one it is |
+| `vatNumber` | the EU VAT number, when printed |
+| `website` | when printed |
 | `address`, `city`, `postcode`, `country` | ISO 3166, e.g. `HR` |
 | `branch` | a store number when printed |
 
@@ -102,28 +118,49 @@ receipt may not print it. The existing names (`merchant`, `date`, `total`, `curr
 
 ## A. Receipt ↔ store
 
-**A store is a chain in one country, so Lidl Hrvatska and Lidl France are two stores.** The
-`stores` table syncs with the phone, so its extra facts live in server-only tables:
+**A store is a chain in one country, so Lidl Hrvatska and Lidl France are two stores.** What
+identifies a store goes on `stores` itself, as nullable columns:
 
-- `store_details(store_id PK → stores ON DELETE CASCADE, brand, country, tax_id, updated_at)`
-- `store_aliases(alias PK, store_id → stores ON DELETE CASCADE, source, created_at)`, where
-  `alias` is a normalised merchant name or `tax:<taxId>`.
-- `receipts.store_id` and `receipts.store_source`. Both are server-only and never in a push upsert.
+| Column | Holds |
+|---|---|
+| `brand` | `Lidl` |
+| `legal_name` | `LIDL HRVATSKA d.o.o. k.d.` |
+| `country` | ISO 3166, e.g. `HR` |
+| `tax_id` | the number as printed, normalised, with a partial unique index |
+| `tax_id_kind` | `oib`, `siret`, `siren`, `vat`, `other` |
+| `vat_number` | the EU VAT number when it is printed beside the national one |
+| `address`, `city`, `postcode` | the branch on the receipt that set them, kept for display |
+| `website` | |
+| `source` | `manual`, `auto` or `ai`: what last set these facts |
+
+- **Sync.** `push_stores` already names its columns (`id, name, …`), so a phone push leaves these
+  alone. The pull keeps sending `id`/`name` only.
+- **A phone can't undo a rename either.** `push_stores` stops overwriting the `name` of a store that
+  exists; it only inserts new ones. Otherwise a phone that pushes its stores reverts an accepted
+  rename. The phone's own price sheet still works, because it only adds stores.
+- `store_aliases(alias PK, store_id → stores ON DELETE CASCADE, source, receipt_id, created_at)`
+  holds the merchant names a store has been seen under, normalised. The tax id needs no alias; it
+  is a column.
+- `receipts.store_id` and `receipts.store_source` are server-only, and never in a push upsert.
+- **Desktop Stores view:** every column is editable, and the view shows the receipts and the
+  prices each store has.
 
 **Resolving the store**, strongest first:
-1. **Tax id.** An alias `tax:<taxId>` gives that store, `auto`. A tax id is one legal entity, so this
-   is safe.
+1. **Tax id.** A store whose `tax_id` equals the receipt's gives it, `auto`. A tax id is one
+   legal entity, so this is safe. The VAT number counts too.
 2. **Name alias.** It gives the store **unless** the store has a different tax id or country than
    the receipt. In that case it falls through to step 4.
 3. **Brand and country.** Exactly one live store with that brand, and a country equal to the
-   receipt's or unknown, gives it `auto`. The receipt's tax id and name are recorded as aliases.
+   receipt's or unknown, gives it `auto`. The receipt's name is recorded as an alias, and its tax id,
+   legal name and country fill the store's empty columns. A filled column is never overwritten, because a
+   different value is a different store.
 4. **Otherwise no store.** The desktop shows a recommendation (below).
 
 **Recommendations.** They are computed on read and shown on the receipt and the Stores view.
 Accepting one is `manual`.
 - **Rename:** "`lidl` → `Lidl Hrvatska`". This appears when the store's name is only the brand and
-  the receipts show one country. Accepting it renames the store, which syncs, and fills
-  `store_details`.
+  the receipts show one country. Accepting it renames the store, which syncs, and fills its
+  identifier columns from the receipt.
 - **New store:** "This receipt is from Lidl France (FR, SIRET …). Create *Lidl France*?" This
   appears when the brand matches but the country or tax id differs.
 - **Same store:** "`LIDL HRVATSKA` looks like `lidl`. Link it?" This appears for a brand or token
@@ -171,15 +208,14 @@ is deleted.
 - `POST /receipt-pictures/match`, a backfill.
 - `GET /receipt-pictures/:id/transaction-candidates` feeds the picker.
 
-**Cash and drafts. Nobody drafts any more.**
-- The desktop import stops creating a draft expense (`create_receipt_transaction`, called from
-  `views/receipts.ts`).
-- A receipt that stays unmatched gets **"Book as expense"**, an action the server performs:
-  `POST /receipt-pictures/:id/book {accountId}`. It replaces the desktop's
-  `create_receipt_transaction`.
-  - The amount, currency, day and category come from the reading.
-  - It is linked as `manual`.
-  - A `cash` receipt suggests the cash leaf.
+**A receipt is not an expense.** Nothing ever books one.
+- The desktop import stops creating a draft expense. `create_receipt_transaction` and its `api.ts`
+  binding are deleted, and so is the phone's old draft path, which is already gone.
+- A receipt paid in cash, or one whose statement isn't imported yet, simply stays unlinked. That is
+  a normal state, not an error, and the list does not nag about it.
+- **Drafts already made from receipts** (the old desktop and phone flows; 0 of them live today)
+  are left alone. `receipt_links::link` still deletes a receipt's own draft when it relinks it to
+  a statement transaction.
 
 ## C. Receipt line ↔ product (ingredient)
 
@@ -242,6 +278,55 @@ ingredient opens the ingredient form, prefilled.
 The prompt and the schema live in `src/matching/assist.rs`. A test with a stubbed model checks
 that a proposal pointing at an unknown id is dropped.
 
+## E. What a receipt did, and getting to it
+
+Every change that a receipt causes is recorded, so its page can list each one with a link to the
+change, an edit and an undo.
+
+**`receipt_effects`** (v16, server-only). It is append-only, and an undone row is marked rather
+than deleted.
+
+| Column | Holds |
+|---|---|
+| `id` | |
+| `receipt_id` | → `receipts` |
+| `kind` | `store_resolved`, `store_created`, `store_renamed`, `store_filled`, `alias_learned`, `transaction_linked`, `price_recorded`, `product_alias_learned` |
+| `target_table`, `target_id` | the row it touched (the store, the transaction, the `ingredient_prices` row, the alias) |
+| `before_json`, `after_json` | the fields it changed, so a rename can be undone to the old name |
+| `source` | `auto`, `ai`, `manual` |
+| `created_at`, `undone_at` | |
+
+- **Writers.** Each matcher and each accept endpoint writes its effect in the same database
+  transaction as the change. The manual endpoints that act for a receipt write one too: the link,
+  the line match, and the store change.
+- **Reading.** `GET /receipt-pictures/:id/effects` returns them, joined to what they point at
+  (a store's name, a transaction's label, amount and day, an ingredient's name and a price),
+  together with what is still open: an unmatched line, a recommendation, no store, no
+  transaction.
+- **Undo.** `POST /receipt-pictures/:id/effects/:effect/undo` reverses one effect from its
+  `before_json`, and follows the undo rules (rule 3: it records the rejection, and a price undo
+  forgets the alias). It refuses when the target changed after the effect, for instance a store
+  renamed again by hand, and says so. Fixing it then means editing the target.
+
+**The receipt page on the desktop** is laid out as:
+1. **The image and the reading.** "Read again" sits here.
+2. **What this receipt did.** One row per live effect, newest last: what it is, a badge for its
+   source (`auto`/`ai`/`manual`), and three actions:
+   - **Open**, which goes to the store in Stores, the transaction in Transactions, or the
+     ingredient's price history;
+   - **Edit**, which opens the same picker or form inline;
+   - **Undo**.
+
+   Undone effects are folded away under "show undone".
+3. **Still open.** Unmatched lines, store recommendations, and no transaction yet, each with its
+   own action.
+4. **"Improve with AI"**, for the whole receipt, with a per-row variant on an open item or an
+   `auto` effect. Proposals appear inline in sections 2 and 3 (section D).
+
+**Back links.** A store, a transaction and an ingredient price made by a receipt each show "from
+receipt …", which opens that receipt's page. Transactions and stores get it through the effect
+rows. Prices already have it through `receipt_line_matches`.
+
 ## Tasks
 
 ### Stage 0: the reading (no migration)
@@ -251,17 +336,17 @@ that a proposal pointing at an unknown id is dropped.
       quantity, unit and discount, VAT.
 
 ### Phone
-- [ ] TM1 The phone keeps a **sent log**.
-  - Once the server accepts the upload (`202`), the row becomes `sent`: id, the time it was sent,
-    and what the server answered. The image is deleted at that point, and the phone stops polling
-    the parse.
-  - A failed upload stays and is retried.
-  - The receipt list shows what was sent and when.
-  - It replaces the hard delete after the parse (mobile `budget_sync.dart`).
+- [ ] TM1 The phone forgets a receipt once it is sent.
+  - When the server accepts the upload (`202`), the phone hard-deletes the row and the image, with
+    no tombstone, and stops polling the parse. Today it waits for the parse first
+    (`budget_sync.dart`, `uploadAndParse`).
+  - A failed upload stays and is retried, which is the only state the phone keeps.
+  - The phone's copy of the OCR client (`fetchParse`) goes, along with its tests.
 
 ### Stage A: stores (migration v16)
 - [ ] TA1 `src/matching/text.rs`: the normaliser and the purchase-day extractor.
-- [ ] TA2 v16: `store_details`, `store_aliases`, `receipts.store_id` and `store_source`.
+- [ ] TA2 v16: the identifier columns on `stores`, `store_aliases`, `receipts.store_id` and
+      `store_source`. `push_stores` becomes insert-only for the name.
       `matching::stores::resolve` runs after a parse.
 - [ ] TA3 The recommendations (rename, new store, same store), and the endpoints to accept each
       one. `match_receipt_item` takes `receiptId`.
@@ -279,13 +364,11 @@ that a proposal pointing at an unknown id is dropped.
   - a cash receipt;
   - a rejected pair;
   - a receipt on its own draft.
-- [ ] TB3 The triggers, `POST /receipt-pictures/match`, the candidates endpoint, and `POST
-      /receipt-pictures/:id/book`.
+- [ ] TB3 The triggers, `POST /receipt-pictures/match` and the candidates endpoint.
 - [ ] TB4 Desktop:
   - the source badge, with Undo or Change;
   - the server's candidates in the picker;
-  - no more drafts on import;
-  - "Book as expense";
+  - no more drafts on import (`create_receipt_transaction` deleted);
   - "Match all".
 
 ### Stage C: products (migration v17)
@@ -300,6 +383,14 @@ that a proposal pointing at an unknown id is dropped.
       /receipt-pictures/:id/assist`.
 - [ ] TD2 Desktop: "Improve with AI" per receipt and for all unmatched ones. Inline proposals with
       accept and accept all. A new-ingredient proposal opens the prefilled form.
+
+### Stage E: the receipt's page (built alongside A–D)
+- [ ] TE1 `receipt_effects` in v16. Every writer from A, B and C records its effect, and the
+      effects, open items and undo endpoints exist. Stage A starts with this, so every later
+      writer has somewhere to record.
+- [ ] TE2 Desktop: the receipt page laid out as in section E, with Open, Edit and Undo per
+      effect, the open items, and the "from receipt" back links on stores, transactions and
+      ingredient prices.
 
 ### Docs
 - [ ] TDoc: `context/receipts/matching.md`, a pointer from `account-tree.md`, an overview entry,
@@ -316,7 +407,9 @@ that a proposal pointing at an unknown id is dropped.
   it is weighed. Undo removes the price and the alias.
 - "Improve with AI" proposes a store, a transaction and the lines, and nothing changes until a
   proposal is accepted.
-- The phone shows its sent log and never creates anything.
+- A receipt's page lists every store, alias, link and price it caused, and each one opens its
+  target, can be edited, and can be undone. An undo is refused once the target was changed after.
+- The phone deletes a receipt once the server accepts it, and never creates anything.
 - `cargo test`, `vitest` and the mobile tests pass. `nix build .#maia-desktop` builds.
 
 ## Out of scope (later)
