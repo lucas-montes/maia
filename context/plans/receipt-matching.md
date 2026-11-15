@@ -439,8 +439,10 @@ rows. Prices already have it through `receipt_line_matches`.
 - **The desktop's draft-expense command** (`create_receipt_transaction`) and
   the old link commands were removed. The page goes through one
   `matching_request` command, limited to the matching routes.
+- **Checked:**
+  - `nix build .#maia` and `.#maia-desktop` both build;
+  - a copy of the live database migrates from v15 to v17, and its three stores are intact.
 - **Not checked yet:**
   - the desktop at runtime;
-  - the live model with the v2 schema (the stubbed-Gemini tests still pass);
-  - `nix build .#maia-desktop`;
-  - migrating the live database to v17.
+  - the live model with the v2 schema and the assist prompt (only the stubbed-Gemini
+    tests cover them).
