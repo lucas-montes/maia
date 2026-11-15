@@ -1,6 +1,8 @@
 
 # File-based notes & receipts (Tauri)
 
+**Status:** largely implemented — the receipt browser, the thumbnails and the archive/restore shipped. Notes are shown read-only from the DB, and `list_files` / `read_file_bytes` / `write_json` / `open_path` were replaced by domain commands (`list_notes`, `read_note`, `list_receipts`, …).
+
 ## Summary
 
 Add file-based notes and receipt image workflows to the Tauri desktop shell. Notes will be shown as file references (path + attributes) rather than storing full file contents in the UI. Receipts will be read from a user-configured directory, previewed as thumbnails and large images, and optionally sent to an AI parsing service which saves parsed JSON results next to each image.

@@ -1,5 +1,7 @@
 # Finance model: accounts as a tree, trades as movements, statements re-derived
 
+**Status:** completed (T1–T19, not deployed) — statement entry-status derivation (v12), the account tree (v13), trades (v14) and opening positions (v15). Documented in `context/statements/entry-lifecycle.md`, `context/statements/account-tree.md` and `context/statements/trades.md`.
+
 > Server + desktop only; mobile later. Replaces the 2026-11-11 long version of this plan and
 > `statements-reimport-after-discard.md`.
 

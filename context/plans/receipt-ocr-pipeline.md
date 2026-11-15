@@ -1,5 +1,7 @@
 # Receipt image → LLM → JSON → phone
 
+**Status:** completed — the multipart upload, the background Gemini vision job, the parse-status endpoint, image serving, archive/restore and the mobile `HttpRemoteReceiptOcrService` all shipped.
+
 ## Change summary
 
 Wire the existing half-built receipt pipeline end to end, then fix the desktop receipts view.
@@ -10,17 +12,17 @@ Make the server run Gemini vision on the uploaded image as a background job, per
 
 ## Success criteria
 
-- [ ] `POST /receipt-pictures/upload` accepts multipart (`picture` binary + optional `receiptId`) and returns `202 {"id","status":"parsing","server_time"}`.
-- [ ] Server writes `<db_dir>/receipt_pictures/<id><ext>` and a `receipts` row, then runs Gemini vision in a `tokio::spawn` background job that never holds the DB mutex across an `.await`.
-- [ ] `GET /receipt-pictures/:id/parse` returns `pending | parsing | parsed | error` plus the `ParsedReceipt` JSON.
-- [ ] `ParsedReceipt` uses `merchant` / `items` (matching the mobile draft builder) with `#[derive(StructuredOutput)]` schema generation.
-- [ ] `GET /receipt-pictures/:id/picture` serves the image bytes behind the existing Bearer middleware, guarded by `is_safe_id`.
-- [ ] OCR disabled (no `model_api_key`) → both endpoints return `503 {"message":"ocr not configured"}`; everything else keeps working.
-- [ ] Mobile swaps `MockRemoteReceiptOcrService` for `HttpRemoteReceiptOcrService` with no change to `BudgetSyncService`'s orchestration or either screen's structure.
-- [ ] Phone polls until terminal status, with a 90 s overall budget bounded by `apiTimeoutSeconds` per request.
-- [ ] Desktop receipts view renders the v30 columns; `selectReceipt` receives the uuid as a string (no `Number()` coercion).
-- [ ] Desktop archive moves the image to `<archived_dir>/<id>/receipt.<ext>` beside a `receipt.json` sidecar; restore is the exact inverse.
-- [ ] `cargo check --workspace`, `cargo test --workspace`, `pnpm build`, `flutter gen-l10n`, `flutter analyze`, `flutter test` all pass.
+- [x] `POST /receipt-pictures/upload` accepts multipart (`picture` binary + optional `receiptId`) and returns `202 {"id","status":"parsing","server_time"}`.
+- [x] Server writes `<db_dir>/receipt_pictures/<id><ext>` and a `receipts` row, then runs Gemini vision in a `tokio::spawn` background job that never holds the DB mutex across an `.await`.
+- [x] `GET /receipt-pictures/:id/parse` returns `pending | parsing | parsed | error` plus the `ParsedReceipt` JSON.
+- [x] `ParsedReceipt` uses `merchant` / `items` (matching the mobile draft builder) with `#[derive(StructuredOutput)]` schema generation.
+- [x] `GET /receipt-pictures/:id/picture` serves the image bytes behind the existing Bearer middleware, guarded by `is_safe_id`.
+- [x] OCR disabled (no `model_api_key`) → both endpoints return `503 {"message":"ocr not configured"}`; everything else keeps working.
+- [x] Mobile swaps `MockRemoteReceiptOcrService` for `HttpRemoteReceiptOcrService` with no change to `BudgetSyncService`'s orchestration or either screen's structure.
+- [x] Phone polls until terminal status, with a 90 s overall budget bounded by `apiTimeoutSeconds` per request.
+- [x] Desktop receipts view renders the v30 columns; `selectReceipt` receives the uuid as a string (no `Number()` coercion).
+- [x] Desktop archive moves the image to `<archived_dir>/<id>/receipt.<ext>` beside a `receipt.json` sidecar; restore is the exact inverse.
+- [x] `cargo check --workspace`, `cargo test --workspace`, `pnpm build`, `flutter gen-l10n`, `flutter analyze`, `flutter test` all pass.
 
 ## Constraints and non-goals
 

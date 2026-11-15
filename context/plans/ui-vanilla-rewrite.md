@@ -1,5 +1,7 @@
 # Plan: ui-vanilla-rewrite
 
+**Status:** completed — `maia-ui` is vanilla TypeScript with no framework dependency, modular into `shell/` and one file per screen in `views/`.
+
 ## Change summary
 
 Replace the maia-ui frontend monolith (`maia-ui/src/main.ts`, 2,697 lines) with a

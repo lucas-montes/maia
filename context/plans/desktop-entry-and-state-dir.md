@@ -1,5 +1,7 @@
 # Desktop Entry Discovery and First-Boot State Directory
 
+**Status:** partially implemented — T01 landed by another route (`StateDirectory` in `nix/module.nix`), but T02 is open: there is no `.desktop` file anywhere in the repo, no `makeDesktopItem` in `nix/packages.nix` and no `/etc/applications` entry, so rofi still cannot see Maia. The `2775` / group-`maia` permission target was not met either (the directory is `0755`, owned by the user).
+
 ## Change summary
 Two defects found while bringing `services.maia` up on luctop.
 
@@ -42,9 +44,9 @@ fatal rather than warning about it.
 ## Success criteria
 - [ ] `systemctl is-active maia` → active, surviving reboot
 - [ ] `curl http://<lan-ip>:3030/health` → 200
-- [ ] `Maia` appears in rofi and its icon renders
+- [ ] `Maia` appears in rofi and its icon renders — not met: no `.desktop` file is shipped, so rofi cannot see Maia
 - [ ] `/run/current-system/sw/share/applications/maia.desktop` exists; `/etc/applications/maia.desktop` does not
-- [ ] `/var/lib/maia` exists after a switch, with mode `2775` and group `maia`, before the service starts
+- [ ] `/var/lib/maia` exists after a switch, with mode `2775` and group `maia`, before the service starts — not met: the directory is created `0755`, owned by the service user
 - [ ] `lucas` can still read and write `maia.db` and its WAL sidecars
 - [ ] `ExecStartPre` order: `migrate` before the privileged permission fix
 
@@ -58,7 +60,7 @@ session.
 
 ## Task stack
 
-- [ ] T01: Let the service start on a fresh system (status:todo)
+- [x] T01: Let the service start on a fresh system (status:todo)
   - Task ID: T01
   - Goal: Remove the fatal `ReadWritePaths` reference and make `/var/lib/maia` exist at activation.
   - Boundaries (in/out of scope): In — `nix/module.nix`: drop `ReadWritePaths = [ cfg.dataDir ]`; add `systemd.tmpfiles.rules` creating `/var/lib/maia` as `2775 maia maia`; swap the two `ExecStartPre` entries so the sandboxed `migrate` runs before the privileged `chgrp`/`chmod`. Out — the desktop entry (T02), packaging, dotfiles.

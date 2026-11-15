@@ -1,5 +1,7 @@
 # Ingredient Price Tracking — Receipt Matching, Desktop History, Cost-per-Nutrient
 
+**Status:** completed — `source_url` (v10), `src/pricing.rs` (period price-per-100g, price-per-nutrient, meal cost, spend rollup), the desktop receipt line-item list, the price history and comparison views, and the mobile `source_url`. Its rule "matching is always manual" is superseded by `receipt-matching.md`.
+
 ## Change summary
 Close the loop between receipts and ingredient prices, and bring the price-tracking feature mobile
 already has to desktop. On receipt review (desktop), each parsed line item can be matched to an
@@ -15,31 +17,31 @@ existing per-100g nutrition facts. That period price-per-100g also drives a per-
 rollup by day/week/month.
 
 ## Success criteria
-- [ ] Desktop receipt detail view lists every parsed line item (not just a count) with a "match to
+- [x] Desktop receipt detail view lists every parsed line item (not just a count) with a "match to
       ingredient" action; matching inserts an `ingredient_prices` row (ingredient, store, price,
       currency, package_grams, recorded_at = receipt date) and upserts the store by the receipt's
       `merchant` name.
-- [ ] Desktop ingredient detail view shows the price history list (store, price, package size,
+- [x] Desktop ingredient detail view shows the price history list (store, price, package size,
       cost-per-100g/kg, date) and a line chart of cost-per-100g over time — parity with what mobile's
       `_PricesSection` already does, via a Tauri command that actually selects `package_grams` (today's
       doesn't).
-- [ ] `ingredient_prices` gains an optional `source_url` column; settable from both mobile's existing
+- [x] `ingredient_prices` gains an optional `source_url` column; settable from both mobile's existing
       price-entry sheet and the new desktop match flow. Never auto-fetched.
-- [ ] A period-aggregation query computes, per ingredient per chosen period (week/month/year):
+- [x] A period-aggregation query computes, per ingredient per chosen period (week/month/year):
       `total_paid / total_grams_eaten * 100`, where `total_grams_eaten` sums
       `food_ingredients.amount * (meal_foods.amount / batch_weight(food))` across meals in that period,
       and `total_paid` sums matched `ingredient_prices.price` (converted to base currency) for receipts
       dated in that period.
-- [ ] For ingredients with a period price-per-100g available, a price-per-gram figure is derivable for
+- [x] For ingredients with a period price-per-100g available, a price-per-gram figure is derivable for
       protein/carbs/fat/sodium/fiber/sugar (`price_per_100g / nutrient_per_100g`), shown somewhere a
       user can compare ingredients (e.g. a sortable list: cheapest protein source this month).
-- [ ] Each logged meal in the desktop diet log shows an estimated cost, computed by summing
+- [x] Each logged meal in the desktop diet log shows an estimated cost, computed by summing
       `grams_of_ingredient_in_meal * period_price_per_100g / 100` across its ingredients, using the
       most recent period at-or-before the meal's date that has a price for that ingredient (skip
       ingredients with no price data yet — no estimate, not a zero).
-- [ ] A day/week/month aggregate "estimated food spend" rolls up those per-meal costs, next to the
+- [x] A day/week/month aggregate "estimated food spend" rolls up those per-meal costs, next to the
       existing calorie/nutrient graphs (or wherever plan B's visualization work lands it).
-- [ ] `cargo test -p maia` and `flutter analyze`/mobile tests stay green; new Rust unit tests cover the
+- [x] `cargo test -p maia` and `flutter analyze`/mobile tests stay green; new Rust unit tests cover the
       apportionment math (food → ingredient grams) and the period aggregation query on a few synthetic
       rows.
 
@@ -80,12 +82,12 @@ rollup by day/week/month.
 
 ## Task stack (T01..T07)
 
-- [ ] T01: Schema — `source_url` column (status:open)
+- [x] T01: Schema — `source_url` column (status:open)
   - Goal: Guarded `ALTER TABLE ingredient_prices ADD COLUMN source_url TEXT` migration (append-only
     `MIGRATIONS`, bump `LATEST_VERSION`); include in push/pull payloads for `ingredient_prices`.
   - Done when: migration applies cleanly on an existing v-whatever db; `cargo test -p maia` green.
 
-- [ ] T02: Desktop — receipt line-item review + match-to-ingredient (status:open)
+- [x] T02: Desktop — receipt line-item review + match-to-ingredient (status:open)
   - Goal: Tauri command to list a receipt's parsed items; a "match" command that upserts the store by
     merchant name and inserts an `ingredient_prices` row (ingredient id, store id, price, currency,
     package_grams entered in the match dialog, recorded_at = receipt date, source_url optional).
@@ -94,7 +96,7 @@ rollup by day/week/month.
   - Done when: matching a receipt item creates the expected `ingredient_prices` row; re-matching the
     same item on the same day updates it (respects the existing UNIQUE constraint).
 
-- [ ] T03: Desktop — ingredient price history + evolution chart (status:open)
+- [x] T03: Desktop — ingredient price history + evolution chart (status:open)
   - Goal: Fix the existing Tauri command to also select `package_grams`/`source_url`; add a price
     history list (store, price, package size, derived cost-per-100g/kg) and a line chart of
     cost-per-100g over time to the ingredient detail view — the desktop equivalent of mobile's
@@ -102,7 +104,7 @@ rollup by day/week/month.
   - Done when: an ingredient with several price observations across different package sizes renders a
     correct, comparable cost-per-100g trend line.
 
-- [ ] T04: Period price-per-100g aggregation (status:open)
+- [x] T04: Period price-per-100g aggregation (status:open)
   - Goal: A query/function computing, per ingredient and a given period (week/month/year), total grams
     eaten (via the food→ingredient apportionment chain) and total paid (via matched `ingredient_prices`
     in that period, converted to base currency), yielding price-per-100g. Expose via a Tauri command
@@ -111,14 +113,14 @@ rollup by day/week/month.
     expected price-per-100g for a few hand-computed cases, including a food that blends multiple
     ingredients.
 
-- [ ] T05: Price-per-nutrient-gram derivation + comparison view (status:open)
+- [x] T05: Price-per-nutrient-gram derivation + comparison view (status:open)
   - Goal: Derive price-per-gram for protein/carbs/fat/sodium/fiber/sugar from T04's price-per-100g and
     the ingredient's existing per-100g nutrition columns; a desktop view listing ingredients sorted by
     price-per-gram-of-protein (or whichever nutrient is selected) for the chosen period.
   - Done when: the comparison list correctly ranks a handful of ingredients with known prices/nutrition
     by cost-efficiency for a selected nutrient.
 
-- [ ] T06: Per-meal cost estimate + aggregate food-spend rollup (status:open)
+- [x] T06: Per-meal cost estimate + aggregate food-spend rollup (status:open)
   - Goal: For each logged meal, estimate cost by summing `grams_of_ingredient * period_price_per_100g /
     100` across its ingredients (nearest period at-or-before the meal date with a price; skip
     ingredients with none). Show the estimate on the meal in the diet log. Add a day/week/month
@@ -127,7 +129,7 @@ rollup by day/week/month.
     hand-calculation; a meal with a wholly-unpriced ingredient still shows a partial/best-effort
     estimate (or an explicit "incomplete" indicator) rather than silently showing zero.
 
-- [ ] T07: Mobile — expose `source_url` in the existing price-entry sheet (status:open)
+- [x] T07: Mobile — expose `source_url` in the existing price-entry sheet (status:open)
   - Goal: Add an optional URL field to `_PriceSheet` in `ingredient_detail_screen.dart`, wired through
     `IngredientPrice`/push/pull like the rest of the model.
   - Done when: a URL entered on mobile round-trips through sync and is visible on desktop's history

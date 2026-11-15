@@ -1,5 +1,7 @@
 # Maia UI Polish & Fixes
 
+**Status:** partially implemented — the settings form editor, the missing-config guard and the zoom all shipped (the zoom is a CSS custom property; the base size stayed 16px). The datepicker (T01) and the goal dropdown / inline tasks (T04/T05) are moot: the later read-only rewrite removed the task and goal forms entirely.
+
 ## Summary
 
 Fix 4 user-facing issues in the Maia Tauri desktop UI: non-dismissing datepicker popup, missing goal-task linking, settings tab crash on missing config (replace with form editor), and small text (increase font + add zoom).

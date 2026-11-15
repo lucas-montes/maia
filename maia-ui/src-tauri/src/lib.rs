@@ -609,6 +609,22 @@ fn reload_receipt(
     }
 }
 
+/// Asks the server to read a receipt again (`POST /receipt-pictures/:id/parse`).
+/// The reading lands in the database once the model answers; the view polls.
+#[tauri::command]
+async fn reparse_receipt(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<CommandResult<Receipt>, String> {
+    let result = push_ok(
+        &format!("/receipt-pictures/{}/parse", path_segment(&id)),
+        &serde_json::json!({}),
+        serde_json::json!({}),
+    )
+    .await;
+    Ok(reload_receipt(&state, &id, result))
+}
+
 /// Links a receipt to a transaction on the server, which writes both ends and
 /// deletes a draft the receipt is leaving (`maia::receipt_links::link`).
 #[tauri::command]
@@ -4976,6 +4992,7 @@ pub fn run() {
             read_receipt_picture,
             archive_receipt,
             restore_receipt,
+            reparse_receipt,
             link_receipt_transaction,
             unlink_receipt_transaction,
             list_tasks,

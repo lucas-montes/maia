@@ -28,6 +28,7 @@ const PICTURE_SUBDIR: &str = "receipt_pictures";
 /// `receipts.upload_status` codes, mirroring the client's `ReceiptStatus`.
 /// `0 local`, `1 uploading`, `2 uploaded`, `3 error`, `4 parsing`.
 const UPLOAD_STATUS_UPLOADED: i64 = 2;
+const UPLOAD_STATUS_ERROR: i64 = 3;
 const UPLOAD_STATUS_PARSING: i64 = 4;
 
 fn db_dir(state: &AppState) -> PathBuf {
@@ -204,6 +205,76 @@ pub async fn upload_receipt_picture(
         .into_response()
 }
 
+/// `POST /receipt-pictures/:id/parse`
+///
+/// Reads a stored receipt again: an older reading (schema v1) or a bad one.
+/// Same job as the upload's, on the image already on disk, and the same `202`.
+/// Matching runs again once the new reading lands.
+pub async fn reparse_receipt_picture(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if !is_safe_id(&id) {
+        return error_response(StatusCode::BAD_REQUEST, "invalid id").into_response();
+    }
+    let Some(model) = state.ocr.clone() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ocr not configured: set a model api key on the server",
+        )
+        .into_response();
+    };
+    let base = db_dir(&state);
+    let stored = {
+        let conn = state.db.get().unwrap();
+        conn.query_row(
+            "SELECT remote_path, archived_path FROM receipts WHERE id = ?1 AND deleted_at IS NULL",
+            rusqlite::params![id],
+            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .ok()
+    };
+    let Some((remote_path, archived_path)) = stored else {
+        return error_response(StatusCode::NOT_FOUND, format!("receipt {id} not found")).into_response();
+    };
+    let Some(path) = archived_path
+        .or(remote_path)
+        .and_then(|p| resolve_stored_path(&base, &p))
+    else {
+        return error_response(StatusCode::NOT_FOUND, "the receipt has no stored image").into_response();
+    };
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(StatusCode::NOT_FOUND, format!("cannot read the image: {e}"))
+                .into_response()
+        }
+    };
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_else(|| "jpg".to_string());
+    let mime = content_type_for_ext(&ext).to_string();
+    let now = db::server_time_ms();
+    {
+        let conn = state.db.get().unwrap();
+        let _ = conn.execute(
+            "UPDATE receipts SET upload_status = ?1, parse_error = NULL, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![UPLOAD_STATUS_PARSING, now, id],
+        );
+    }
+    let db_pool = state.db.clone();
+    let job_id = id.clone();
+    tokio::spawn(async move {
+        run_ocr(db_pool, model, job_id, bytes, mime).await;
+    });
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "id": id, "status": "parsing", "server_time": now })),
+    )
+        .into_response()
+}
+
 /// Runs the vision parse and records the outcome on the receipt row.
 ///
 /// Always writes a terminal state, so a client polling `/:id/parse` can never
@@ -239,8 +310,11 @@ async fn run_ocr(
         tracing::error!(id = %id, error = %message, "receipt parse failed");
         let conn = db_pool.get().unwrap();
         let _ = conn.execute(
-            "UPDATE receipts SET parsed = 0, parse_error = ?1, updated_at = ?2 WHERE id = ?3",
-            rusqlite::params![message, now, id],
+            // A failed re-read keeps the reading it had: `parsed` only drops when
+            // there is none. The status leaves "parsing" either way, so a poll ends.
+            "UPDATE receipts SET parsed = CASE WHEN parsed_json IS NULL THEN 0 ELSE parsed END,
+                    parse_error = ?1, upload_status = ?4, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![message, now, id, UPLOAD_STATUS_ERROR],
         );
     }
 }

@@ -1,16 +1,18 @@
 # FitFat Sync Server — Standalone Crate + Full OpenAPI
 
+**Status:** completed — the `maia` crate implements the full FitFat OpenAPI as a headless service on `0.0.0.0:3030`.
+
 ## Change summary
 Create a standalone Rust crate `sync-server` (Axum + rusqlite bundled + tokio) that implements the full `~/Projects/fitfat/docs/api/openapi.yaml` contract, then embed it directly in `maia-ui/src-tauri` via Tauri `setup()` on deterministic `0.0.0.0:3030` LAN port. Remove the legacy daemon (`src/main.rs` watcher/socket) and replace it with the new crate as the single local-first backend. The server becomes the sole DB owner for FitFat sync data; both the Tauri frontend and the mobile app talk to it over HTTP. Covers all Pull, Push, Backup, and Media endpoints with Bearer auth, `since` cursors, `server_time`, and `deleted[]` handling.
 
 ## Success criteria
-- [ ] `sync-server` crate builds as workspace member and exposes `start_server(db_path, api_key) -> (port, handle)` usable from Tauri.
-- [ ] `GET /exercises?since`, `GET /ingredients?since`, `GET /fx-rates?base&date&since` return `Pull*Response` with `server_time`, `items`, `deleted` per OpenAPI, filtered by `since` (epoch ms).
-- [ ] `POST /ingredients`, `/workouts`, `/templates`, `/notes`, `/tasks`, `/goals`, `/meals`, `/transactions`, `/budget-accounts`, `/receipt-pictures` (multipart + JSON fallback), `/backup` + `GET /backup/latest` all accept camelCase Drift `toJson` bodies and return `SyncAck`/`204`.
-- [ ] `GET /exercises/{id}.jpg` and `.mp4` serve binaries with Bearer auth, backed by `<documents>/exercise_media/`-style file store.
-- [ ] Bearer `Authorization: Bearer <apiKey>` enforced on every endpoint; `401` returns `Error{message}` per spec.
-- [ ] Tauri app spawns server in `setup()`, discovers random port via `tauri::State`, exposes `get_sync_port` command, kills server on app close. Daemon binary removed from workspace/default run.
-- [ ] `curl` against `http://127.0.0.1:{port}` for each endpoint passes; `cargo test` and `cargo check` pass.
+- [x] `sync-server` crate builds as workspace member and exposes `start_server(db_path, api_key) -> (port, handle)` usable from Tauri.
+- [x] `GET /exercises?since`, `GET /ingredients?since`, `GET /fx-rates?base&date&since` return `Pull*Response` with `server_time`, `items`, `deleted` per OpenAPI, filtered by `since` (epoch ms).
+- [x] `POST /ingredients`, `/workouts`, `/templates`, `/notes`, `/tasks`, `/goals`, `/meals`, `/transactions`, `/budget-accounts`, `/receipt-pictures` (multipart + JSON fallback), `/backup` + `GET /backup/latest` all accept camelCase Drift `toJson` bodies and return `SyncAck`/`204`.
+- [x] `GET /exercises/{id}.jpg` and `.mp4` serve binaries with Bearer auth, backed by `<documents>/exercise_media/`-style file store.
+- [x] Bearer `Authorization: Bearer <apiKey>` enforced on every endpoint; `401` returns `Error{message}` per spec.
+- [x] Tauri app spawns server in `setup()`, discovers random port via `tauri::State`, exposes `get_sync_port` command, kills server on app close. Daemon binary removed from workspace/default run.
+- [x] `curl` against `http://127.0.0.1:{port}` for each endpoint passes; `cargo test` and `cargo check` pass.
 
 ## Constraints and non-goals
 **Constraints:**

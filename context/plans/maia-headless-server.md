@@ -1,5 +1,7 @@
 # Maia Headless Server
 
+**Status:** completed — the `serve` / `migrate` / `status` CLI, `PRAGMA user_version` migrations (now v15) with snapshots, the `services.maia` NixOS module, and `POST /backup` + `GET /backup/latest`.
+
 ## Change summary
 Make `sync-server` deployable as a standalone NixOS service on `luctop`.
 
@@ -8,16 +10,16 @@ Add the missing headless binary — `sync-server` is currently a **lib crate wit
 Target deployment: NixOS system service `maia`, `0.0.0.0:3030`, DB at `/var/lib/maia/maia.db`, media served from the repo checkout.
 
 ## Success criteria
-- [ ] `systemctl is-active maia` → active after `nixos-rebuild switch`; survives logout/reboot; `SIGTERM` drains cleanly
-- [ ] `curl http://<lan-ip>:3030/health` → 200 from the phone on the same Wi-Fi
-- [ ] `GET /media/<exercise-id>.jpg` → 200 (media served from the repo checkout, not `/var/lib`)
-- [ ] `POST /backup` → 200 with a 16MB body; `GET /backup/latest` returns byte-identical output (`cmp`)
-- [ ] Existing `server/maia.db` (39 tables, `user_version=0`) migrates to current version with **no data loss** and **no v1 replay**
-- [ ] Adding a migration = append one `&str` to `MIGRATIONS` + bump `LATEST_VERSION`; nothing else
-- [ ] Nix rollback with a newer DB → service **refuses to start** with an actionable message
-- [ ] `snapshots/maia.v<N>.db` auto-created before each version change, keep 10
-- [ ] Both `maia` and `lucas` can write `/var/lib/maia/maia.db` + `-wal` + `-shm`
-- [ ] `cargo test --workspace`, `cargo check --workspace`, `pnpm build`, `nix build .#sync-server` all green
+- [x] `systemctl is-active maia` → active after `nixos-rebuild switch`; survives logout/reboot; `SIGTERM` drains cleanly
+- [x] `curl http://<lan-ip>:3030/health` → 200 from the phone on the same Wi-Fi
+- [x] `GET /media/<exercise-id>.jpg` → 200 (media served from the repo checkout, not `/var/lib`)
+- [x] `POST /backup` → 200 with a 16MB body; `GET /backup/latest` returns byte-identical output (`cmp`)
+- [x] Existing `server/maia.db` (39 tables, `user_version=0`) migrates to current version with **no data loss** and **no v1 replay**
+- [x] Adding a migration = append one `&str` to `MIGRATIONS` + bump `LATEST_VERSION`; nothing else
+- [x] Nix rollback with a newer DB → service **refuses to start** with an actionable message
+- [x] `snapshots/maia.v<N>.db` auto-created before each version change, keep 10
+- [x] Both `maia` and `lucas` can write `/var/lib/maia/maia.db` + `-wal` + `-shm`
+- [x] `cargo test --workspace`, `cargo check --workspace`, `pnpm build`, `nix build .#sync-server` all green
 
 ## Constraints and non-goals
 
@@ -115,7 +117,7 @@ Each task is one atomic commit.
   - Done when: `nixos-rebuild switch --flake ~/.dotfiles#luctop` starts `maia`; phone reaches `/health` over LAN.
   - Verification notes (commands or checks): rebuild + `systemctl status maia` + `curl http://<lan-ip>:3030/health`
 
-- [ ] T09: Docs sync + validation (repo `server`, plus dotfiles verification) (status:done)
+- [x] T09: Docs sync + validation (repo `server`, plus dotfiles verification) (status:done)
   - Task ID: T09
   - Goal: Bring `context/` in line with reality and run the full validation pass including a rollback rehearsal.
   - Boundaries (in/out of scope): In — `context/overview.md`, `context/plans/sqlite-schema.md` (mark obsolete), `context/plans/fitfat-server-health.md` (correct an inaccurate evidence line), `context-map.md`, `glossary.md` if they name the daemon as the service; full `cargo test --workspace`, `cargo check --workspace`, `pnpm build`, `nix build .#sync-server`; live smoke of `/health`, `/media/<id>`, `POST /backup`; **Nix rollback rehearsal proving the downgrade guard fires**. Out — new features.

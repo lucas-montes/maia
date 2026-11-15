@@ -1,6 +1,8 @@
 ```markdown
 # Tauri Desktop UI Plan (merged)
 
+**Status:** largely implemented — the Tauri app is built, Nix-packaged as `maia-desktop` and installed by `services.maia.desktop.enable`. The generic filesystem command surface (F03), the sidecar-JSON write (F04) and a CSP (F07) were never built, and the settings write path became a per-user overlay instead of editing `maia.json`.
+
 ## Summary
 
 Add a native desktop UI for Maia using the existing Tauri app in `maia-ui` with plain HTML. The plan covers the UI surface, navigation model (tabs), core screens, reusable components, and an explicit file-based workflow for notes and receipt images that integrates with Tauri file APIs and an AI parsing pipeline. The approach is incremental: UI shape → file access → parsing pipeline → packaging/CI.

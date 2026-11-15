@@ -1,5 +1,7 @@
 # Meeting Recording (server-side capture + transcription)
 
+**Status:** not started — there is no `meetings` table, no capture dependency, no transcription and no desktop view.
+
 ## Change summary
 The `maia` service itself captures microphone audio (not the Tauri desktop app, not mobile) — started
 and stopped via a new API the desktop UI calls, since it runs on the same machine as the user and the

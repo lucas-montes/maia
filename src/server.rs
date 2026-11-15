@@ -193,7 +193,7 @@ pub fn create_router(state: AppState) -> Router {
                 // camera produces. Raise it for the upload route only.
                 .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
-        .route("/receipt-pictures/:id/parse", get(crate::handlers::receipt_ocr::get_receipt_parse))
+        .route("/receipt-pictures/:id/parse", get(crate::handlers::receipt_ocr::get_receipt_parse).post(crate::handlers::receipt_ocr::reparse_receipt_picture))
         .route("/receipt-pictures/:id/picture", get(crate::handlers::receipt_ocr::get_receipt_picture))
         .route("/receipt-pictures/:id/archive", post(crate::handlers::archive::archive_receipt))
         .route("/receipt-pictures/:id/restore", post(crate::handlers::archive::restore_receipt))

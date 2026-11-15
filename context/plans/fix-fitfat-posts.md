@@ -1,17 +1,19 @@
 # Fix FitFat POST Calls — Full Verification & Migration
 
+**Status:** completed except the OpenAPI documentation — the 12 POSTs, the missing pulls, the v30 nuke and UUID v7 all shipped, but `src/openapi.rs` has empty `paths()` / `components()` and there is no `#[utoipa::path]` anywhere, so `/docs` serves an empty document (T06 open).
+
 ## Change summary
 Align `maia` `sync-server` with FitFat mobile `lib/src/sync/data_push_service.dart` + `docs/api/openapi.yaml` (12 POSTs). Fix `uuid v7`, unify `maia.db` to FitFat Drift v30 (38 tables, TEXT PK, epoch ms, JSON arrays, composite PKs), fix camelCase `TasksPush/NotesPush/...` + `deleted[]` → `deleted_at`, fix `receipt-pictures` `picturePath→localPath` multipart bug + add `note_audio` handling, add missing `GET` pulls for 6 push-only resources, generate OpenAPI via `utoipa`/`utoipa-axum` at `/api-docs/openapi.json` + `/docs`, delete legacy INTEGER `notes/tasks/goals/receipts/urls` schema, and add `gst-plugins-bad` for WebKit WebVTT.
 
 ## Success criteria
-- [ ] `maia.db` is single v30 schema (no `INTEGER AUTOINCREMENT` legacy tables); `sqlite3 maia.db ".schema"` matches `fitfat/lib/src/database/tables.dart` v30; phone `POST /tasks` appears in desktop `list_tasks` (same TEXT PK table).
-- [ ] `uuid = {v4,v7,serde}` + `Uuid::now_v7()` everywhere (`create_store`, `create_fx_rate`, `seed`, `sync-server`); `cargo check` green.
-- [ ] All 12 FitFat POSTs verified: `POST /ingredients` (flat `IngredientContribution`), `/workouts` (`workouts+workoutExercises+exerciseSets`), `/templates` (`workoutTemplates+...`), `/notes` (`notes+noteTags+noteAudio` + multipart per-row), `/tasks` (`tasks+taskTags`), `/goals` (`goals+goalProgressEntries+goalTags`), `/meals` (`meals+mealIngredients`), `/transactions` (`transactions`), `/budget-accounts` (`accounts`), `/receipt-pictures` (multipart `receipt+picture` else `{receipts:[]}`), `/backup` (raw bytes), plus `note-audio` via `/notes` multipart — all accept FitFat `toJson()` camelCase and return `200 {server_time}` or `204`.
-- [ ] `deleted[]` handled on every POST (set `deleted_at=server_time_ms()` for ids in `deleted`), and every `GET ?since` returns `deleted: string[]` via `deleted_at > since`.
-- [ ] Missing pulls added: `GET /templates|/notes|/tasks|/goals|/transactions|/budget-accounts|/receipt-pictures|/body-metrics|/experiments|/tags` with `?since` + `deleted`.
-- [ ] `utoipa` OpenAPI generated for all endpoints, served at `/api-docs/openapi.json` + Swagger UI at `/docs`, `curl /docs` 200, `curl /api-docs/openapi.json | jq .paths | length` >=12, used by FitFat `SettingsState` endpoint overrides.
-- [ ] `cargo test -p sync-server` 17+ pass, `cargo check --workspace` green, `pnpm build` green, `curl -H "Authorization: Bearer $KEY" http://127.0.0.1:3030/tasks?since=0` returns phone tasks, `curl -H "Authorization: Bearer $KEY" -X POST http://127.0.0.1:3030/receipt-pictures -F receipt='{"id":"r1",...}' -F picture=@a.jpg` 200.
-- [ ] WebKit warning gone: `flake.nix` includes `gst_all_1.gst-plugins-bad`, `nix develop` has `GST_PLUGIN_PATH`.
+- [x] `maia.db` is single v30 schema (no `INTEGER AUTOINCREMENT` legacy tables); `sqlite3 maia.db ".schema"` matches `fitfat/lib/src/database/tables.dart` v30; phone `POST /tasks` appears in desktop `list_tasks` (same TEXT PK table).
+- [x] `uuid = {v4,v7,serde}` + `Uuid::now_v7()` everywhere (`create_store`, `create_fx_rate`, `seed`, `sync-server`); `cargo check` green.
+- [x] All 12 FitFat POSTs verified: `POST /ingredients` (flat `IngredientContribution`), `/workouts` (`workouts+workoutExercises+exerciseSets`), `/templates` (`workoutTemplates+...`), `/notes` (`notes+noteTags+noteAudio` + multipart per-row), `/tasks` (`tasks+taskTags`), `/goals` (`goals+goalProgressEntries+goalTags`), `/meals` (`meals+mealIngredients`), `/transactions` (`transactions`), `/budget-accounts` (`accounts`), `/receipt-pictures` (multipart `receipt+picture` else `{receipts:[]}`), `/backup` (raw bytes), plus `note-audio` via `/notes` multipart — all accept FitFat `toJson()` camelCase and return `200 {server_time}` or `204`.
+- [x] `deleted[]` handled on every POST (set `deleted_at=server_time_ms()` for ids in `deleted`), and every `GET ?since` returns `deleted: string[]` via `deleted_at > since`.
+- [x] Missing pulls added: `GET /templates|/notes|/tasks|/goals|/transactions|/budget-accounts|/receipt-pictures|/body-metrics|/experiments|/tags` with `?since` + `deleted`.
+- [ ] `utoipa` OpenAPI generated for all endpoints, served at `/api-docs/openapi.json` + Swagger UI at `/docs`, `curl /docs` 200, `curl /api-docs/openapi.json | jq .paths | length` >=12, used by FitFat `SettingsState` endpoint overrides. — not met: `src/openapi.rs` has empty `paths()` / `components()` and there is no `#[utoipa::path]` anywhere, so the generated document has zero paths
+- [x] `cargo test -p sync-server` 17+ pass, `cargo check --workspace` green, `pnpm build` green, `curl -H "Authorization: Bearer $KEY" http://127.0.0.1:3030/tasks?since=0` returns phone tasks, `curl -H "Authorization: Bearer $KEY" -X POST http://127.0.0.1:3030/receipt-pictures -F receipt='{"id":"r1",...}' -F picture=@a.jpg` 200.
+- [x] WebKit warning gone: `flake.nix` includes `gst_all_1.gst-plugins-bad`, `nix develop` has `GST_PLUGIN_PATH`.
 
 ## Constraints and non-goals
 **Constraints:**
@@ -65,7 +67,7 @@ Align `maia` `sync-server` with FitFat mobile `lib/src/sync/data_push_service.da
   - Done when: After phone `POST /tasks`, `invoke("list_tasks")` returns same `id` with `taskStatus`/`carryOver`; `list_notes` returns `body` not `path`; no `INTEGER` queries remain.
   - Verification notes (commands or checks): `cargo check -p maia-ui`; `pnpm build`; manual `POST /tasks` via `curl` then `sqlite3 maia.db "SELECT id FROM tasks"` and Tauri `list_tasks` shows it.
 
-- [ ] T06: Utoipa OpenAPI for all endpoints (status:todo)
+- [ ] T06: Utoipa OpenAPI for all endpoints (status:todo) — not met: `src/openapi.rs` has empty `paths()` / `components()` and there is no `#[utoipa::path]` anywhere, so `/docs` serves a document with zero paths
   - Task ID: T06
   - Goal: Generate OpenAPI via `utoipa` for all 12 POST + 10+ GET + `/health` + `/backup` + `/media`, serve Swagger at `/docs`.
   - Boundaries (in/out of scope): In - `sync-server/Cargo.toml` `utoipa 4` + `utoipa-axum 0.1` + `utoipa-swagger-ui 7`, `#[derive(ToSchema)]` on all DTOs, `#[utoipa::path(post, path="/tasks", ...)]` on handlers, `OpenApi` struct with `bearerAuth`, `server.rs` mount `/api-docs/openapi.json` + `/docs`, `fitfat` `SettingsState` endpoint overrides doc. Out - DB (T01), POST logic (T02).

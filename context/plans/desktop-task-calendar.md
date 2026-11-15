@@ -1,5 +1,7 @@
 # Desktop Task Calendar + Upcoming Digest
 
+**Status:** completed — `maia-ui/src/views/calendar.ts` (month grid, week/day drill-down, up-next panel), the recurrence port in `maia-ui/src/lib/recurrence.ts` with its tests, and the sidebar entry.
+
 ## Change summary
 A new read-only month-grid calendar view in the desktop app — the existing `todos.ts` is a flat list
 with no date-grid visualization at all. Click a day to drill into week/day detail. Recurring tasks
@@ -11,17 +13,17 @@ query the Waybar `/agenda` endpoint uses, once that plan lands — or its own eq
 first).
 
 ## Success criteria
-- [ ] A new desktop sidebar entry/view: month grid, click a day to see a week or day drill-down with
+- [x] A new desktop sidebar entry/view: month grid, click a day to see a week or day drill-down with
       that day's tasks in detail.
-- [ ] Recurring tasks are expanded client-side for the visible date range (port of mobile's
+- [x] Recurring tasks are expanded client-side for the visible date range (port of mobile's
       `PlannerRecurrence.isOccurrenceOn`/`occurrenceIndex` logic to TypeScript — same
       daily/weekly/interval/monthly rules, same `excludedDates` skip behavior), not just their anchor
       row.
-- [ ] The calendar is read-only: no create/edit from calendar cells. Editing a task still goes through
+- [x] The calendar is read-only: no create/edit from calendar cells. Editing a task still goes through
       the existing task list/form.
-- [ ] An "up next" panel within the calendar view shows the next upcoming time-blocked task (by
+- [x] An "up next" panel within the calendar view shows the next upcoming time-blocked task (by
       `start_time_minutes`, nearest in the future from now).
-- [ ] `npx tsc --noEmit`/`vite build` clean; a TS unit test or two covers the recurrence-expansion port
+- [x] `npx tsc --noEmit`/`vite build` clean; a TS unit test or two covers the recurrence-expansion port
       against the same cases mobile's `PlannerRecurrence` already handles (daily, weekly-by-weekday,
       interval-every-N-days, monthly-by-day-of-month, an excluded date, a `count`/`endDate` bound).
 
@@ -50,26 +52,26 @@ first).
 
 ## Task stack (T01..T04)
 
-- [ ] T01: Port recurrence expansion to TypeScript (status:open)
+- [x] T01: Port recurrence expansion to TypeScript (status:open)
   - Goal: A `expandRecurrence(task, rangeStart, rangeEnd)` function mirroring
     `PlannerRecurrence`'s daily/weekly/interval/monthly logic and `excludedDates`/`count`/`endDate`
     bounds, producing concrete occurrence dates within a range.
   - Done when: unit tests covering each recurrence type (plus an excluded date and a bounded count)
     match hand-computed expected occurrence lists.
 
-- [ ] T02: Month grid + day/week drill-down (status:open)
+- [x] T02: Month grid + day/week drill-down (status:open)
   - Goal: New view: month grid pulling tasks for the visible range (anchor tasks + expanded
     occurrences), click-through to a week or day view listing that day's/week's tasks in detail.
   - Done when: a recurring weekly task shows up on every matching weekday across the visible month; a
     one-off task shows exactly once on its due date.
 
-- [ ] T03: Up-next panel (status:open)
+- [x] T03: Up-next panel (status:open)
   - Goal: Query (or reuse the Waybar plan's `/agenda` endpoint if it exists by the time this is built)
     for the nearest upcoming time-blocked task; render it in a small panel within the calendar view.
   - Done when: the panel shows the correct next task given several candidates at different future
     times, and shows a sensible empty state when nothing is scheduled.
 
-- [ ] T04: Sidebar wiring + navigation (status:open)
+- [x] T04: Sidebar wiring + navigation (status:open)
   - Goal: New sidebar entry, routing for month/week/day views.
   - Done when: navigating in and switching grid granularity works without losing the selected date.
 

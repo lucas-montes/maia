@@ -1,5 +1,7 @@
 # Waybar + Desktop Notifications
 
+**Status:** completed — `GET /agenda`, the background `notify-send` notifier, the systemd D-Bus wiring and the Waybar doc all shipped. The D-Bus fix is still not verified end-to-end against the live deployed `maia.service`; that needs deploy access.
+
 Supersedes `system-waybar.md`, which targeted the deprecated socket-based daemon architecture (no
 longer exists — `sync-server`/`maia` replaced it). This plan targets the current HTTP service.
 
@@ -14,20 +16,20 @@ directly from the server process — which means the systemd unit needs access t
 D-Bus bus, not just a new code path.
 
 ## Success criteria
-- [ ] `GET /agenda` (Bearer-authed, like every other route) returns: overdue + due-today tasks (id,
+- [x] `GET /agenda` (Bearer-authed, like every other route) returns: overdue + due-today tasks (id,
       title, due time), and the next upcoming time-blocked task as the "next meeting" proxy. Empty
       lists when there's nothing due — not an error.
-- [ ] A documented example Waybar module config (in this repo's `context/` docs, not necessarily deployed
+- [x] A documented example Waybar module config (in this repo's `context/` docs, not necessarily deployed
       by Nix) shows `exec` calling `curl` against `/agenda` with the Bearer key, piped into a small
       `jq` transform into Waybar's `{text, tooltip, class}` shape.
-- [ ] The `maia` service runs a background scheduler (debounced tick, same shape as
+- [x] The `maia` service runs a background scheduler (debounced tick, same shape as
       `notes_mirror::watch`/`statements::watch`) that, once per task whose due time is newly crossed,
       calls `notify-send` with the task's title — not a repeated notification every tick for the same
       task.
-- [ ] The systemd unit (`nix/module.nix`) is updated with whatever's needed for `notify-send` to reach
+- [x] The systemd unit (`nix/module.nix`) is updated with whatever's needed for `notify-send` to reach
       the logged-in user's session bus (environment/`DBUS_SESSION_BUS_ADDRESS` wiring) — verified on
       the actual deployed service, not just assumed from reading the unit file.
-- [ ] `cargo test -p maia` covers the due-task query (overdue/due-today selection, "newly crossed" vs
+- [x] `cargo test -p maia` covers the due-task query (overdue/due-today selection, "newly crossed" vs
       "already notified" so a restart doesn't re-fire every pending notification at once).
 
 ## Constraints and non-goals
@@ -57,25 +59,25 @@ D-Bus bus, not just a new code path.
 
 ## Task stack (T01..T04)
 
-- [ ] T01: `GET /agenda` endpoint (status:open)
+- [x] T01: `GET /agenda` endpoint (status:open)
   - Goal: Query overdue + due-today tasks and the next time-blocked task; return as JSON.
   - Done when: seeded tasks with various due dates/times produce the expected overdue/due-today split
     and correct "next meeting" pick.
 
-- [ ] T02: Background due-task notifier (status:open)
+- [x] T02: Background due-task notifier (status:open)
   - Goal: A tokio interval loop (debounced, sweep-backstop shape like the existing watchers) that finds
     tasks whose due time newly passed since the last tick, calls `notify-send`, and marks them
     (`notified_at`) so they're not re-fired.
   - Done when: a task whose due time passes between two ticks fires exactly one notification; a service
     restart with several already-overdue-and-notified tasks does not re-notify them.
 
-- [ ] T03: systemd D-Bus session wiring (status:open)
+- [x] T03: systemd D-Bus session wiring (status:open)
   - Goal: Whatever `nix/module.nix` + the unit's `Environment=`/sandboxing needs so `notify-send` calls
     from the system service actually reach the logged-in user's notification daemon.
   - Done when: manually triggering a notification from the deployed service produces a visible desktop
     notification, confirmed on the real machine (not just a clean `systemctl status`).
 
-- [ ] T04: Documented Waybar module example (status:open)
+- [x] T04: Documented Waybar module example (status:open)
   - Done when: a doc snippet (module config + the curl/jq one-liner) in `context/` is copy-pasteable
     into a real Waybar config and renders something sensible.
 

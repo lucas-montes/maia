@@ -1,5 +1,7 @@
 # Statements: one account per file, cross-file account matching, an honest import preview, and a user-owned intake folder
 
+**Status:** completed except one manual step — the preview / import / delete / file endpoints, the account tree, `Uuid::now_v7()` account ids and the `staged` / `discarded` lifecycle all shipped. The last item is confirming on the deployed box that the mislabelled `parsed/firstrade/fristrade.csv` relocates on first boot.
+
 ## Change summary
 Dropping one Firstrade CSV made the review screen offer to create **34 accounts**; two Trading 212
 exports offered **20**. In both cases the correct answer is **one**. The cause is that the brokerage

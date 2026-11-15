@@ -1,5 +1,7 @@
 # Plan: sync-ui-bugfixes
 
+**Status:** completed — all eight acceptance criteria shipped: notes opened by TEXT uuid, `done` / `taskStatus` filtering, the clickable workout detail, labeled set columns, `POST /tags` upsert, nested `GET /templates`, and the mobile tag / store / food pushes.
+
 ## Change summary
 
 Fix the batch of runtime bugs reported after the vanilla-UI rewrite landed, across all three surfaces: the Tauri desktop app (`maia-ui`), the sync server (`sync-server`), and the Flutter mobile app (`../mobile`). The desktop gets correct note reads (TEXT uuid ids, not i64), correct task filtering (the view reads a `completed_at` field the backend never returns, so every task renders as done and the Active filter shows nothing), clickable workouts with a read-only detail section backed by a new `get_workout` command, and labeled template set columns (the unlabeled trailing inputs are `durationMinutes`/`distanceMeters` for cardio sets). The server gains `POST /tags` so real tag names can reach it — today the only path is a fallback inside task/note/goal pushes that names tags by their uuid — and `GET /templates` starts returning exercises + sets so phones that reinstall recover template sets and rest times. The mobile app gets the missing pushes wired into `DataPushService`: tags entity rows, stores rows (real names instead of the server's `name = store_id` fallback), and a bulk foods push (`pushFoods` exists in `sync_service.dart` but has zero callers, which is why recipes never arrive).
@@ -8,21 +10,21 @@ This extends existing behavior; it does not replace or revert the vanilla-UI rew
 
 ## Acceptance criteria
 
-- [ ] AC1: Clicking a note in the Notes view opens it (no "invalid type: null, expected i64" error), and the clicked row stays highlighted.
+- [x] AC1: Clicking a note in the Notes view opens it (no "invalid type: null, expected i64" error), and the clicked row stays highlighted.
   - Validate: manual — run `maia-desktop`, click a note, content renders; `cargo test -p maia-ui --lib` passes (contract test still sees `invoke<unknown>` generics).
-- [ ] AC2: In the Todos view, tasks with `done=1`/`taskStatus=1` appear under Completed and the rest under Active; the phantom `priority` chip is gone.
+- [x] AC2: In the Todos view, tasks with `done=1`/`taskStatus=1` appear under Completed and the rest under Active; the phantom `priority` chip is gone.
   - Validate: manual — filter Active shows only not-done tasks; `cargo test -p maia-ui --lib` passes.
-- [ ] AC3: Clicking a workout row shows its exercises and sets (including rest seconds) in a read-only detail section.
+- [x] AC3: Clicking a workout row shows its exercises and sets (including rest seconds) in a read-only detail section.
   - Validate: manual — click a workout, detail renders; `cargo test -p maia-ui --lib` passes.
-- [ ] AC4: Template set rows have a labeled header (`Set | Reps | kg | Rest s | Min | m`) and the duration/distance inputs are hidden for sets that carry no cardio data.
+- [x] AC4: Template set rows have a labeled header (`Set | Reps | kg | Rest s | Min | m`) and the duration/distance inputs are hidden for sets that carry no cardio data.
   - Validate: manual — open a template with strength sets (no Min/m inputs) and one with cardio sets; `pnpm build` passes.
-- [ ] AC5: `POST /tags` upserts `tags.id → name/color`; after a mobile tags push, the server's `tags` rows carry real names instead of uuids.
+- [x] AC5: `POST /tags` upserts `tags.id → name/color`; after a mobile tags push, the server's `tags` rows carry real names instead of uuids.
   - Validate: `cargo test -p sync-server` (new test: push tags, assert name != id); manual — push from phone, `sqlite3 maia.db "SELECT id, name FROM tags LIMIT 5"`.
-- [ ] AC6: `GET /templates?since` returns each template's exercises and sets (with `restSeconds`), matching what `POST /templates` accepts.
+- [x] AC6: `GET /templates?since` returns each template's exercises and sets (with `restSeconds`), matching what `POST /templates` accepts.
   - Validate: `cargo test -p sync-server` (extend templates pull test to assert sets present).
-- [ ] AC7: The mobile sync hub can push tags and stores, and a bulk foods push is reachable; after a full push, server `stores` rows have real names and `foods` rows exist.
+- [x] AC7: The mobile sync hub can push tags and stores, and a bulk foods push is reachable; after a full push, server `stores` rows have real names and `foods` rows exist.
   - Validate: `flutter analyze` + `flutter test` in `../mobile`; manual — run push from phone, check server DB.
-- [ ] AC8: Rest-time data path confirmed: a read-only SQL count of NULL `rest_seconds` in `exercise_sets`/`template_exercise_sets` on `maia.db` documents whether missing rest times are legacy rows or a live bug.
+- [x] AC8: Rest-time data path confirmed: a read-only SQL count of NULL `rest_seconds` in `exercise_sets`/`template_exercise_sets` on `maia.db` documents whether missing rest times are legacy rows or a live bug.
   - Validate: inspection — run the count query, record the numbers in the task evidence.
 
 ### Full validation

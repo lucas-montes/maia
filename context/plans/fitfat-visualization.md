@@ -1,14 +1,16 @@
 # FitFat Visualization — HTTP-leveraged, Per-Chart Filters, Settings QR with Auth
 
+**Status:** implemented in substance, reshaped since — the FitFat sidebar tab and the Settings QR canvas no longer exist; the charts live in `views/insights.ts` and `views/bodyMetrics.ts`, and the pairing QR moved to the Sync view. A distinct "workouts per week" count chart is still missing.
+
 ## Change summary
 Add read + visualize for FitFat synced data in `maia-ui` by reusing `sync-server` (`0.0.0.0:3030` deterministic) as source of truth. Extend `sync-server` with `GET` read endpoints for pushed entities (`/workouts`, `/meals`, `/body-metrics`, `/tasks`, `/goals`, `/transactions`) returning `{server_time, items, deleted}` with `?since` filtering (reuse `updated_at`/`deleted_at` + Bearer auth). Frontend adds `ViewId="fitfat"` with per-chart `since`/`date` filters, fetches via `fetch(http://{get_sync_url}/... Authorization: Bearer {get_sync_api_key})` (no duplicate Tauri DB SELECTs), renders with `Chart.js` in dark Tailwind theme. Settings exposes `sync_api_key` + QR encoding `{"url":"http://<lan-ip>:3030","apiKey":"<token>"}` for mobile pairing.
 
 ## Success criteria
-- [ ] `GET /workouts?since`, `/meals?since`, `/body-metrics?since` (and optionally `/tasks`, `/goals`, `/transactions`) return `{server_time, items, deleted}` via `0.0.0.0:3030` with Bearer, `since` filtering, `cargo test -p sync-server` green
-- [ ] New sidebar tab `FitFat` (`📊`) navigable via `setView('fitfat')`, `loadFitFat()` fetches via HTTP using `invoke('get_sync_url')`/`invoke('get_sync_api_key')` (no direct `fitfat_sync.db` Tauri SELECTs)
+- [x] `GET /workouts?since`, `/meals?since`, `/body-metrics?since` (and optionally `/tasks`, `/goals`, `/transactions`) return `{server_time, items, deleted}` via `0.0.0.0:3030` with Bearer, `since` filtering, `cargo test -p sync-server` green
+- [ ] New sidebar tab `FitFat` (`📊`) navigable via `setView('fitfat')`, `loadFitFat()` fetches via HTTP using `invoke('get_sync_url')`/`invoke('get_sync_api_key')` (no direct `fitfat_sync.db` Tauri SELECTs) — superseded: the tab was replaced by the Insights view and the Sync view
 - [ ] At least 4 charts render real data: workouts/week (bar), volume/PR per exercise (line), weight trend (line), meal calories stacked macros (area/bar) — each with its own `since`/`date` picker
-- [ ] Settings shows `sync_api_key` read-only + QR canvas for `{"url":"http://<lan-ip>:3030","apiKey":"<token>"}` + Copy JSON/URL buttons; QR decodes to valid Bearer
-- [ ] `cargo check -p sync-server -p maia-ui` + `cargo test -p sync-server` + `npm run build` green
+- [ ] Settings shows `sync_api_key` read-only + QR canvas for `{"url":"http://<lan-ip>:3030","apiKey":"<token>"}` + Copy JSON/URL buttons; QR decodes to valid Bearer — moved: the pairing QR now lives in the Sync view, as an `<img>` rather than a `<canvas>`
+- [x] `cargo check -p sync-server -p maia-ui` + `cargo test -p sync-server` + `npm run build` green
 
 ## Constraints and non-goals
 **Constraints:**

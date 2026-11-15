@@ -1,5 +1,7 @@
 # Day-to-Day Recording (speculative — "very later on")
 
+**Status:** deferred — an idea-capture, not an implementation plan. It has no task stack by design; the open questions (cadence, retention, privacy, purpose) are the point of the file.
+
 This is the roadmap's explicitly deferred item. Written as an idea-capture plan rather than a full
 implementation breakdown — the point is to not lose the idea and to note what would actually need
 deciding before this becomes buildable, not to pretend false precision on something years out.

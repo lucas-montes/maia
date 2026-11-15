@@ -1,13 +1,15 @@
 # FitFat LAN IP — QR Shows Correct LAN IP (not 0.0.0.0/127.0.0.1)
 
+**Status:** completed — `get_lan_ip` / `get_sync_lan_url` use the UDP default-route trick, so the QR carries the LAN address and local fetches use loopback. Note that the Docker `172.17/16` exclusion is implicit (the default route is the physical NIC), not an explicit filter.
+
 ## Change summary
 Server keeps deterministic bind `0.0.0.0:3030` (all interfaces), but QR + Settings must show LAN-reachable IP the laptop actually uses (default-route IP like `192.168.1.23` or `10.x.x.x`), not `0.0.0.0` (unroutable) nor `127.0.0.1` (loopback-only). Use UDP trick (`UdpSocket::bind(0.0.0.0:0) → connect(8.8.8.8:80) → local_addr`) to get default-route IP, with fallback chain. Frontend `fetch` stays `127.0.0.1:3030` for local desktop, QR uses `http://<lan-ip>:3030` for mobile pairing.
 
 ## Success criteria
-- [ ] `invoke('get_lan_ip')` returns `192.168.x.x`/`10.x.x.x` on LAN, not `172.17.0.1` (Docker) nor `127.0.0.1`, offline fallback `127.0.0.1`
-- [ ] `invoke('get_sync_lan_url')` returns `http://<lan-ip>:3030`, FitFat QR `{"url":"http://192.168.x.x:3030","apiKey":...}` is LAN-reachable, `fetch` to `127.0.0.1:3030` still works locally
-- [ ] Mobile `curl -H "Bearer $KEY" http://<lan-ip>:3030/workouts?since=0` succeeds on same LAN
-- [ ] `cargo check -p maia-ui -p sync-server` + `cargo test -p sync-server` + `pnpm build` green
+- [x] `invoke('get_lan_ip')` returns `192.168.x.x`/`10.x.x.x` on LAN, not `172.17.0.1` (Docker) nor `127.0.0.1`, offline fallback `127.0.0.1`
+- [x] `invoke('get_sync_lan_url')` returns `http://<lan-ip>:3030`, FitFat QR `{"url":"http://192.168.x.x:3030","apiKey":...}` is LAN-reachable, `fetch` to `127.0.0.1:3030` still works locally
+- [x] Mobile `curl -H "Bearer $KEY" http://<lan-ip>:3030/workouts?since=0` succeeds on same LAN
+- [x] `cargo check -p maia-ui -p sync-server` + `cargo test -p sync-server` + `pnpm build` green
 
 ## Constraints and non-goals
 **Constraints:**

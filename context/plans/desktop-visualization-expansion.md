@@ -1,5 +1,7 @@
 # Desktop Visualization Expansion — Insights View
 
+**Status:** completed — `maia-ui/src/views/insights.ts` with six charts on independent period toggles, backed by the `exercise_progression` / `exercise_volume` / `nutrition_calories` / `nutrition_macros` / `finance_account_balance` Tauri commands.
+
 ## Change summary
 A new "Insights" screen in the desktop app, separate from the existing list screens, bringing
 together the charts the roadmap asks for across three domains: exercise (per-exercise weight/rep
@@ -10,25 +12,25 @@ and already has one working chart (`bodyMetrics.ts`) to follow as the pattern �
 function that updates `chart.data` in place rather than recreating the `Chart` instance.
 
 ## Success criteria
-- [ ] A new `Insights` view/route in the desktop sidebar, independent of `meals.ts`/`workouts.ts`/
+- [x] A new `Insights` view/route in the desktop sidebar, independent of `meals.ts`/`workouts.ts`/
       `exercises.ts`/`transactions.ts`/`accounts.ts`, which keep their existing list-only UIs unchanged.
-- [ ] Exercise section: an exercise picker rendering a weight/reps-over-time line chart for that
+- [x] Exercise section: an exercise picker rendering a weight/reps-over-time line chart for that
       exercise (pulling from `exercise_sets` joined through `workout_exercises`/`workouts`, using
       `actual_weight_kg`/`actual_reps` when present, falling back to planned `weight_kg`/`reps`), plus
       a separate aggregate volume chart (Σ `weight_kg * reps` per workout, bucketed by week/month) with
       its own period toggle.
-  - [ ] Nutrition section: a calories-over-time chart and a macros-over-time chart (protein/carbs/fat as
+  - [x] Nutrition section: a calories-over-time chart and a macros-over-time chart (protein/carbs/fat as
       separate series), each independently toggleable between day/week/month, built from `meal_foods`
       joined to `meals.eaten_at`.
-- [ ] Finance section: a spending-by-category chart (grouped/stacked bars, one group per period) and an
+- [x] Finance section: a spending-by-category chart (grouped/stacked bars, one group per period) and an
       account-balance-over-time line chart (opening balance + running sum of that account's
       transactions), each with its own period toggle.
-- [ ] Every chart's period toggle is independent — switching one chart's granularity does not affect
+- [x] Every chart's period toggle is independent — switching one chart's granularity does not affect
       any other chart on the page.
-- [ ] All data comes from direct SQL in new Tauri commands (matching the existing pattern — e.g. how
+- [x] All data comes from direct SQL in new Tauri commands (matching the existing pattern — e.g. how
       `ingredient_prices`/`body_metrics` are queried directly from `maia-ui/src-tauri/src/lib.rs`
       rather than through the HTTP sync API), since the desktop app reads its local `maia.db` directly.
-- [ ] `cargo check -p maia-ui` clean; manual walkthrough of each chart against seeded data confirms
+- [x] `cargo check -p maia-ui` clean; manual walkthrough of each chart against seeded data confirms
       correct bucketing (a day/week/month toggle produces the expected number of buckets and values).
 
 ## Constraints and non-goals
@@ -61,26 +63,26 @@ function that updates `chart.data` in place rather than recreating the `Chart` i
 
 ## Task stack (T01..T05)
 
-- [ ] T01: Exercise — per-exercise progression picker (status:open)
+- [x] T01: Exercise — per-exercise progression picker (status:open)
   - Goal: Tauri command returning `(date, weight, reps)` series for a chosen exercise id, preferring
     `actual_*` columns; frontend exercise picker (likely in `exercises.ts` or the new Insights view)
     rendering a line chart.
   - Done when: picking an exercise with several logged sets across different dates renders a correct
     chronological progression line.
 
-- [ ] T02: Exercise — aggregate training volume (status:open)
+- [x] T02: Exercise — aggregate training volume (status:open)
   - Goal: Tauri command bucketing Σ(`weight_kg * reps`) per workout by week/month; chart with its own
     period toggle.
   - Done when: switching the toggle re-buckets correctly (e.g. a month view collapses multiple weekly
     bars into one).
 
-- [ ] T03: Nutrition — calories and macros charts (status:open)
+- [x] T03: Nutrition — calories and macros charts (status:open)
   - Goal: Two Tauri commands (or one parameterized by metric) bucketing `meal_foods` sums by day/week/
     month via `meals.eaten_at`: one for calories, one returning protein/carbs/fat as separate series.
     Two charts, each with its own period toggle.
   - Done when: a day with multiple meals sums correctly; switching to week/month re-buckets as expected.
 
-- [ ] T04: Finance — spending by category + balance over time (status:open)
+- [x] T04: Finance — spending by category + balance over time (status:open)
   - Goal: Tauri commands for (a) expense totals grouped by category per period, using `amount_base`,
     and (b) per-account running balance over time from `opening_balance` + ordered transactions
     (transfers touching both accounts). Two charts, each with its own period toggle, account picker for
@@ -88,7 +90,7 @@ function that updates `chart.data` in place rather than recreating the `Chart` i
   - Done when: a manually-computed running balance for a seeded account matches the chart; category
     totals for a period match a hand-summed check.
 
-- [ ] T05: Insights view assembly (status:open)
+- [x] T05: Insights view assembly (status:open)
   - Goal: New sidebar route wiring T01-T04's sections together on one screen, each with its own
     independent period/exercise/account control.
   - Done when: navigating to Insights renders all sections without one chart's loading state blocking

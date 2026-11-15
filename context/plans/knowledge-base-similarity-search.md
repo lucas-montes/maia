@@ -1,5 +1,7 @@
 # Knowledge Base — Unified Search & Hand-Rolled Similarity
 
+**Status:** not started — there is no tokenizer, no TF-IDF index, no cosine similarity and no search view anywhere in `src/` or `maia-ui/src/`.
+
 ## Change summary
 Treat notes and Chrome-captured URLs as one searchable knowledge base in the desktop app. The Chrome
 side of this needs less work than the roadmap wording suggested: the existing manual shortcuts

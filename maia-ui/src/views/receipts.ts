@@ -3,6 +3,7 @@ import { escapeHtml, formatEpoch, setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
 import { toast } from "../lib/overlay";
 import { rankCandidates, sameAmount, type ReceiptFacts } from "../lib/receiptCandidates";
+import { addressLine, isOldReading, quantityLabel, readReading } from "../lib/receiptReading";
 import { receiptsAtom } from "../lib/stores";
 import { transactionLabel } from "../lib/transactionLabel";
 import { backToDashboard, panelClose, panelOpen, statusBanner } from "./shared";
@@ -126,6 +127,8 @@ function detailHtml(r: Receipt): string {
         ${r.parseError ? `<div class="mt-3 rounded border border-surface-800 bg-base-100 p-2 text-xs text-err-400">Parse failed: ${escapeHtml(r.parseError)}</div>` : ""}
       </div>
 
+      ${readingHtml(r)}
+
       ${transactionCardHtml(r)}
 
       ${lineItemsHtml(r)}
@@ -218,30 +221,85 @@ function transactionCardHtml(r: Receipt): string {
     </div>`;
 }
 
-/** T02: every parsed line item with a "match to ingredient" action. Matching
- *  is always manual -- there is no suggestion of which ingredient an item
- *  might be, only a picker. */
+/** Every line of the reading: what it is, how much of it, its discount, and
+ *  a "match to ingredient" action on a product line. */
 function lineItemsHtml(r: Receipt): string {
-  const items = parsedItems(r);
+  const items = readReading(r.parsedJson)?.items ?? [];
   if (!items.length) return "";
   const rows = items
-    .map(
-      (it, i) => `
-      <div class="flex items-center justify-between gap-3 border-b border-surface-800 py-2 last:border-0">
-        <div class="min-w-0 truncate text-sm text-ink-200">${escapeHtml(it.name)}</div>
+    .map((it, i) => {
+      const qty = quantityLabel(it);
+      const notProduct = it.kind !== "product";
+      return `
+      <div class="flex items-center justify-between gap-3 border-b border-surface-800 py-2 last:border-0 ${notProduct ? "opacity-60" : ""}">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2">
+            ${notProduct ? `<span class="badge badge-xs badge-ghost">${escapeHtml(it.kind)}</span>` : ""}
+            <span class="truncate text-sm text-ink-200">${escapeHtml(it.name)}</span>
+          </div>
+          ${qty || it.discount || it.code ? `<div class="text-xs text-ink-500">${escapeHtml(qty)}${it.discount ? ` · −${it.discount.toFixed(2)} off` : ""}${it.code ? ` · ${escapeHtml(it.code)}` : ""}</div>` : ""}
+        </div>
         <div class="flex shrink-0 items-center gap-3">
           <span class="font-mono text-sm text-ink-300">${it.price.toFixed(2)} ${escapeHtml(it.currency)}</span>
           <button class="btn btn-secondary btn-xs" type="button" data-action="match-item" data-receipt-id="${escapeHtml(r.id)}" data-item-index="${i}">
             Match to ingredient
           </button>
         </div>
-      </div>`,
-    )
+      </div>`;
+    })
     .join("");
   return `
     <div class="rounded border border-surface-800 bg-base-100 p-4">
       <h3 class="mb-3 text-sm font-medium text-ink-200">Line items (${items.length})</h3>
       ${rows}
+    </div>`;
+}
+
+/** What the receipt printed about its shop and its sale, with "Read again"
+ *  for a reading made by the old reader (or a bad one). */
+function readingHtml(r: Receipt): string {
+  const reading = readReading(r.parsedJson);
+  const id = escapeHtml(r.id);
+  const reread = `<button class="btn btn-secondary btn-xs" type="button" data-action="reparse-receipt" data-receipt-id="${id}">Read again</button>`;
+  if (!reading) {
+    return r.remotePath || r.archivedPath
+      ? `<div class="rounded border border-surface-800 bg-base-100 p-4"><div class="flex items-center justify-between"><h3 class="text-sm font-medium text-ink-200">Reading</h3>${reread}</div><div class="mt-2 text-sm text-ink-500">Not read yet.</div></div>`
+      : "";
+  }
+  const fact = (label: string, value: string | null | undefined): string =>
+    value ? `<div><span class="text-ink-500">${label}:</span> <span class="text-ink-200">${escapeHtml(value)}</span></div>` : "";
+  const amount = (n: number | null): string | null => (n === null ? null : `${money(n)} ${reading.currency ?? ""}`);
+  const taxId = reading.taxId ? `${reading.taxIdKind ? `${reading.taxIdKind.toUpperCase()} ` : ""}${reading.taxId}` : null;
+  const payment = reading.paymentMethod
+    ? `${reading.paymentMethod}${reading.cardLast4 ? ` ····${reading.cardLast4}` : ""}`
+    : reading.cardLast4
+      ? `card ····${reading.cardLast4}`
+      : null;
+  return `
+    <div class="rounded border border-surface-800 bg-base-100 p-4">
+      <div class="mb-3 flex items-center justify-between">
+        <h3 class="text-sm font-medium text-ink-200">Reading</h3>
+        <div class="flex items-center gap-2">
+          ${isOldReading(reading) ? `<span class="text-xs text-warn-400">read by the old reader</span>` : ""}
+          ${reread}
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+        ${fact("Brand", reading.brand)}
+        ${fact("Issued by", reading.merchant)}
+        ${fact("Tax id", taxId)}
+        ${fact("VAT number", reading.vatNumber)}
+        ${fact("Address", addressLine(reading) || null)}
+        ${fact("Branch", reading.branch)}
+        ${fact("Website", reading.website)}
+        ${fact("Receipt no.", reading.receiptNumber)}
+        ${fact("Paid by", payment)}
+        ${fact("Loyalty", reading.loyalty)}
+        ${fact("Subtotal", amount(reading.subtotal))}
+        ${fact("Total", amount(reading.total))}
+      </div>
+      ${reading.vat.length ? `<div class="mt-2 text-xs text-ink-500">VAT: ${reading.vat.map((v) => `${v.rate}% ${money(v.amount)}${v.base !== null ? ` on ${money(v.base)}` : ""}`).map(escapeHtml).join(" · ")}</div>` : ""}
+      ${reading.discounts.length ? `<div class="mt-1 text-xs text-ink-500">Discounts: ${reading.discounts.map((d) => `${d.description} −${money(d.amount)}`).map(escapeHtml).join(" · ")}</div>` : ""}
     </div>`;
 }
 
@@ -403,6 +461,11 @@ export function mount(root: HTMLElement): () => void {
     if (archiveBtn?.dataset.receiptId) void archive(archiveBtn.dataset.receiptId);
     const restoreBtn = target.closest<HTMLElement>("[data-action='restore-receipt']");
     if (restoreBtn?.dataset.receiptId) void restore(restoreBtn.dataset.receiptId);
+    const reparseBtn = target.closest<HTMLElement>("[data-action='reparse-receipt']");
+    if (reparseBtn?.dataset.receiptId) {
+      void reparse(reparseBtn.dataset.receiptId);
+      return;
+    }
     const linkBtn = target.closest<HTMLElement>("[data-action='link-transaction']");
     if (linkBtn?.dataset.receiptId) {
       const r = receiptsAtom.get().items.find((x) => x.id === linkBtn.dataset.receiptId);
@@ -430,6 +493,41 @@ export function mount(root: HTMLElement): () => void {
   const afterLink = async (): Promise<void> => {
     await loadTransactionCache();
     await list();
+  };
+
+  /** Asks the server to read the receipt again, then watches the row until
+   *  the new reading (or its error) lands, as the import does. */
+  const reparse = async (id: string): Promise<void> => {
+    const before = receiptsAtom.get().items.find((x) => x.id === id)?.updatedAt ?? 0;
+    receiptsAtom.set({ ...receiptsAtom.get(), status: "saving", message: "Reading the receipt again..." });
+    try {
+      const res = await api.reparseReceipt(id);
+      if (!res.success) {
+        receiptsAtom.set({ ...receiptsAtom.get(), status: "error", message: res.error ?? "Could not read the receipt again" });
+        return;
+      }
+    } catch (e) {
+      receiptsAtom.set({ ...receiptsAtom.get(), status: "error", message: `Could not read the receipt again: ${e}` });
+      return;
+    }
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const res = await api.listReceipts().catch(() => null);
+      const row = res?.success ? res.data?.find((x) => x.id === id) : undefined;
+      // upload_status 4 is "parsing"; the job always leaves it, parsed or failed.
+      if (row && row.uploadStatus !== 4 && row.updatedAt > before) {
+        await list();
+        receiptsAtom.set({
+          ...receiptsAtom.get(),
+          status: row.parseError ? "error" : "saved",
+          message: row.parseError ? `Reading failed: ${row.parseError}` : "Read again",
+        });
+        return;
+      }
+    }
+    await list();
+    receiptsAtom.set({ ...receiptsAtom.get(), status: "idle", message: "Still reading; refresh later" });
   };
 
   const unlink = async (id: string): Promise<void> => {

@@ -1,5 +1,7 @@
 # Statements: review by dropped file, with bulk import and delete
 
+**Status:** completed — file-grouped review, bulk import and soft delete, `GET /statements/file`, and a drop form that files the CSV without triggering a scan.
+
 ## Change summary
 The Statements screen listed one row per *statement*, but the parser stages **one statement per account** from a CA export, so dropping a single file produced several rows with no visible connection between them. The detail page then split lines into three vaguely labelled sections ("Transfers" as nested cards, "Trades", "Lines"), which made it hard to tell what each entry represented.
 

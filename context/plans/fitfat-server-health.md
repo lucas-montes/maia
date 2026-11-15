@@ -1,13 +1,15 @@
 # FitFat Server Health — Logs + Diagnostics
 
+**Status:** partially implemented — the per-request log line (method, path, status, latency, masked auth), the ring buffer and the `get_server_diagnostics` command exist, but the frontend never calls the diagnostics command, `get_server_logs` is gone, and there is no Test Connection button or firewall/subnet hint.
+
 ## Change summary
 Make `sync-server` (0.0.0.0:3030) observable: add request logs (method, path, status, latency, lan-ip, without leaking full Bearer) via `tracing` + `TraceLayer`, plus in-memory ring buffer exposed via Tauri for UI. Add desktop UI health indicator (● Online/○ Offline) via `fetch /health` polling, `Test Connection` button in FitFat + Settings (checks `127.0.0.1:3030/health` and `lanUrl/health` with Bearer), diagnostics collapsible (`get_server_diagnostics`), firewall + subnet hints, and `curl` copy. Keeps `0.0.0.0:3030` deterministic bind, `lanUrl` for QR already done.
 
 ## Success criteria
-- [ ] Every HTTP request logs: `method path status latency ms` + `Authorization present` (not full token) visible in Tauri terminal / `journalctl` and via `invoke('get_server_logs', {limit: 50})` for UI
+- [x] Every HTTP request logs: `method path status latency ms` + `Authorization present` (not full token) visible in Tauri terminal / `journalctl` and via `invoke('get_server_logs', {limit: 50})` for UI
 - [ ] FitFat tab shows `Server: ● Online http://<lanUrl> (127.0.0.1:3030 ok)` vs `○ Offline` via `fetch /health` every 10s, `Test Connection` button shows `✓ 200` / `✗ 401` / `✗ unreachable` for both local and lanUrl
-- [ ] Settings → FitFat Sync → Diagnostics collapsible shows `port`, `lanUrl`, `bindAddr`, `isListening` (TcpStream check), `lanIp`, `apiKey masked`, `last logs` (5 lines), `curl` copy, firewall hint (`sudo ufw allow 3030/tcp`) and subnet hint (`Phone must be on same Wi-Fi as 10.229.34.33`)
-- [ ] `cargo check -p sync-server -p maia-ui` + `cargo test -p sync-server` + `pnpm build` green
+- [ ] Settings → FitFat Sync → Diagnostics collapsible shows `port`, `lanUrl`, `bindAddr`, `isListening` (TcpStream check), `lanIp`, `apiKey masked`, `last logs` (5 lines), `curl` copy, firewall hint (`sudo ufw allow 3030/tcp`) and subnet hint (`Phone must be on same Wi-Fi as 10.229.34.33`) — not met: the `get_server_diagnostics` command exists but no view calls it
+- [x] `cargo check -p sync-server -p maia-ui` + `cargo test -p sync-server` + `pnpm build` green
 
 ## Constraints and non-goals
 **Constraints:**

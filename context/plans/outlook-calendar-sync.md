@@ -1,5 +1,7 @@
 # Outlook Calendar Sync (read-only)
 
+**Status:** not started — there is no `calendar_events` table, no OAuth code and no `/calendar-feeds/*` routes.
+
 ## Change summary
 Read-only Microsoft Graph calendar integration, first of the two providers the roadmap names (Google
 follow-up is a separate, structurally identical plan once this one proves the pattern out). The server

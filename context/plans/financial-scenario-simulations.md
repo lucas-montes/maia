@@ -1,5 +1,7 @@
 # Financial Scenario Simulations
 
+**Status:** completed — the `finance_scenarios` table (v11), `src/finance_scenarios.rs`, the `/finance-scenarios/*` routes and the desktop `maia-ui/src/views/simulations.ts`.
+
 ## Change summary
 A general scenario tool, desktop-only: derive a baseline (average monthly income and spend-by-category)
 from actual transaction history, let the user override pieces of it per named, saved scenario —
@@ -9,21 +11,21 @@ project net worth forward over a chosen horizon. Multiple scenarios can be compa
 overlaid lines on one chart, with a summary table of each scenario's ending numbers.
 
 ## Success criteria
-- [ ] A new `finance_scenarios` table (name, assumptions as JSON, timestamps) persists named scenarios;
+- [x] A new `finance_scenarios` table (name, assumptions as JSON, timestamps) persists named scenarios;
       CRUD via new Tauri commands.
-- [ ] Baseline derivation: average monthly income and average monthly spend-by-category computed from
+- [x] Baseline derivation: average monthly income and average monthly spend-by-category computed from
       actual `transactions` over a trailing window (default last 12 months, configurable), using
       `amount_base` for cross-currency consistency.
-- [ ] A scenario's assumptions can override: any category's baseline monthly amount (add/replace), a
+- [x] A scenario's assumptions can override: any category's baseline monthly amount (add/replace), a
       monthly income delta, an annual inflation rate (compounds against expense categories not
       explicitly overridden), an annual investment return rate (compounds against the running net worth
       balance), and the projection horizon (months).
-- [ ] A projection function runs the scenario month-by-month from current net worth (sum of account
+- [x] A projection function runs the scenario month-by-month from current net worth (sum of account
       balances today) and produces a `(month, net_worth)` series.
-- [ ] A new desktop "Simulations" screen: create/edit/delete named scenarios, a chart overlaying every
+- [x] A new desktop "Simulations" screen: create/edit/delete named scenarios, a chart overlaying every
       selected scenario's projection line (plus a "no changes" baseline line for reference), and a
       summary table (ending net worth, total net saved, final monthly expense total) per scenario.
-- [ ] `cargo test -p maia` covers the projection math directly (a scenario with known inputs produces a
+- [x] `cargo test -p maia` covers the projection math directly (a scenario with known inputs produces a
       hand-computable net worth at month N) and the baseline derivation (seeded transactions produce the
       expected average income/category spend).
 
@@ -57,19 +59,19 @@ overlaid lines on one chart, with a summary table of each scenario's ending numb
 
 ## Task stack (T01..T05)
 
-- [ ] T01: Schema — `finance_scenarios` (status:open)
+- [x] T01: Schema — `finance_scenarios` (status:open)
   - Goal: Migration adding `finance_scenarios(id, name, assumptions_json, created_at, updated_at,
     deleted_at)`. `assumptions_json` shape: `{horizonMonths, incomeDeltaMonthly, categoryOverrides:
     [{category, monthlyAmount}], inflationAnnualPct, investmentReturnAnnualPct}`.
   - Done when: migration applies cleanly; `cargo test -p maia` green.
 
-- [ ] T02: Baseline derivation (status:open)
+- [x] T02: Baseline derivation (status:open)
   - Goal: A function computing average monthly income and average monthly spend-by-category from
     `transactions` over a trailing window (default 12 months), using `amount_base`.
   - Done when: unit tests with seeded transactions across a few months and categories produce the
     expected per-category monthly averages.
 
-- [ ] T03: Projection engine (status:open)
+- [x] T03: Projection engine (status:open)
   - Goal: Given a baseline + a scenario's assumptions, run the month-by-month simulation (apply category
     overrides and income delta from month 1; compound non-overridden expense categories by inflation/12
     each month; compound the running net worth balance by investment return/12 each month) producing a
@@ -77,13 +79,13 @@ overlaid lines on one chart, with a summary table of each scenario's ending numb
   - Done when: a hand-computed scenario (fixed income, one overridden category, no inflation, a round
     investment return) matches the function's output exactly for a few months.
 
-- [ ] T04: Scenario CRUD + projection Tauri commands (status:open)
+- [x] T04: Scenario CRUD + projection Tauri commands (status:open)
   - Goal: Create/list/update/delete scenario commands; a "project" command taking a scenario id (or ad
     hoc assumptions for an unsaved draft) and returning its projection series plus summary numbers.
   - Done when: creating, editing and deleting a scenario round-trips correctly; projecting a saved
     scenario matches T03's direct test.
 
-- [ ] T05: Desktop Simulations screen (status:open)
+- [x] T05: Desktop Simulations screen (status:open)
   - Goal: New sidebar view: scenario list with create/edit/delete, a multi-select to choose which
     scenarios (plus the unmodified baseline) to overlay on one Chart.js line chart, and a summary table
     below it.

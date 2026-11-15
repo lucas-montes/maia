@@ -1,6 +1,7 @@
 # Plan: Budget & Financial Simulation
 
-**Status:** Proposed
+**Status:** not started — and the plan's host no longer exists (it assumed a `maia budget` CLI over the socket daemon). The scenario half shipped separately as `financial-scenario-simulations.md`, which is deliberately deterministic and excludes Monte Carlo. What remains unimplemented anywhere is budget tracking and auto-categorization; this needs re-specing against HTTP before it is actionable.
+
 **Depends on:** finance-expenses-income (for transaction data source)
 
 ## Summary

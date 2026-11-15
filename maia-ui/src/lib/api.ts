@@ -653,6 +653,9 @@ export const api = {
 
   restoreReceipt: (id: string) => invoke<Envelope<void>>("restore_receipt", { id }),
 
+  /** Reads a receipt again on the server; the new reading lands asynchronously. */
+  reparseReceipt: (id: string) => invoke<Envelope<Receipt>>("reparse_receipt", { id }),
+
   /** Links a receipt to an expense or income; the server writes both ends. */
   linkReceiptTransaction: (id: string, transactionId: string) =>
     invoke<Envelope<Receipt>>("link_receipt_transaction", { id, transactionId }),

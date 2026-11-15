@@ -1,5 +1,7 @@
 # Remote Storage Backup
 
+**Status:** not started — there are no `/remote-backup/*` routes, no staging tree, and `rclone` is not packaged anywhere in `nix/`.
+
 ## Change summary
 Ship the DB backup archive and the raw files that can't be reconstructed from it (receipt images,
 exercise media, the notes markdown mirror, voice clips) to an off-site destination via `rclone`,

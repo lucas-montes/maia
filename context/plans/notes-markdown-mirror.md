@@ -1,5 +1,7 @@
 # Notes — Markdown Mirror + Editor + Audio Round-Trip
 
+**Status:** completed except the end-to-end pass — the mirror, the inotify watcher, `GET /notes/audio/:id`, the pull's `noteAudio` list and the mobile markdown editor all shipped; T07 (a scripted end-to-end walkthrough plus docs) is still open.
+
 ## Change summary
 Keep SQLite as the sync source of truth for notes, but have the server mirror every note to a `.md` file
 in the (currently unused) `notes_dir` config (`<dataDir>/notes` per the Nix module). Edits made directly to
@@ -10,24 +12,24 @@ plain title+body form with a raw-markdown editor plus a preview toggle, and make
 hub; conflict resolution stays last-write-wins on `updated_at`. Tags participate fully in the file mirror.
 
 ## Success criteria
-- [ ] Every non-deleted note exists as `<notes_dir>/<date>-<slug>-<short-id>.md` with YAML frontmatter
+- [x] Every non-deleted note exists as `<notes_dir>/<date>-<slug>-<short-id>.md` with YAML frontmatter
       (`id`, `title`, `created_at`, `updated_at`, `tags: [...]`) and the markdown body below it.
-- [ ] Editing a `.md` file in place updates the note in the server DB within ~1s (watcher), bumps
+- [x] Editing a `.md` file in place updates the note in the server DB within ~1s (watcher), bumps
       `updated_at` from file mtime, and shows up on the phone after a manual pull (LWW).
-- [ ] Creating a `.md` file without a known `id` in frontmatter adopts it into the DB with a new UUIDv7.
-- [ ] Same-id file rename is detected from frontmatter and renamed in place (not delete+recreate).
-- [ ] Deleting a `.md` file recreates the note file (DB is authoritative on deletes; DB tombstones still
+- [x] Creating a `.md` file without a known `id` in frontmatter adopts it into the DB with a new UUIDv7.
+- [x] Same-id file rename is detected from frontmatter and renamed in place (not delete+recreate).
+- [x] Deleting a `.md` file recreates the note file (DB is authoritative on deletes; DB tombstones still
       remove the file and are not recreated).
-- [ ] Server's own export writes do not re-import (self-write suppression via content-hash/mtime signature
+- [x] Server's own export writes do not re-import (self-write suppression via content-hash/mtime signature
       map, rebuilt on startup reconcile scan).
-- [ ] Notes are exported/updated through the mirror on every push/pull handler touch and local note mutation,
+- [x] Notes are exported/updated through the mirror on every push/pull handler touch and local note mutation,
       even when no phone is connected.
-- [ ] `GET /notes/audio/:id` serves the stored mp3 bytes with Bearer auth (404 for missing/deleted).
-- [ ] `PullNotesResponse` includes a `noteAudio` list (rows + `note_id`); mobile applies them and downloads
+- [x] `GET /notes/audio/:id` serves the stored mp3 bytes with Bearer auth (404 for missing/deleted).
+- [x] `PullNotesResponse` includes a `noteAudio` list (rows + `note_id`); mobile applies them and downloads
       missing clip bytes to its existing local clips directory so players/list UIs work unchanged.
-- [ ] Mobile note editor: title + raw markdown body (monospace) with a preview toggle rendering markdown;
+- [x] Mobile note editor: title + raw markdown body (monospace) with a preview toggle rendering markdown;
       save persists via the existing repository; tags picker unchanged.
-- [ ] `cargo test/check` green; mobile `flutter analyze`/build green.
+- [x] `cargo test/check` green; mobile `flutter analyze`/build green.
 
 ## Constraints and non-goals
 **Constraints:**

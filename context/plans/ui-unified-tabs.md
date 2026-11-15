@@ -1,20 +1,22 @@
 # Unified Maia UI — Grouped Tabs for All Models
 
+**Status:** completed except the Experiments tab — the grouped collapsible sidebar and 24 of the 25 registered views shipped. There is no `maia-ui/src/views/experiments.ts`; the server still carries the `experiments` tables but the phone dropped the feature in schema v37.
+
 ## Change summary
 Rebuild `maia-ui` from FitFat-is-separate to Maia-is-one: collapsible grouped sidebar with sections Training/Nutrition/Health/Planning/Finance, subtabs where needed, virtual-scroll + lazy media for 3799 exercises, per-tab search + per-tab sync indicator, read-only desktop for most models (editable: ingredients, exercises, workout_templates; add-only fx_rates), full ledger for finance, and read-only experiments/tags with linked-table displays. Single `maia.db` is source of truth; desktop reads via Tauri commands (direct DB) while mobile syncs via `sync-server` HTTP on `0.0.0.0:3030`.
 
 ## Success criteria
-- [ ] Sidebar shows grouped sections: Training (Exercises | Workouts | Templates), Nutrition (Ingredients | Stores | Meals), Health (Body Metrics | Experiments), Planning (Notes | Tasks | Goals | URLs), Finance (Accounts | Transactions | Receipts), plus Tags, FxRates, Settings, Dashboard. Collapsible, counts per tab.
-- [ ] Exercises: virtual scroll (100 visible), filters (body_part, equipment, primary_muscle, hasImage/hasVideo, text search), lazy `exercise_media/<id>.jpg|.mp4`, editable (name/body_part/equipment/primary/secondary/instructions/tips/faqs/keywords/tags).
-- [ ] Workouts read-only list + detail (workout_exercises + exercise_sets with actuals), Templates editable (create/edit with exercises + planned sets, recurrence).
-- [ ] Ingredients editable (name/macros/brand/barcode/isArchived) with pictures gallery + prices per store; Stores top-level tab (list + create); Meals show auto-calc calories (sum ingredient calories*grams/100) + meal_ingredients.
-- [ ] Body Metrics read-only chart/table; Experiments read-only list + detail showing linked tasks/goals/notes/tags + checkins (rating 1..5 + note per day).
-- [ ] Notes/Tasks/Goals/URLs each own tab, read-only desktop, showing junction links (task_experiments, task_goals, etc.) and tags.
-- [ ] Tags global read-only tab: list tags (name/color/sortOrder) + usage counts per entity (tasks/experiments/goals/notes).
-- [ ] Finance full ledger: Accounts list, Transactions list (type/amount/currency/amountBase/rateUsed/category/date/receipt), Receipts with image + parsedJson + transaction link.
-- [ ] FxRates: list by base/date/since, add new rate, refresh (fetch), no edit.
-- [ ] Per-tab sync indicator (server_time, since cursor, deleted count) and per-tab search (no global search).
-- [ ] `cargo check --workspace` + `pnpm build` green; `cargo test -p sync-server` 17/17 pass; manual click-through of each tab shows data from `maia.db`.
+- [x] Sidebar shows grouped sections: Training (Exercises | Workouts | Templates), Nutrition (Ingredients | Stores | Meals), Health (Body Metrics | Experiments), Planning (Notes | Tasks | Goals | URLs), Finance (Accounts | Transactions | Receipts), plus Tags, FxRates, Settings, Dashboard. Collapsible, counts per tab.
+- [x] Exercises: virtual scroll (100 visible), filters (body_part, equipment, primary_muscle, hasImage/hasVideo, text search), lazy `exercise_media/<id>.jpg|.mp4`, editable (name/body_part/equipment/primary/secondary/instructions/tips/faqs/keywords/tags).
+- [x] Workouts read-only list + detail (workout_exercises + exercise_sets with actuals), Templates editable (create/edit with exercises + planned sets, recurrence).
+- [x] Ingredients editable (name/macros/brand/barcode/isArchived) with pictures gallery + prices per store; Stores top-level tab (list + create); Meals show auto-calc calories (sum ingredient calories*grams/100) + meal_ingredients.
+- [ ] Body Metrics read-only chart/table; Experiments read-only list + detail showing linked tasks/goals/notes/tags + checkins (rating 1..5 + note per day). — not met: there is no `maia-ui/src/views/experiments.ts`; the phone dropped the feature in schema v37
+- [x] Notes/Tasks/Goals/URLs each own tab, read-only desktop, showing junction links (task_experiments, task_goals, etc.) and tags.
+- [x] Tags global read-only tab: list tags (name/color/sortOrder) + usage counts per entity (tasks/experiments/goals/notes).
+- [x] Finance full ledger: Accounts list, Transactions list (type/amount/currency/amountBase/rateUsed/category/date/receipt), Receipts with image + parsedJson + transaction link.
+- [x] FxRates: list by base/date/since, add new rate, refresh (fetch), no edit.
+- [x] Per-tab sync indicator (server_time, since cursor, deleted count) and per-tab search (no global search).
+- [x] `cargo check --workspace` + `pnpm build` green; `cargo test -p sync-server` 17/17 pass; manual click-through of each tab shows data from `maia.db`.
 
 ## Constraints and non-goals
 **Constraints:**

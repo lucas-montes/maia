@@ -1,5 +1,7 @@
 # Component Architecture Split — Desktop & Chrome Extension as Separate Repos
 
+**Status:** not started — no code written. The desktop Tauri crate still depends on the `maia` crate (`maia-ui/src-tauri/Cargo.toml`) and still reads SQLite directly, and `maia-ui/` + `chrome_ext/` have not been extracted.
+
 ## Change summary
 Two-phase split, matching how `mobile` and `server` are already fully independent sibling repos under
 `/home/lucas/Projects/maia/` with no cross-references (not even flake inputs) between them:

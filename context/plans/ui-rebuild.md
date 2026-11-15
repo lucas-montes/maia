@@ -1,5 +1,7 @@
 # Maia UI Rebuild Plan
 
+**Status:** completed — the desktop rebuild shipped, including the saved-URLs feature and the SQLite indexing.
+
 ## Summary
 
 Rebuild the Maia Tauri UI from the current rough shell into a simpler, sober, fully responsive desktop layout. The new UI should use a small collapsible sidebar, a main content area that fills all available space, and file-backed workflows for settings, notes, receipts, tasks, goals, and saved URLs from the Chrome tool.
