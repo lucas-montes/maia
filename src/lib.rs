@@ -10,6 +10,7 @@ pub mod notifier;
 pub mod openapi;
 pub mod openfoodfacts;
 pub mod pricing;
+pub mod receipt_links;
 pub mod receipt_ocr;
 pub mod seed;
 pub mod server;
@@ -1226,6 +1227,59 @@ mod tests {
             .query_row("SELECT transaction_id FROM receipts WHERE id='r1'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(link.as_deref(), Some("t1"));
+        handle.abort();
+    }
+
+    /// The desktop links a receipt through its own endpoint; a transaction push
+    /// from an older phone, holding no receipt, must not clear the link.
+    #[tokio::test]
+    async fn a_receipt_is_linked_over_http_and_a_transaction_push_keeps_it() {
+        let pool = crate::db::init_memory().unwrap();
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+        let post = |path: &str, payload: serde_json::Value| {
+            client
+                .post(format!("{base}{path}"))
+                .header("Authorization", "Bearer test-key")
+                .json(&payload)
+                .send()
+        };
+        let txn = serde_json::json!({"transactions":[{"id":"t1","type":"expense","amount":12.5,"currencyCode":"EUR","amountBase":12.5,"rateUsed":1.0,"date":1000,"isDraft":false,"createdAt":1000}],"deleted":[]});
+        assert_eq!(post("/transactions", txn.clone()).await.unwrap().status(), 200);
+        let receipt = serde_json::json!({"receipts":[{"id":"r1","localPath":"/tmp/a.jpg","uploadStatus":0,"parsed":false,"createdAt":1000}]});
+        assert_eq!(post("/receipt-pictures", receipt).await.unwrap().status(), 200);
+
+        let link = |transaction: &str| {
+            client
+                .put(format!("{base}/receipt-pictures/r1/transaction"))
+                .header("Authorization", "Bearer test-key")
+                .json(&serde_json::json!({"transactionId": transaction}))
+                .send()
+        };
+        assert_eq!(link("nope").await.unwrap().status(), 404);
+        assert_eq!(link("t1").await.unwrap().status(), 200);
+
+        assert_eq!(post("/transactions", txn).await.unwrap().status(), 200);
+        let ends = || -> (Option<String>, Option<String>) {
+            let conn = pool.get().unwrap();
+            (
+                conn.query_row("SELECT transaction_id FROM receipts WHERE id='r1'", [], |r| r.get(0))
+                    .unwrap(),
+                conn.query_row("SELECT receipt_id FROM transactions WHERE id='t1'", [], |r| r.get(0))
+                    .unwrap(),
+            )
+        };
+        assert_eq!(ends(), (Some("t1".into()), Some("r1".into())));
+
+        let unlinked = client
+            .delete(format!("{base}/receipt-pictures/r1/transaction"))
+            .header("Authorization", "Bearer test-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unlinked.status(), 200);
+        assert_eq!(ends(), (None, None));
         handle.abort();
     }
 

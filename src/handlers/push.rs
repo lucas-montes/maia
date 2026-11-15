@@ -1441,9 +1441,11 @@ pub async fn push_transactions(
     let server_time = db::server_time_ms();
     let conn = state.db.get().unwrap();
     let tx = conn.unchecked_transaction().unwrap();
+    // The receipt link is the server's (`crate::receipt_links`): a push can fill
+    // an empty `receipt_id` but never clears or replaces one.
     for t in payload.transactions {
         tx.execute(
-            "INSERT INTO transactions (id, type, amount, currency_code, amount_base, rate_used, account_id, to_account_id, category, date, note, receipt_id, is_draft, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) ON CONFLICT(id) DO UPDATE SET type=excluded.type, amount=excluded.amount, currency_code=excluded.currency_code, amount_base=excluded.amount_base, rate_used=excluded.rate_used, account_id=excluded.account_id, to_account_id=excluded.to_account_id, category=excluded.category, date=excluded.date, note=excluded.note, receipt_id=excluded.receipt_id, is_draft=excluded.is_draft, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
+            "INSERT INTO transactions (id, type, amount, currency_code, amount_base, rate_used, account_id, to_account_id, category, date, note, receipt_id, is_draft, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) ON CONFLICT(id) DO UPDATE SET type=excluded.type, amount=excluded.amount, currency_code=excluded.currency_code, amount_base=excluded.amount_base, rate_used=excluded.rate_used, account_id=excluded.account_id, to_account_id=excluded.to_account_id, category=excluded.category, date=excluded.date, note=excluded.note, receipt_id=COALESCE(transactions.receipt_id, excluded.receipt_id), is_draft=excluded.is_draft, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
             rusqlite::params![t.id, t.type_, t.amount, t.currency_code, t.amount_base, t.rate_used, t.account_id, t.to_account_id, t.category, t.date, t.note, t.receipt_id, if t.is_draft {1} else {0}, t.created_at, server_time, t.deleted_at],
         ).unwrap();
     }

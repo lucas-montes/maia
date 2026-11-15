@@ -10,8 +10,12 @@ that surface, and `/transactions` too. It never pushes an account or a
 transaction, so it cannot make, change or delete one: both come from the
 desktop and the statement imports. Receipts are separate: the phone only sends
 them, and the server keeps them, with their link to a transaction
-(`receipts.transaction_id`). That link is the server's: a receipt push never
-clears it.
+(`receipts.transaction_id`). That link is the server's, written at both
+ends (`transactions.receipt_id` too) by `src/receipt_links.rs` through `PUT`/`DELETE
+/receipt-pictures/:id/transaction`, which the desktop's receipt detail calls
+from its picker. Only an expense or an income takes a receipt, one each way.
+Relinking off a draft made from the receipt deletes the draft. A receipt or
+transaction push can fill an empty end but never clears or replaces one.
 
 ## The tables
 

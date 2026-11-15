@@ -1,8 +1,10 @@
-import { api, isEnvelopeFailure, unwrapList, type Receipt } from "../lib/api";
+import { api, isEnvelopeFailure, unwrapList, type FinanceTransaction, type Receipt } from "../lib/api";
 import { escapeHtml, formatEpoch, setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
 import { toast } from "../lib/overlay";
+import { rankCandidates, sameAmount, type ReceiptFacts } from "../lib/receiptCandidates";
 import { receiptsAtom } from "../lib/stores";
+import { transactionLabel } from "../lib/transactionLabel";
 import { backToDashboard, panelClose, panelOpen, statusBanner } from "./shared";
 
 /** One parsed receipt line item, as the OCR payload's `items` array holds it
@@ -120,10 +122,11 @@ function detailHtml(r: Receipt): string {
           ${total ? `<div><span class="text-ink-500">Total:</span> <span class="font-mono text-ink-200">${escapeHtml(total)}${currency ? ` ${escapeHtml(currency)}` : ""}</span></div>` : ""}
           ${date ? `<div><span class="text-ink-500">Date:</span> <span class="text-ink-200">${escapeHtml(date)}</span></div>` : ""}
           ${Array.isArray(items) ? `<div><span class="text-ink-500">Items:</span> <span class="text-ink-200">${items.length}</span></div>` : ""}
-          ${r.transactionId ? `<div class="col-span-2"><span class="text-ink-500">Transaction:</span> <span class="break-all font-mono text-xs text-accent-400">${escapeHtml(r.transactionId)}</span></div>` : ""}
         </div>
         ${r.parseError ? `<div class="mt-3 rounded border border-surface-800 bg-base-100 p-2 text-xs text-err-400">Parse failed: ${escapeHtml(r.parseError)}</div>` : ""}
       </div>
+
+      ${transactionCardHtml(r)}
 
       ${lineItemsHtml(r)}
 
@@ -147,6 +150,71 @@ function detailHtml(r: Receipt): string {
         ${canArchive ? `<button class="btn btn-primary btn-sm" type="button" data-action="archive-receipt" data-receipt-id="${escapeHtml(r.id)}">Archive</button>` : ""}
         ${canRestore ? `<button class="btn btn-secondary btn-sm" type="button" data-action="restore-receipt" data-receipt-id="${escapeHtml(r.id)}">Restore</button>` : ""}
       </div>
+    </div>`;
+}
+
+/** The ledger, as the transaction card and the picker read it. Loaded when
+ *  the view mounts and again after a link changes it. */
+let transactionCache: FinanceTransaction[] = [];
+
+async function loadTransactionCache(): Promise<void> {
+  try {
+    const res = await api.listTransactions();
+    if (!isEnvelopeFailure(res)) transactionCache = unwrapList(res) as FinanceTransaction[];
+  } catch {
+    // The card then shows the bare id, and the picker an empty list.
+  }
+}
+
+function receiptFacts(r: Receipt): ReceiptFacts {
+  const total = Number(parsedText(r, "total"));
+  return {
+    id: r.id,
+    total: Number.isFinite(total) && total > 0 ? total : null,
+    currency: parsedText(r, "currency"),
+    date: receiptRecordedAt(r),
+  };
+}
+
+function money(value: number): string {
+  return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/** One transaction as the card and the picker show it: label, account, day, amount. */
+function transactionLineHtml(t: FinanceTransaction, r: Receipt): string {
+  const exact = sameAmount(t, receiptFacts(r));
+  return `
+    <div class="min-w-0 flex-1">
+      <div class="flex items-center gap-2">
+        ${t.isDraft ? `<span class="badge badge-xs badge-warn">draft</span>` : ""}
+        <span class="truncate text-sm text-ink-200">${escapeHtml(transactionLabel(t))}</span>
+      </div>
+      <div class="text-xs text-ink-500">${escapeHtml(t.accountName ?? "no account")} · ${escapeHtml(new Date(t.date).toLocaleDateString())}</div>
+    </div>
+    <span class="shrink-0 font-mono text-sm ${exact ? "text-ok-400" : "text-ink-300"}">${t.type === "income" ? "+" : "−"}${money(t.amount)} ${escapeHtml(t.currencyCode)}</span>`;
+}
+
+/** The transaction this receipt is the proof of, and the actions on the link.
+ *  The link is the server's: it writes both ends (`maia::receipt_links`). */
+function transactionCardHtml(r: Receipt): string {
+  const linked = r.transactionId ? transactionCache.find((t) => t.id === r.transactionId) : undefined;
+  const id = escapeHtml(r.id);
+  const body = r.transactionId
+    ? linked
+      ? `<div class="flex items-center gap-3">${transactionLineHtml(linked, r)}</div>`
+      : `<div class="break-all font-mono text-xs text-ink-400">${escapeHtml(r.transactionId)} (not in the ledger)</div>`
+    : `<div class="text-sm text-ink-500">Not linked to a transaction.</div>`;
+  const actions = r.transactionId
+    ? `<button class="btn btn-secondary btn-xs" type="button" data-action="link-transaction" data-receipt-id="${id}">Change</button>
+       <button class="btn btn-ghost btn-xs" type="button" data-action="unlink-transaction" data-receipt-id="${id}">Unlink</button>`
+    : `<button class="btn btn-secondary btn-xs" type="button" data-action="link-transaction" data-receipt-id="${id}">Link to transaction</button>`;
+  return `
+    <div class="rounded border border-surface-800 bg-base-100 p-4">
+      <div class="mb-3 flex items-center justify-between">
+        <h3 class="text-sm font-medium text-ink-200">Transaction</h3>
+        <div class="flex gap-2">${actions}</div>
+      </div>
+      ${body}
     </div>`;
 }
 
@@ -335,6 +403,17 @@ export function mount(root: HTMLElement): () => void {
     if (archiveBtn?.dataset.receiptId) void archive(archiveBtn.dataset.receiptId);
     const restoreBtn = target.closest<HTMLElement>("[data-action='restore-receipt']");
     if (restoreBtn?.dataset.receiptId) void restore(restoreBtn.dataset.receiptId);
+    const linkBtn = target.closest<HTMLElement>("[data-action='link-transaction']");
+    if (linkBtn?.dataset.receiptId) {
+      const r = receiptsAtom.get().items.find((x) => x.id === linkBtn.dataset.receiptId);
+      if (r) openLinkModal(r, () => void afterLink());
+      return;
+    }
+    const unlinkBtn = target.closest<HTMLElement>("[data-action='unlink-transaction']");
+    if (unlinkBtn?.dataset.receiptId) {
+      void unlink(unlinkBtn.dataset.receiptId);
+      return;
+    }
     const matchBtn = target.closest<HTMLElement>("[data-action='match-item']");
     if (matchBtn?.dataset.receiptId && matchBtn.dataset.itemIndex !== undefined) {
       const r = receiptsAtom.get().items.find((x) => x.id === matchBtn.dataset.receiptId);
@@ -346,7 +425,30 @@ export function mount(root: HTMLElement): () => void {
     void importFiles(Array.from(importInput.files ?? []));
   });
 
+  /** A link changed both ends on the server: reload the ledger the card reads
+   *  and the receipts, so a deleted draft disappears too. */
+  const afterLink = async (): Promise<void> => {
+    await loadTransactionCache();
+    await list();
+  };
+
+  const unlink = async (id: string): Promise<void> => {
+    try {
+      const res = await api.unlinkReceiptTransaction(id);
+      if (!res.success) {
+        toast(res.error ?? "Could not unlink the receipt", "err");
+        return;
+      }
+      toast("Receipt unlinked", "ok");
+    } catch (e) {
+      toast(`Could not unlink the receipt: ${e}`, "err");
+      return;
+    }
+    await afterLink();
+  };
+
   void list();
+  void loadTransactionCache().then(render);
   const unsub = receiptsAtom.subscribe(render);
   return unsub;
 }
@@ -646,5 +748,94 @@ async function openMatchModal(r: Receipt, item: ParsedLineItem): Promise<void> {
         }
       })();
     }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Link to a transaction
+// ---------------------------------------------------------------------------
+
+/** Opens the picker of the transaction this receipt is the proof of. Without
+ *  a search it offers the expenses and incomes near the receipt's day, the
+ *  ones for its exact amount first; a search reaches the whole ledger. */
+function openLinkModal(r: Receipt, onLinked: () => void): void {
+  const modalRoot = document.getElementById("modal-root");
+  if (!modalRoot) return;
+  const facts = receiptFacts(r);
+  const merchant = parsedText(r, "merchant") || "Receipt";
+  const text = (t: FinanceTransaction): string =>
+    `${transactionLabel(t)} ${t.note ?? ""} ${t.category ?? ""} ${t.accountName ?? ""} ${money(t.amount)}`;
+
+  modalRoot.innerHTML = `
+    <dialog class="modal modal-open" id="link-transaction-modal">
+      <div class="modal-box flex max-h-[85vh] max-w-xl flex-col overflow-hidden">
+        <div class="flex items-center justify-between border-b border-surface-800 pb-3">
+          <div>
+            <h3 class="font-semibold text-ink-100">Link “${escapeHtml(merchant)}” to a transaction</h3>
+            <p class="mt-1 text-xs text-ink-500">${escapeHtml(formatEpoch(facts.date))}${facts.total !== null ? ` · ${money(facts.total)} ${escapeHtml(facts.currency ?? "")}` : ""}</p>
+          </div>
+          <button class="btn btn-ghost btn-sm" data-action="link-close" aria-label="Close">✕</button>
+        </div>
+        <div class="min-h-0 flex-1 space-y-2 overflow-auto py-3">
+          <input id="link-search" placeholder="Search the whole ledger..." class="input input-bordered w-full" />
+          <div class="text-xs text-ink-500" data-slot="link-hint"></div>
+          <div class="space-y-0.5" data-slot="link-results"></div>
+        </div>
+        <div class="modal-action border-t border-surface-800 pt-3">
+          <button class="btn btn-ghost btn-sm" data-action="link-close">Cancel</button>
+        </div>
+      </div>
+      <form method="dialog" class="modal-backdrop"><button>close</button></form>
+    </dialog>`;
+
+  const resultsEl = modalRoot.querySelector("[data-slot='link-results']") as HTMLElement;
+  const hintEl = modalRoot.querySelector("[data-slot='link-hint']") as HTMLElement;
+  const searchEl = modalRoot.querySelector("#link-search") as HTMLInputElement;
+  const renderResults = (): void => {
+    const query = searchEl.value;
+    const found = rankCandidates(transactionCache, facts, query, text).slice(0, 50);
+    hintEl.textContent = query.trim()
+      ? `${found.length} match${found.length !== 1 ? "es" : ""} in the ledger`
+      : `Expenses and incomes within 10 days of the receipt`;
+    setHtml(
+      resultsEl,
+      found
+        .map(
+          (t) => `
+          <button type="button" class="flex w-full items-center gap-3 rounded px-2 py-1.5 text-left ${t.id === r.transactionId ? "bg-accent-500/20" : "hover:bg-surface-800"}" data-action="link-pick" data-id="${escapeHtml(t.id)}">
+            ${transactionLineHtml(t, r)}
+          </button>`,
+        )
+        .join("") || `<div class="p-2 text-xs text-ink-400">No transaction fits. Search to look further.</div>`,
+    );
+  };
+  renderResults();
+  searchEl.focus();
+
+  const close = (): void => modalRoot.replaceChildren();
+  searchEl.addEventListener("input", renderResults);
+  modalRoot.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement;
+    if (target.closest("[data-action='link-close']") || target.closest(".modal-backdrop")) {
+      close();
+      return;
+    }
+    const pick = target.closest<HTMLElement>("[data-action='link-pick']");
+    if (!pick?.dataset.id) return;
+    const transactionId = pick.dataset.id;
+    void (async () => {
+      try {
+        const res = await api.linkReceiptTransaction(r.id, transactionId);
+        if (!res.success) {
+          toast(res.error ?? "Could not link the receipt", "err");
+          return;
+        }
+        toast("Receipt linked", "ok");
+        close();
+        onLinked();
+      } catch (e) {
+        toast(`Could not link the receipt: ${e}`, "err");
+      }
+    })();
   });
 }

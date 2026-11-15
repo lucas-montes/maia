@@ -653,6 +653,12 @@ export const api = {
 
   restoreReceipt: (id: string) => invoke<Envelope<void>>("restore_receipt", { id }),
 
+  /** Links a receipt to an expense or income; the server writes both ends. */
+  linkReceiptTransaction: (id: string, transactionId: string) =>
+    invoke<Envelope<Receipt>>("link_receipt_transaction", { id, transactionId }),
+
+  unlinkReceiptTransaction: (id: string) => invoke<Envelope<Receipt>>("unlink_receipt_transaction", { id }),
+
   listTasks: () => invoke<Envelope<Todo[]>>("list_tasks"),
 
   /** One task with everything attached to it: the full row, its tags, the

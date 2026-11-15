@@ -197,6 +197,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/receipt-pictures/:id/picture", get(crate::handlers::receipt_ocr::get_receipt_picture))
         .route("/receipt-pictures/:id/archive", post(crate::handlers::archive::archive_receipt))
         .route("/receipt-pictures/:id/restore", post(crate::handlers::archive::restore_receipt))
+        .route(
+            "/receipt-pictures/:id/transaction",
+            axum::routing::put(crate::handlers::receipts::put_receipt_transaction)
+                .delete(crate::handlers::receipts::delete_receipt_transaction),
+        )
         .route("/tags", get(crate::handlers::pull::pull_tags).post(crate::handlers::push::push_tags))
         .route("/phone-logs", post(phone_logs))
         .route("/backup", post(crate::handlers::backup::post_backup)

@@ -609,6 +609,53 @@ fn reload_receipt(
     }
 }
 
+/// Links a receipt to a transaction on the server, which writes both ends and
+/// deletes a draft the receipt is leaving (`maia::receipt_links::link`).
+#[tauri::command]
+async fn link_receipt_transaction(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    transaction_id: String,
+) -> Result<CommandResult<Receipt>, String> {
+    let path = format!("/receipt-pictures/{}/transaction", path_segment(&id));
+    let body = serde_json::json!({ "transactionId": transaction_id });
+    let result = match api::put::<_, serde_json::Value>(&path, &body).await {
+        Ok(data) => CommandResult {
+            success: true,
+            data: Some(data),
+            error: None,
+        },
+        Err(e) => CommandResult {
+            success: false,
+            data: None,
+            error: Some(e.to_message()),
+        },
+    };
+    Ok(reload_receipt(&state, &id, result))
+}
+
+/// Unlinks a receipt from its transaction, clearing both ends.
+#[tauri::command]
+async fn unlink_receipt_transaction(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<CommandResult<Receipt>, String> {
+    let path = format!("/receipt-pictures/{}/transaction", path_segment(&id));
+    let result = match api::delete::<serde_json::Value>(&path).await {
+        Ok(data) => CommandResult {
+            success: true,
+            data: Some(data),
+            error: None,
+        },
+        Err(e) => CommandResult {
+            success: false,
+            data: None,
+            error: Some(e.to_message()),
+        },
+    };
+    Ok(reload_receipt(&state, &id, result))
+}
+
 /// Lists workout templates, newest first.
 ///
 /// The templates view used to be fed by the sync server over HTTP. It reads the
@@ -4929,6 +4976,8 @@ pub fn run() {
             read_receipt_picture,
             archive_receipt,
             restore_receipt,
+            link_receipt_transaction,
+            unlink_receipt_transaction,
             list_tasks,
             list_tasks_range,
             get_task,

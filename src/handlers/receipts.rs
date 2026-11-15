@@ -177,3 +177,46 @@ fn find_boundary_end(data: &[u8]) -> usize {
         data.len()
     }
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkRequest {
+    transaction_id: String,
+}
+
+fn link_error(e: crate::receipt_links::LinkError) -> axum::response::Response {
+    use crate::receipt_links::LinkError::*;
+    let status = match &e {
+        ReceiptNotFound(_) | TransactionNotFound(_) => StatusCode::NOT_FOUND,
+        NotLinkable { .. } => StatusCode::BAD_REQUEST,
+        TransactionTaken { .. } => StatusCode::CONFLICT,
+        Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    crate::error::error_response(status, e.to_string()).into_response()
+}
+
+/// `PUT /receipt-pictures/:id/transaction`: links the receipt to a transaction,
+/// at both ends (see [`crate::receipt_links`]).
+pub async fn put_receipt_transaction(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(request): Json<LinkRequest>,
+) -> axum::response::Response {
+    let conn = state.db.get().unwrap();
+    match crate::receipt_links::link(&conn, &id, request.transaction_id.trim(), db::server_time_ms()) {
+        Ok(outcome) => Json(outcome).into_response(),
+        Err(e) => link_error(e),
+    }
+}
+
+/// `DELETE /receipt-pictures/:id/transaction`: unlinks the receipt.
+pub async fn delete_receipt_transaction(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    let conn = state.db.get().unwrap();
+    match crate::receipt_links::unlink(&conn, &id, db::server_time_ms()) {
+        Ok(outcome) => Json(outcome).into_response(),
+        Err(e) => link_error(e),
+    }
+}
