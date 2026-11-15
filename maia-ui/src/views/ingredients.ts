@@ -3,7 +3,7 @@ import { api } from "../lib/api";
 import { escapeHtml, setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
 import { toast } from "../lib/overlay";
-import { ingredientsAtom, storesAtom } from "../lib/stores";
+import { ingredientsAtom, receiptsAtom, storesAtom } from "../lib/stores";
 import { isEnvelopeFailure, unwrapList } from "../lib/api";
 import { panelClose, panelOpen, statusBanner } from "./shared";
 
@@ -23,6 +23,8 @@ interface PriceRow {
   packageGrams: number | null;
   recordedAt: number;
   sourceUrl: string | null;
+  /** The receipt this price was read from, when it came from one. */
+  receiptId?: string | null;
 }
 
 /** Cost per 100g in the observation's own currency; null without a package
@@ -121,6 +123,7 @@ export function mount(root: HTMLElement): () => void {
               ${new Date(p.recordedAt).toLocaleDateString()}
               ${p.packageGrams ? ` • ${p.packageGrams % 1 === 0 ? p.packageGrams.toFixed(0) : p.packageGrams.toFixed(1)} g` : ""}
               ${p.sourceUrl ? ` • <a class="text-accent-400 underline" href="${escapeHtml(p.sourceUrl)}" target="_blank" rel="noreferrer">source</a>` : ""}
+              ${p.receiptId ? ` • <button type="button" class="link link-accent" data-action="open-receipt" data-receipt="${escapeHtml(p.receiptId)}">receipt</button>` : ""}
             </div>
           </div>
           <div class="shrink-0 text-right">
@@ -477,6 +480,12 @@ export function mount(root: HTMLElement): () => void {
   };
 
   root.addEventListener("click", (event) => {
+    const openReceipt = (event.target as HTMLElement).closest<HTMLElement>("[data-action='open-receipt']");
+    if (openReceipt?.dataset.receipt) {
+      receiptsAtom.set({ ...receiptsAtom.get(), selectedId: openReceipt.dataset.receipt });
+      window.location.hash = "#/receipts";
+      return;
+    }
     const target = event.target as HTMLElement;
     if (target.closest("[data-action='ing-open-modal']")) {
       ingredientsAtom.set({ ...ingredientsAtom.get(), showAddModal: true });

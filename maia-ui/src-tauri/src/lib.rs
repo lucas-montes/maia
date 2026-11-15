@@ -52,10 +52,29 @@ struct Receipt {
     archived_at: Option<i64>,
     created_at: i64,
     updated_at: i64,
+    /// The store the server matched or the user chose (`maia::matching`).
+    store_id: Option<String>,
+    /// How the store and the transaction were decided: auto, ai or manual.
+    store_source: Option<String>,
+    link_source: Option<String>,
 }
 
 const RECEIPT_COLUMNS: &str = "id, local_path, remote_path, upload_status, parsed, parsed_json, \
      parse_error, transaction_id, archived_path, archived_at, created_at, updated_at";
+
+/// [`RECEIPT_COLUMNS`] plus the matching columns (server migration v16), or
+/// NULLs on a database the server has not migrated yet.
+fn receipt_columns(conn: &rusqlite::Connection) -> String {
+    let migrated = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('receipts') WHERE name = 'store_id')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    let extra = if migrated { "store_id, store_source, link_source" } else { "NULL, NULL, NULL" };
+    format!("{RECEIPT_COLUMNS}, {extra}")
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Task {
@@ -381,6 +400,9 @@ fn map_receipt(r: &rusqlite::Row<'_>) -> rusqlite::Result<Receipt> {
         archived_at: r.get(9)?,
         created_at: r.get(10)?,
         updated_at: r.get(11)?,
+        store_id: r.get(12)?,
+        store_source: r.get(13)?,
+        link_source: r.get(14)?,
     })
 }
 
@@ -397,7 +419,8 @@ fn list_receipts(state: tauri::State<AppState>) -> CommandResult<Vec<Receipt>> {
         }
     };
     let sql = format!(
-        "SELECT {RECEIPT_COLUMNS} FROM receipts WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 500"
+        "SELECT {} FROM receipts WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 500",
+        receipt_columns(&conn)
     );
     let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
@@ -429,7 +452,7 @@ fn load_receipt(state: &AppState, id: &str) -> Result<Receipt, String> {
         .lock()
         .map_err(|e| format!("Database lock error: {e}"))?;
     let sql =
-        format!("SELECT {RECEIPT_COLUMNS} FROM receipts WHERE id = ?1 AND deleted_at IS NULL");
+        format!("SELECT {} FROM receipts WHERE id = ?1 AND deleted_at IS NULL", receipt_columns(&conn));
     conn.query_row(&sql, params![id], map_receipt)
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => "Receipt not found".to_string(),
@@ -622,53 +645,6 @@ async fn reparse_receipt(
         serde_json::json!({}),
     )
     .await;
-    Ok(reload_receipt(&state, &id, result))
-}
-
-/// Links a receipt to a transaction on the server, which writes both ends and
-/// deletes a draft the receipt is leaving (`maia::receipt_links::link`).
-#[tauri::command]
-async fn link_receipt_transaction(
-    state: tauri::State<'_, AppState>,
-    id: String,
-    transaction_id: String,
-) -> Result<CommandResult<Receipt>, String> {
-    let path = format!("/receipt-pictures/{}/transaction", path_segment(&id));
-    let body = serde_json::json!({ "transactionId": transaction_id });
-    let result = match api::put::<_, serde_json::Value>(&path, &body).await {
-        Ok(data) => CommandResult {
-            success: true,
-            data: Some(data),
-            error: None,
-        },
-        Err(e) => CommandResult {
-            success: false,
-            data: None,
-            error: Some(e.to_message()),
-        },
-    };
-    Ok(reload_receipt(&state, &id, result))
-}
-
-/// Unlinks a receipt from its transaction, clearing both ends.
-#[tauri::command]
-async fn unlink_receipt_transaction(
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> Result<CommandResult<Receipt>, String> {
-    let path = format!("/receipt-pictures/{}/transaction", path_segment(&id));
-    let result = match api::delete::<serde_json::Value>(&path).await {
-        Ok(data) => CommandResult {
-            success: true,
-            data: Some(data),
-            error: None,
-        },
-        Err(e) => CommandResult {
-            success: false,
-            data: None,
-            error: Some(e.to_message()),
-        },
-    };
     Ok(reload_receipt(&state, &id, result))
 }
 
@@ -1400,13 +1376,26 @@ fn list_ingredients(state: tauri::State<AppState>) -> CommandResult<Vec<serde_js
         .unwrap()
         .filter_map(|r| r.ok())
         .collect();
+    // The receipt a price came from (server migration v17), for the back link.
+    let price_receipt = if conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_line_matches')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(false)
+    {
+        "(SELECT m.receipt_id FROM receipt_line_matches m WHERE m.ingredient_price_id = ingredient_prices.id LIMIT 1)"
+    } else {
+        "NULL"
+    };
     for (id, name, cal, prot, carb, fat, sod, fib, sug, arch, brand, barcode, created) in rows {
         let pics: Vec<serde_json::Value> = conn.prepare("SELECT id, image_path, sort_order FROM ingredient_pictures WHERE ingredient_id=?1 ORDER BY sort_order").unwrap().query_map([&id], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"imagePath":r.get::<_,String>(1)?,"sortOrder":r.get::<_,i64>(2)?}))).unwrap().filter_map(|r|r.ok()).collect();
         // package_grams is what turns a price into a comparable cost-per-100g;
         // source_url is the optional "where I saw this" link. Both used to be
         // missing here, so the ingredient detail view could not show a
         // cost-per-100g history at all -- see T03 in the price-tracking plan.
-        let prices: Vec<serde_json::Value> = conn.prepare("SELECT id, store_id, price, currency_code, package_grams, recorded_at, source_url FROM ingredient_prices WHERE ingredient_id=?1 AND deleted_at IS NULL ORDER BY recorded_at DESC LIMIT 100").unwrap().query_map([&id], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"storeId":r.get::<_,String>(1)?,"price":r.get::<_,f64>(2)?,"currencyCode":r.get::<_,String>(3)?,"packageGrams":r.get::<_,Option<f64>>(4)?,"recordedAt":r.get::<_,i64>(5)?,"sourceUrl":r.get::<_,Option<String>>(6)?}))).unwrap().filter_map(|r|r.ok()).collect();
+        let prices: Vec<serde_json::Value> = conn.prepare(&format!("SELECT id, store_id, price, currency_code, package_grams, recorded_at, source_url, {price_receipt} FROM ingredient_prices WHERE ingredient_id=?1 AND deleted_at IS NULL ORDER BY recorded_at DESC LIMIT 100")).unwrap().query_map([&id], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"storeId":r.get::<_,String>(1)?,"price":r.get::<_,f64>(2)?,"currencyCode":r.get::<_,String>(3)?,"packageGrams":r.get::<_,Option<f64>>(4)?,"recordedAt":r.get::<_,i64>(5)?,"sourceUrl":r.get::<_,Option<String>>(6)?,"receiptId":r.get::<_,Option<String>>(7)?}))).unwrap().filter_map(|r|r.ok()).collect();
         out.push(serde_json::json!({"id":id,"name":name,"calories_per100g":cal,"protein_per100g":prot,"carbs_per100g":carb,"fat_per100g":fat,"sodium_per100g":sod,"fiber_per100g":fib,"sugar_per100g":sug,"is_archived":arch!=0,"brand":brand,"barcode":barcode,"createdAt":created,"pictures":pics,"prices":prices}));
     }
     CommandResult {
@@ -1427,10 +1416,59 @@ fn list_stores(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::V
             };
         }
     };
+    // What identifies a store (server migration v16), or NULLs on a database
+    // the server has not migrated yet. Deleted stores stay out of the list.
+    let migrated = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('stores') WHERE name = 'tax_id')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    let details = [
+        "brand", "legal_name", "country", "tax_id", "tax_id_kind", "vat_number", "address", "city", "postcode",
+        "website", "details_source",
+    ];
+    let columns = if migrated {
+        details.join(", ")
+    } else {
+        details.iter().map(|_| "NULL").collect::<Vec<_>>().join(", ")
+    };
+    let receipts = if migrated {
+        "(SELECT COUNT(*) FROM receipts r WHERE r.store_id = s.id AND r.deleted_at IS NULL)"
+    } else {
+        "0"
+    };
     let mut stmt = conn
-        .prepare("SELECT id, name, created_at FROM stores ORDER BY name")
+        .prepare(&format!(
+            "SELECT s.id, s.name, s.created_at, {receipts},
+                    (SELECT COUNT(*) FROM ingredient_prices p WHERE p.store_id = s.id AND p.deleted_at IS NULL),
+                    {columns}
+             FROM stores s WHERE s.deleted_at IS NULL ORDER BY s.name"
+        ))
         .unwrap();
-    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"createdAt":r.get::<_,i64>(2)?}))).unwrap().filter_map(|r|r.ok()).collect();
+    let rows: Vec<serde_json::Value> = stmt
+        .query_map([], |r| {
+            let mut row = serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "name": r.get::<_, String>(1)?,
+                "createdAt": r.get::<_, i64>(2)?,
+                "receiptCount": r.get::<_, i64>(3)?,
+                "priceCount": r.get::<_, i64>(4)?,
+            });
+            for (i, column) in details.iter().enumerate() {
+                let camel: String = column
+                    .split('_')
+                    .enumerate()
+                    .map(|(j, w)| if j == 0 { w.to_string() } else { w[..1].to_uppercase() + &w[1..] })
+                    .collect();
+                row[camel] = serde_json::json!(r.get::<_, Option<String>>(5 + i)?);
+            }
+            Ok(row)
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
     CommandResult {
         success: true,
         data: Some(rows),
@@ -3040,215 +3078,54 @@ async fn move_account_to_root(
     }
 }
 
-/// Epoch-milliseconds from the OCR date text, whatever shape it came in
-/// (RFC 3339, both naive splits, or a bare date), falling back to
-/// [fallback_ms]. Noon on a bare date — a receipt is a daytime artifact.
-fn parse_receipt_date(text: &str, fallback_ms: i64) -> i64 {
-    let text = text.trim();
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
-        return dt.timestamp_millis();
-    }
-    for format in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"] {
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(text, format) {
-            return dt.and_utc().timestamp_millis();
-        }
-        if let Ok(date) = chrono::NaiveDate::parse_from_str(text, format) {
-            if let Some(dt) = date.and_hms_opt(12, 0, 0) {
-                return dt.and_utc().timestamp_millis();
-            }
-        }
-    }
-    fallback_ms
-}
+// A receipt is never booked: transactions come from statements, and the
+// server links a receipt to one (`maia::matching`). The desktop's old
+// "draft expense from a parsed receipt" command is gone with that rule.
 
-/// `YYYY-MM-DD` for the FX-rate lookup, on UTC days.
-fn rate_date_of(timestamp_ms: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(timestamp_ms)
-        .map(|dt| dt.format("%Y-%m-%d").to_string())
-        .unwrap_or_default()
-}
-
-/// The newest rate of [code] against [base] on or before the receipt's day —
-/// the same rule the server's statement import applies. 1.0 when the currency
-/// is already the base, or when none is recorded: a missing rate must not
-/// block the expense from existing (matching mobile's fallback).
-fn rate_to_base(conn: &rusqlite::Connection, code: &str, base: &str, date: &str) -> f64 {
-    if code.eq_ignore_ascii_case(base) {
-        return 1.0;
-    }
-    conn.query_row(
-        "SELECT rate_to_base FROM fx_rates
-         WHERE code=?1 AND base_code=?2 AND rate_date<=?3 AND deleted_at IS NULL
-         ORDER BY rate_date DESC LIMIT 1",
-        rusqlite::params![code, base, date],
-        |r| r.get::<_, f64>(0),
-    )
-    .unwrap_or(1.0)
-}
-
-/// Creates the draft expense a parsed receipt stands for, and links the
-/// receipt to it — the same capture flow the phone performs locally
-/// (upload → OCR → draft), except the transaction is pushed through the
-/// server, the only writer.
-///
-/// Idempotent: an already-linked receipt is reported untouched, and one whose
-/// linking push failed is re-linked to the transaction the first attempt
-/// founded (found by `receipt_id`) rather than a second one being made.
+/// The receipt's page as the server sees it: reading, store and what to do
+/// about it, transaction and candidates, lines, and every effect.
 #[tauri::command]
-async fn create_receipt_transaction(
-    state: tauri::State<'_, AppState>,
-    id: String,
+async fn get_receipt_matching(id: String) -> Result<CommandResult<serde_json::Value>, String> {
+    let path = format!("/receipt-pictures/{}/matching", path_segment(&id));
+    Ok(match api::get::<serde_json::Value>(&path).await {
+        Ok(data) => CommandResult { success: true, data: Some(data), error: None },
+        Err(e) => CommandResult { success: false, data: None, error: Some(e.to_message()) },
+    })
+}
+
+/// One action from the receipt's page or the Stores view, sent to the
+/// server. Only the matching routes are reachable through it.
+#[tauri::command]
+async fn matching_request(
+    method: String,
+    path: String,
+    body: Option<serde_json::Value>,
 ) -> Result<CommandResult<serde_json::Value>, String> {
-    let receipt = match load_receipt(&state, &id) {
-        Ok(r) => r,
-        Err(e) => {
-            return Ok(CommandResult {
-                success: false,
-                data: None,
-                error: Some(e),
-            });
-        }
-    };
-
-    let parsed: serde_json::Value = match receipt
-        .parsed_json
-        .as_deref()
-        .filter(|_| receipt.parsed)
-        .map(serde_json::from_str)
-    {
-        Some(Ok(v)) => v,
-        Some(Err(e)) => {
-            return Ok(CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("receipt is parsed but unreadable: {e}")),
-            });
-        }
-        _ => {
-            return Ok(CommandResult {
-                success: false,
-                data: None,
-                error: Some("receipt has not been parsed yet".to_string()),
-            });
-        }
-    };
-    let total = parsed.get("total").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    // A total at or below zero is an OCR miss, not an expense; leave the
-    // linking for the user rather than book money that was never spent.
-    if total <= 0.0 {
-        return Ok(CommandResult {
-            success: true,
-            data: Some(serde_json::json!({"created": false, "reason": "no positive total"})),
-            error: None,
-        });
-    }
-    if let Some(existing) = receipt.transaction_id.as_deref() {
-        return Ok(CommandResult {
-            success: true,
-            data: Some(serde_json::json!({"created": false, "reason": "already linked", "transactionId": existing})),
-            error: None,
-        });
-    }
-
-    let currency = parsed
-        .get("currency")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_ascii_uppercase();
-    let merchant = parsed
-        .get("merchant")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Receipt")
-        .trim()
-        .to_string();
-    let date_ms = parse_receipt_date(
-        parsed.get("date").and_then(|v| v.as_str()).unwrap_or(""),
-        receipt.created_at,
-    );
-    let now = chrono::Utc::now().timestamp_millis();
-
-    // Short-lived read locks only — no guard may live across the awaits.
-    let (rate_used, base, already_created_id) = {
-        let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-        let base = base_currency();
-        let code = if currency.is_empty() { base.as_str() } else { currency.as_str() };
-        let rate = rate_to_base(&conn, code, &base, &rate_date_of(date_ms));
-        // Linking that failed on the previous attempt leaves the transaction
-        // already in the ledger; re-adopt it instead of making a twin.
-        let existing: Option<String> = conn
-            .query_row(
-                "SELECT id FROM transactions WHERE receipt_id = ?1 AND deleted_at IS NULL",
-                rusqlite::params![receipt.id],
-                |r| r.get(0),
-            )
-            .ok();
-        (rate, base, existing)
-    };
-
-    let transaction_id = match already_created_id {
-        Some(found) => found,
-        None => {
-            let transaction_id = uuid::Uuid::now_v7().to_string();
-            let amount_base = total * rate_used;
-            let body = serde_json::json!({
-                "transactions": [{
-                    "id": transaction_id,
-                    "type": "expense",
-                    "amount": total,
-                    "currencyCode": if currency.is_empty() { base.as_str() } else { currency.as_str() },
-                    "amountBase": amount_base,
-                    "rateUsed": rate_used,
-                    "accountId": null,
-                    "toAccountId": null,
-                    "category": merchant,
-                    "date": date_ms,
-                    "note": "Parsed from receipt",
-                    "receiptId": receipt.id,
-                    "isDraft": true,
-                    "createdAt": now,
-                    "deletedAt": null,
-                }],
-                "deleted": [],
-            });
-            if let Err(e) = api::post::<_, serde_json::Value>("/transactions", &body).await {
-                return Ok(CommandResult {
-                    success: false,
-                    data: None,
-                    error: Some(e.to_message()),
-                });
-            }
-            transaction_id
-        }
-    };
-
-    // Client-wins receipt push, carrying every field it set so linking does
-    // not clobber the parse result: the shape is `handlers::receipts::ReceiptPush`.
-    let receipt_body = serde_json::json!({
-        "receipts": [{
-            "id": receipt.id,
-            "localPath": receipt.local_path,
-            "remotePath": receipt.remote_path,
-            "uploadStatus": receipt.upload_status,
-            "parsed": receipt.parsed,
-            "parsedJson": receipt.parsed_json,
-            "transactionId": transaction_id,
-            "createdAt": receipt.created_at,
-        }],
-        "deleted": [],
-    });
-    if let Err(e) = api::post::<_, serde_json::Value>("/receipt-pictures", &receipt_body).await {
+    let allowed = ["/receipt-pictures/", "/stores/", "/receipt-effects"];
+    if !allowed.iter().any(|p| path.starts_with(p)) || path.contains("..") {
         return Ok(CommandResult {
             success: false,
             data: None,
-            error: Some(e.to_message()),
+            error: Some(format!("not a matching route: {path}")),
         });
     }
-
-    Ok(CommandResult {
-        success: true,
-        data: Some(serde_json::json!({"created": true, "transactionId": transaction_id})),
-        error: None,
+    let body = body.unwrap_or_else(|| serde_json::json!({}));
+    let result = match method.as_str() {
+        "GET" => api::get::<serde_json::Value>(&path).await,
+        "POST" => api::post::<_, serde_json::Value>(&path, &body).await,
+        "PUT" => api::put::<_, serde_json::Value>(&path, &body).await,
+        "DELETE" => api::delete::<serde_json::Value>(&path).await,
+        other => {
+            return Ok(CommandResult {
+                success: false,
+                data: None,
+                error: Some(format!("unknown method {other}")),
+            })
+        }
+    };
+    Ok(match result {
+        Ok(data) => CommandResult { success: true, data: Some(data), error: None },
+        Err(e) => CommandResult { success: false, data: None, error: Some(e.to_message()) },
     })
 }
 
@@ -4993,8 +4870,6 @@ pub fn run() {
             archive_receipt,
             restore_receipt,
             reparse_receipt,
-            link_receipt_transaction,
-            unlink_receipt_transaction,
             list_tasks,
             list_tasks_range,
             get_task,
@@ -5024,7 +4899,8 @@ pub fn run() {
             list_transactions,
             get_base_currency,
             upload_receipt_files,
-            create_receipt_transaction,
+            get_receipt_matching,
+            matching_request,
             save_account,
             set_account_identity,
             list_fx_rates,

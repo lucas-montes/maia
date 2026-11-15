@@ -134,6 +134,11 @@ export interface Receipt {
   /** Epoch milliseconds. */
   createdAt: number;
   updatedAt: number;
+  /** The store the server matched or the user chose. */
+  storeId: string | null;
+  /** How the store and the transaction were decided: auto, ai or manual. */
+  storeSource: string | null;
+  linkSource: string | null;
 }
 
 /** A staged statement section or provider bucket, as `GET /statements` returns it. */
@@ -654,13 +659,14 @@ export const api = {
   restoreReceipt: (id: string) => invoke<Envelope<void>>("restore_receipt", { id }),
 
   /** Reads a receipt again on the server; the new reading lands asynchronously. */
+  /** The receipt's page from the server: reading, store, transaction, lines, effects. */
+  getReceiptMatching: (id: string) => invoke<Envelope<MatchingPage>>("get_receipt_matching", { id }),
+
+  /** One action on a receipt's page or a store, answered by the server. */
+  matchingRequest: <T = MatchingPage>(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown) =>
+    invoke<Envelope<T>>("matching_request", { method, path, body: body ?? null }),
+
   reparseReceipt: (id: string) => invoke<Envelope<Receipt>>("reparse_receipt", { id }),
-
-  /** Links a receipt to an expense or income; the server writes both ends. */
-  linkReceiptTransaction: (id: string, transactionId: string) =>
-    invoke<Envelope<Receipt>>("link_receipt_transaction", { id, transactionId }),
-
-  unlinkReceiptTransaction: (id: string) => invoke<Envelope<Receipt>>("unlink_receipt_transaction", { id }),
 
   listTasks: () => invoke<Envelope<Todo[]>>("list_tasks"),
 
@@ -1009,14 +1015,6 @@ export const api = {
       { files },
     ),
 
-  /** Creates the draft expense a parsed receipt stands for (phone-parity:
-   *  upload → OCR → draft) and links receipt → transaction. Idempotent. */
-  createReceiptTransaction: (id: string) =>
-    invoke<Envelope<{ created: boolean; reason?: string; transactionId?: string }>>(
-      "create_receipt_transaction",
-      { id },
-    ),
-
   listStatementFeeds: () =>
     invoke<Envelope<{ items: StatementFeedStatus[] }>>("list_statement_feeds"),
 
@@ -1046,4 +1044,115 @@ export function isEnvelopeFailure(res: unknown): string | null {
   const r = res as { success?: boolean; error?: string } | null;
   if (r && r.success === false) return r.error || "unknown error";
   return null;
+}
+
+// ---- Receipt matching (server `maia::matching`) ----
+
+/** Who made a decision: a rule, the AI (accepted by the user), or the user. */
+export type DecisionSource = "auto" | "ai" | "manual";
+
+export interface StoreDetails {
+  id: string;
+  name: string;
+  brand: string | null;
+  legalName: string | null;
+  country: string | null;
+  taxId: string | null;
+  taxIdKind: string | null;
+  vatNumber: string | null;
+  address: string | null;
+  city: string | null;
+  postcode: string | null;
+  website: string | null;
+  detailsSource: string | null;
+}
+
+export type StoreRecommendation =
+  | { kind: "rename"; storeId: string; current: string; proposed: string }
+  | {
+      kind: "newStore";
+      proposed: string;
+      brand: string | null;
+      country: string | null;
+      taxId: string | null;
+      conflictsWith: StoreDetails | null;
+    }
+  | { kind: "sameStore"; store: StoreDetails };
+
+export interface TransactionCandidate {
+  transactionId: string;
+  label: string;
+  amount: number;
+  currencyCode: string;
+  date: number;
+  accountName: string | null;
+  isDraft: boolean;
+  exactAmount: boolean;
+  passes: boolean;
+  merchantMatch: boolean;
+  cardMatch: boolean;
+  dayGap: number;
+  rejected: boolean;
+  score: number;
+}
+
+export interface MatchingLine {
+  line: number;
+  name: string;
+  kind: string;
+  quantity: number | null;
+  unit: string | null;
+  price: number;
+  currency: string;
+  matched: { ingredientId: string; ingredientName: string; ingredientPriceId: string | null; source: string } | null;
+  candidates: { id: string; name: string; brand: string | null; score: number; learned: boolean }[];
+}
+
+export interface ReceiptEffect {
+  id: string;
+  receiptId: string;
+  kind: string;
+  targetTable: string;
+  targetId: string;
+  line: number | null;
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  source: string;
+  createdAt: number;
+  undoneAt: number | null;
+  targetLabel: string | null;
+  targetLive: boolean;
+}
+
+export interface MatchingPage {
+  receiptId: string;
+  read: boolean;
+  store: StoreDetails | null;
+  storeSource: string | null;
+  recommendations: StoreRecommendation[];
+  transactionId: string | null;
+  linkSource: string | null;
+  transactionCandidates: TransactionCandidate[];
+  lines: MatchingLine[];
+  effects: ReceiptEffect[];
+}
+
+export interface AiProposals {
+  store: {
+    storeId: string | null;
+    newName: string | null;
+    brand: string | null;
+    country: string | null;
+    confidence: number;
+    reason: string;
+  } | null;
+  transaction: { transactionId: string | null; confidence: number; reason: string } | null;
+  lines: {
+    line: number;
+    ingredientId: string | null;
+    newIngredientName: string | null;
+    notAProduct: boolean;
+    confidence: number;
+    reason: string;
+  }[];
 }

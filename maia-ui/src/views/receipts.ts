@@ -1,38 +1,10 @@
-import { api, isEnvelopeFailure, unwrapList, type FinanceTransaction, type Receipt } from "../lib/api";
+import { api, type Receipt } from "../lib/api";
 import { escapeHtml, formatEpoch, setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
-import { toast } from "../lib/overlay";
-import { rankCandidates, sameAmount, type ReceiptFacts } from "../lib/receiptCandidates";
-import { addressLine, isOldReading, quantityLabel, readReading } from "../lib/receiptReading";
+import { addressLine, isOldReading, readReading } from "../lib/receiptReading";
 import { receiptsAtom } from "../lib/stores";
-import { transactionLabel } from "../lib/transactionLabel";
+import { mountReceiptPage } from "./receiptPage";
 import { backToDashboard, panelClose, panelOpen, statusBanner } from "./shared";
-
-/** One parsed receipt line item, as the OCR payload's `items` array holds it
- *  (`receipt_ocr::ParsedItem`: name/price/currency, no quantity). */
-interface ParsedLineItem {
-  name: string;
-  price: number;
-  currency: string;
-}
-
-function parsedItems(r: Receipt): ParsedLineItem[] {
-  const items = parsed(r)?.items;
-  if (!Array.isArray(items)) return [];
-  return items.filter(
-    (it): it is ParsedLineItem =>
-      it && typeof it === "object" && typeof (it as any).name === "string" && typeof (it as any).price === "number",
-  );
-}
-
-/** The receipt's own date as epoch ms, falling back to when it was uploaded
- *  if the parsed date does not parse -- a match always needs *some* date to
- *  record the price against. */
-function receiptRecordedAt(r: Receipt): number {
-  const raw = parsedText(r, "date");
-  const parsedMs = raw ? Date.parse(raw) : NaN;
-  return Number.isFinite(parsedMs) ? parsedMs : r.createdAt;
-}
 
 /** Display status derived from the row; there is no status column in the schema. */
 function receiptStatus(r: Receipt): string {
@@ -129,9 +101,7 @@ function detailHtml(r: Receipt): string {
 
       ${readingHtml(r)}
 
-      ${transactionCardHtml(r)}
-
-      ${lineItemsHtml(r)}
+      <div data-slot="matching"></div>
 
       <div class="rounded border border-surface-800 bg-base-100 p-4">
         <h3 class="mb-3 text-sm font-medium text-ink-200">Image</h3>
@@ -156,103 +126,8 @@ function detailHtml(r: Receipt): string {
     </div>`;
 }
 
-/** The ledger, as the transaction card and the picker read it. Loaded when
- *  the view mounts and again after a link changes it. */
-let transactionCache: FinanceTransaction[] = [];
-
-async function loadTransactionCache(): Promise<void> {
-  try {
-    const res = await api.listTransactions();
-    if (!isEnvelopeFailure(res)) transactionCache = unwrapList(res) as FinanceTransaction[];
-  } catch {
-    // The card then shows the bare id, and the picker an empty list.
-  }
-}
-
-function receiptFacts(r: Receipt): ReceiptFacts {
-  const total = Number(parsedText(r, "total"));
-  return {
-    id: r.id,
-    total: Number.isFinite(total) && total > 0 ? total : null,
-    currency: parsedText(r, "currency"),
-    date: receiptRecordedAt(r),
-  };
-}
-
 function money(value: number): string {
   return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-/** One transaction as the card and the picker show it: label, account, day, amount. */
-function transactionLineHtml(t: FinanceTransaction, r: Receipt): string {
-  const exact = sameAmount(t, receiptFacts(r));
-  return `
-    <div class="min-w-0 flex-1">
-      <div class="flex items-center gap-2">
-        ${t.isDraft ? `<span class="badge badge-xs badge-warn">draft</span>` : ""}
-        <span class="truncate text-sm text-ink-200">${escapeHtml(transactionLabel(t))}</span>
-      </div>
-      <div class="text-xs text-ink-500">${escapeHtml(t.accountName ?? "no account")} · ${escapeHtml(new Date(t.date).toLocaleDateString())}</div>
-    </div>
-    <span class="shrink-0 font-mono text-sm ${exact ? "text-ok-400" : "text-ink-300"}">${t.type === "income" ? "+" : "−"}${money(t.amount)} ${escapeHtml(t.currencyCode)}</span>`;
-}
-
-/** The transaction this receipt is the proof of, and the actions on the link.
- *  The link is the server's: it writes both ends (`maia::receipt_links`). */
-function transactionCardHtml(r: Receipt): string {
-  const linked = r.transactionId ? transactionCache.find((t) => t.id === r.transactionId) : undefined;
-  const id = escapeHtml(r.id);
-  const body = r.transactionId
-    ? linked
-      ? `<div class="flex items-center gap-3">${transactionLineHtml(linked, r)}</div>`
-      : `<div class="break-all font-mono text-xs text-ink-400">${escapeHtml(r.transactionId)} (not in the ledger)</div>`
-    : `<div class="text-sm text-ink-500">Not linked to a transaction.</div>`;
-  const actions = r.transactionId
-    ? `<button class="btn btn-secondary btn-xs" type="button" data-action="link-transaction" data-receipt-id="${id}">Change</button>
-       <button class="btn btn-ghost btn-xs" type="button" data-action="unlink-transaction" data-receipt-id="${id}">Unlink</button>`
-    : `<button class="btn btn-secondary btn-xs" type="button" data-action="link-transaction" data-receipt-id="${id}">Link to transaction</button>`;
-  return `
-    <div class="rounded border border-surface-800 bg-base-100 p-4">
-      <div class="mb-3 flex items-center justify-between">
-        <h3 class="text-sm font-medium text-ink-200">Transaction</h3>
-        <div class="flex gap-2">${actions}</div>
-      </div>
-      ${body}
-    </div>`;
-}
-
-/** Every line of the reading: what it is, how much of it, its discount, and
- *  a "match to ingredient" action on a product line. */
-function lineItemsHtml(r: Receipt): string {
-  const items = readReading(r.parsedJson)?.items ?? [];
-  if (!items.length) return "";
-  const rows = items
-    .map((it, i) => {
-      const qty = quantityLabel(it);
-      const notProduct = it.kind !== "product";
-      return `
-      <div class="flex items-center justify-between gap-3 border-b border-surface-800 py-2 last:border-0 ${notProduct ? "opacity-60" : ""}">
-        <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-2">
-            ${notProduct ? `<span class="badge badge-xs badge-ghost">${escapeHtml(it.kind)}</span>` : ""}
-            <span class="truncate text-sm text-ink-200">${escapeHtml(it.name)}</span>
-          </div>
-          ${qty || it.discount || it.code ? `<div class="text-xs text-ink-500">${escapeHtml(qty)}${it.discount ? ` · −${it.discount.toFixed(2)} off` : ""}${it.code ? ` · ${escapeHtml(it.code)}` : ""}</div>` : ""}
-        </div>
-        <div class="flex shrink-0 items-center gap-3">
-          <span class="font-mono text-sm text-ink-300">${it.price.toFixed(2)} ${escapeHtml(it.currency)}</span>
-          <button class="btn btn-secondary btn-xs" type="button" data-action="match-item" data-receipt-id="${escapeHtml(r.id)}" data-item-index="${i}">
-            Match to ingredient
-          </button>
-        </div>
-      </div>`;
-    })
-    .join("");
-  return `
-    <div class="rounded border border-surface-800 bg-base-100 p-4">
-      <h3 class="mb-3 text-sm font-medium text-ink-200">Line items (${items.length})</h3>
-      ${rows}
-    </div>`;
 }
 
 /** What the receipt printed about its shop and its sale, with "Read again"
@@ -305,9 +180,10 @@ function readingHtml(r: Receipt): string {
 
 /** Receipts — list, detail pane with lazily loaded image, archive/restore.
  *  The header carries the import form: pick one or many receipt pictures,
- *  they upload to the server's OCR endpoint, parse, and each lands a draft
- *  expense once its parse succeeds. */
+ *  they upload to the server's OCR endpoint and are read and matched there. */
 export function mount(root: HTMLElement): () => void {
+  let pageEl: HTMLElement | null = null;
+  let pageFor: string | null = null;
   root.innerHTML = `
     <div data-slot="content"></div>
     <input type="file" accept="image/*" multiple hidden data-import-input />
@@ -327,6 +203,18 @@ export function mount(root: HTMLElement): () => void {
           ${r ? detailHtml(r) : `<div class="flex h-full items-center justify-center text-sm text-ink-500">Receipt not found</div>`}
         ${panelClose}`,
       );
+      // The matching page keeps its state (AI proposals, what is folded) while
+      // the same receipt stays open, so a refresh re-attaches it.
+      const slot = content.querySelector<HTMLElement>("[data-slot='matching']");
+      if (slot && r) {
+        if (pageFor === r.id && pageEl) {
+          slot.replaceWith(pageEl);
+        } else {
+          pageEl = slot;
+          pageFor = r.id;
+          mountReceiptPage(slot, r.id, () => void list());
+        }
+      }
       void loadImages();
     } else {
       setHtml(
@@ -466,34 +354,10 @@ export function mount(root: HTMLElement): () => void {
       void reparse(reparseBtn.dataset.receiptId);
       return;
     }
-    const linkBtn = target.closest<HTMLElement>("[data-action='link-transaction']");
-    if (linkBtn?.dataset.receiptId) {
-      const r = receiptsAtom.get().items.find((x) => x.id === linkBtn.dataset.receiptId);
-      if (r) openLinkModal(r, () => void afterLink());
-      return;
-    }
-    const unlinkBtn = target.closest<HTMLElement>("[data-action='unlink-transaction']");
-    if (unlinkBtn?.dataset.receiptId) {
-      void unlink(unlinkBtn.dataset.receiptId);
-      return;
-    }
-    const matchBtn = target.closest<HTMLElement>("[data-action='match-item']");
-    if (matchBtn?.dataset.receiptId && matchBtn.dataset.itemIndex !== undefined) {
-      const r = receiptsAtom.get().items.find((x) => x.id === matchBtn.dataset.receiptId);
-      const item = r ? parsedItems(r)[Number(matchBtn.dataset.itemIndex)] : undefined;
-      if (r && item) void openMatchModal(r, item);
-    }
   });
   importInput.addEventListener("change", () => {
     void importFiles(Array.from(importInput.files ?? []));
   });
-
-  /** A link changed both ends on the server: reload the ledger the card reads
-   *  and the receipts, so a deleted draft disappears too. */
-  const afterLink = async (): Promise<void> => {
-    await loadTransactionCache();
-    await list();
-  };
 
   /** Asks the server to read the receipt again, then watches the row until
    *  the new reading (or its error) lands, as the import does. */
@@ -530,36 +394,19 @@ export function mount(root: HTMLElement): () => void {
     receiptsAtom.set({ ...receiptsAtom.get(), status: "idle", message: "Still reading; refresh later" });
   };
 
-  const unlink = async (id: string): Promise<void> => {
-    try {
-      const res = await api.unlinkReceiptTransaction(id);
-      if (!res.success) {
-        toast(res.error ?? "Could not unlink the receipt", "err");
-        return;
-      }
-      toast("Receipt unlinked", "ok");
-    } catch (e) {
-      toast(`Could not unlink the receipt: ${e}`, "err");
-      return;
-    }
-    await afterLink();
-  };
-
   void list();
-  void loadTransactionCache().then(render);
   const unsub = receiptsAtom.subscribe(render);
   return unsub;
 }
 
-/** Upload → OCR poll → draft-expense creation, narrated on the view's banner.
+/** Upload → OCR poll, narrated on the view's banner. Nothing is booked:
  *
  *  One pick can carry many pictures; each is its own HTTP request (the OCR
  *  endpoint takes a single file part), so results are counted per receipt.
  *  The rows land in the shared database the moment the server accepts an
  *  upload, so the list refreshes live while parsing — the poll just watches
  *  for each receipt to reach a terminal parse state (like the phone does
- *  against `/:id/parse`), then creates the draft expense a parsed total
- *  stands for. */
+ *  against `/:id/parse`); the server matches each receipt once it is read. */
 const importFiles = async (picked: File[]): Promise<void> => {
   if (picked.length === 0) return;
   const plural = (n: number): string => `${n} receipt${n !== 1 ? "s" : ""}`;
@@ -642,25 +489,8 @@ const importFiles = async (picked: File[]): Promise<void> => {
   }
   for (const id of unresolved) parseOutcome.set(id, null);
 
-  // A parsed receipt with no transaction yet gets its draft expense now.
-  let booked = 0;
-  const linkFailed: string[] = [];
-  const rows = receiptsAtom.get().items;
-  for (const id of ids) {
-    const row = rows.find((r) => r.id === id);
-    if (!row?.parsed || row.transactionId) continue;
-    try {
-      const res = await api.createReceiptTransaction(id);
-      if (res.success) {
-        if (res.data?.created) booked++;
-      } else {
-        linkFailed.push(res.error ?? "unknown error");
-      }
-    } catch (e) {
-      linkFailed.push(String(e));
-    }
-  }
-
+  // Nothing is booked from a receipt: the server has matched each one that
+  // parsed (store, transaction, lines) and its page shows what it did.
   await refreshQuiet("");
   const parseFailed = [...parseOutcome.entries()]
     .filter(([, err]) => err !== null)
@@ -671,17 +501,11 @@ const importFiles = async (picked: File[]): Promise<void> => {
       ? [`${plural(unresolvedCount(parseOutcome))} still parsing`]
       : []),
     ...(uploadFailed.length ? [`uploads failed: ${uploadFailed.join("; ")}`] : []),
-    ...(linkFailed.length ? [`could not be booked: ${linkFailed.join("; ")}`] : []),
   ];
   receiptsAtom.set({
     ...receiptsAtom.get(),
     status: notes.length ? "idle" : "saved",
-    message:
-      booked > 0
-        ? `Imported ${plural(booked)} — draft expenses created${notes.length ? ` · ${notes.join(" · ")}` : ""}`
-        : notes.length
-          ? notes.join(" · ")
-          : "Receipts imported",
+    message: notes.length ? notes.join(" · ") : `Imported ${plural(ids.length)}; each one is matched on its page`,
   });
 };
 
@@ -705,235 +529,3 @@ function readReceiptFileAsDataURL(file: File): Promise<string> {
   });
 }
 
-// ---------------------------------------------------------------------------
-// T02: match-to-ingredient dialog
-// ---------------------------------------------------------------------------
-
-/** Ingredients loaded lazily on first match attempt and cached for the rest
- *  of the session -- the picker only needs id/name/archived, not a live feed. */
-let ingredientCache: { id: string; name: string; is_archived: boolean }[] | null = null;
-
-async function loadIngredientCache(): Promise<{ id: string; name: string; is_archived: boolean }[]> {
-  if (ingredientCache) return ingredientCache;
-  const res = await api.listIngredients();
-  ingredientCache = isEnvelopeFailure(res) ? [] : unwrapList(res);
-  return ingredientCache;
-}
-
-function matchResultsHtml(
-  ingredients: { id: string; name: string; is_archived: boolean }[],
-  query: string,
-  selectedId: string | null,
-): string {
-  const q = query.trim().toLowerCase();
-  const matches = ingredients
-    .filter((it) => !it.is_archived && (!q || it.name.toLowerCase().includes(q)))
-    .slice(0, 30);
-  if (!matches.length) {
-    return `<div class="p-2 text-xs text-ink-400">No ingredient matches your search.</div>`;
-  }
-  return matches
-    .map(
-      (it) => `
-      <button type="button" class="block w-full rounded px-2 py-1.5 text-left text-sm ${it.id === selectedId ? "bg-accent-500/20 text-accent-300" : "text-ink-200 hover:bg-surface-800"}" data-action="match-pick" data-id="${escapeHtml(it.id)}">
-        ${escapeHtml(it.name)}
-      </button>`,
-    )
-    .join("");
-}
-
-/** Opens the "match to ingredient" dialog for one parsed line item: an
- *  ingredient picker plus the package-weight input the receipt never
- *  provides (see `receipt_ocr::ParsedItem`). Submitting calls
- *  `POST /ingredient-prices/match`, which finds-or-creates the store by the
- *  receipt's merchant name and records the price dated the receipt's own
- *  date -- never "today".
- */
-async function openMatchModal(r: Receipt, item: ParsedLineItem): Promise<void> {
-  const modalRoot = document.getElementById("modal-root");
-  if (!modalRoot) return;
-  const merchant = parsedText(r, "merchant") || "Unknown store";
-  const recordedAt = receiptRecordedAt(r);
-  const ingredients = await loadIngredientCache();
-  let selectedId: string | null = null;
-
-  modalRoot.innerHTML = `
-    <dialog class="modal modal-open" id="match-item-modal">
-      <div class="modal-box flex max-h-[85vh] max-w-lg flex-col overflow-hidden">
-        <div class="flex items-center justify-between border-b border-surface-800 pb-3">
-          <div>
-            <h3 class="font-semibold text-ink-100">Match “${escapeHtml(item.name)}”</h3>
-            <p class="mt-1 text-xs text-ink-500">${escapeHtml(merchant)} · ${escapeHtml(formatEpoch(recordedAt))} · ${item.price.toFixed(2)} ${escapeHtml(item.currency)}</p>
-          </div>
-          <button class="btn btn-ghost btn-sm" data-action="match-close" aria-label="Close">✕</button>
-        </div>
-        <div class="min-h-0 flex-1 space-y-3 overflow-auto py-3">
-          <div>
-            <label class="field-label">Ingredient</label>
-            <input id="match-search" placeholder="Search ingredients..." class="input input-bordered w-full" />
-            <div class="mt-2 max-h-48 space-y-0.5 overflow-auto" data-slot="match-results"></div>
-          </div>
-          <div class="grid grid-cols-2 gap-2">
-            <div>
-              <label class="field-label text-xs">Package size (g)</label>
-              <input id="match-grams" type="number" step="0.1" placeholder="e.g. 500" class="input input-bordered w-full" />
-            </div>
-            <div>
-              <label class="field-label text-xs">Source URL (optional)</label>
-              <input id="match-source-url" placeholder="https://..." class="input input-bordered w-full" />
-            </div>
-          </div>
-          <p class="text-xs text-ink-500">
-            Re-matching the same ingredient at the same store on the same day overwrites the previous price, it does not add a second one.
-          </p>
-        </div>
-        <div class="modal-action border-t border-surface-800 pt-3">
-          <button class="btn btn-ghost btn-sm" data-action="match-close">Cancel</button>
-          <button class="btn btn-primary btn-sm" data-action="match-save">Save match</button>
-        </div>
-      </div>
-      <form method="dialog" class="modal-backdrop"><button>close</button></form>
-    </dialog>`;
-
-  const resultsEl = modalRoot.querySelector("[data-slot='match-results']") as HTMLElement;
-  const searchEl = modalRoot.querySelector("#match-search") as HTMLInputElement;
-  const renderResults = (): void => setHtml(resultsEl, matchResultsHtml(ingredients, searchEl.value, selectedId));
-  renderResults();
-  refreshIcons(modalRoot);
-  searchEl.focus();
-
-  const close = (): void => modalRoot.replaceChildren();
-
-  searchEl.addEventListener("input", renderResults);
-  modalRoot.addEventListener("click", (event) => {
-    const target = event.target as HTMLElement;
-    if (target.closest("[data-action='match-close']") || target.closest(".modal-backdrop")) {
-      close();
-      return;
-    }
-    const pick = target.closest<HTMLElement>("[data-action='match-pick']");
-    if (pick?.dataset.id) {
-      selectedId = pick.dataset.id;
-      renderResults();
-      return;
-    }
-    if (target.closest("[data-action='match-save']")) {
-      if (!selectedId) {
-        toast("Pick an ingredient first", "err");
-        return;
-      }
-      const grams = (modalRoot.querySelector("#match-grams") as HTMLInputElement).value.trim();
-      const sourceUrl = (modalRoot.querySelector("#match-source-url") as HTMLInputElement).value.trim();
-      void (async () => {
-        try {
-          const res = (await api.matchReceiptItem({
-            ingredientId: selectedId as string,
-            merchant,
-            price: item.price,
-            currencyCode: item.currency,
-            packageGrams: grams ? Number(grams) : null,
-            recordedAt,
-            sourceUrl: sourceUrl || null,
-          })) as any;
-          if (res?.success === false) {
-            toast(res.error || "Could not match item", "err");
-            return;
-          }
-          toast(`Matched to ${ingredients.find((i) => i.id === selectedId)?.name ?? "ingredient"}`, "ok");
-          close();
-        } catch (e) {
-          toast(`Could not match item: ${e}`, "err");
-        }
-      })();
-    }
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Link to a transaction
-// ---------------------------------------------------------------------------
-
-/** Opens the picker of the transaction this receipt is the proof of. Without
- *  a search it offers the expenses and incomes near the receipt's day, the
- *  ones for its exact amount first; a search reaches the whole ledger. */
-function openLinkModal(r: Receipt, onLinked: () => void): void {
-  const modalRoot = document.getElementById("modal-root");
-  if (!modalRoot) return;
-  const facts = receiptFacts(r);
-  const merchant = parsedText(r, "merchant") || "Receipt";
-  const text = (t: FinanceTransaction): string =>
-    `${transactionLabel(t)} ${t.note ?? ""} ${t.category ?? ""} ${t.accountName ?? ""} ${money(t.amount)}`;
-
-  modalRoot.innerHTML = `
-    <dialog class="modal modal-open" id="link-transaction-modal">
-      <div class="modal-box flex max-h-[85vh] max-w-xl flex-col overflow-hidden">
-        <div class="flex items-center justify-between border-b border-surface-800 pb-3">
-          <div>
-            <h3 class="font-semibold text-ink-100">Link “${escapeHtml(merchant)}” to a transaction</h3>
-            <p class="mt-1 text-xs text-ink-500">${escapeHtml(formatEpoch(facts.date))}${facts.total !== null ? ` · ${money(facts.total)} ${escapeHtml(facts.currency ?? "")}` : ""}</p>
-          </div>
-          <button class="btn btn-ghost btn-sm" data-action="link-close" aria-label="Close">✕</button>
-        </div>
-        <div class="min-h-0 flex-1 space-y-2 overflow-auto py-3">
-          <input id="link-search" placeholder="Search the whole ledger..." class="input input-bordered w-full" />
-          <div class="text-xs text-ink-500" data-slot="link-hint"></div>
-          <div class="space-y-0.5" data-slot="link-results"></div>
-        </div>
-        <div class="modal-action border-t border-surface-800 pt-3">
-          <button class="btn btn-ghost btn-sm" data-action="link-close">Cancel</button>
-        </div>
-      </div>
-      <form method="dialog" class="modal-backdrop"><button>close</button></form>
-    </dialog>`;
-
-  const resultsEl = modalRoot.querySelector("[data-slot='link-results']") as HTMLElement;
-  const hintEl = modalRoot.querySelector("[data-slot='link-hint']") as HTMLElement;
-  const searchEl = modalRoot.querySelector("#link-search") as HTMLInputElement;
-  const renderResults = (): void => {
-    const query = searchEl.value;
-    const found = rankCandidates(transactionCache, facts, query, text).slice(0, 50);
-    hintEl.textContent = query.trim()
-      ? `${found.length} match${found.length !== 1 ? "es" : ""} in the ledger`
-      : `Expenses and incomes within 10 days of the receipt`;
-    setHtml(
-      resultsEl,
-      found
-        .map(
-          (t) => `
-          <button type="button" class="flex w-full items-center gap-3 rounded px-2 py-1.5 text-left ${t.id === r.transactionId ? "bg-accent-500/20" : "hover:bg-surface-800"}" data-action="link-pick" data-id="${escapeHtml(t.id)}">
-            ${transactionLineHtml(t, r)}
-          </button>`,
-        )
-        .join("") || `<div class="p-2 text-xs text-ink-400">No transaction fits. Search to look further.</div>`,
-    );
-  };
-  renderResults();
-  searchEl.focus();
-
-  const close = (): void => modalRoot.replaceChildren();
-  searchEl.addEventListener("input", renderResults);
-  modalRoot.addEventListener("click", (event) => {
-    const target = event.target as HTMLElement;
-    if (target.closest("[data-action='link-close']") || target.closest(".modal-backdrop")) {
-      close();
-      return;
-    }
-    const pick = target.closest<HTMLElement>("[data-action='link-pick']");
-    if (!pick?.dataset.id) return;
-    const transactionId = pick.dataset.id;
-    void (async () => {
-      try {
-        const res = await api.linkReceiptTransaction(r.id, transactionId);
-        if (!res.success) {
-          toast(res.error ?? "Could not link the receipt", "err");
-          return;
-        }
-        toast("Receipt linked", "ok");
-        close();
-        onLinked();
-      } catch (e) {
-        toast(`Could not link the receipt: ${e}`, "err");
-      }
-    })();
-  });
-}

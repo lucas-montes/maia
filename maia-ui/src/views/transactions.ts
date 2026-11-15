@@ -1,7 +1,8 @@
 import { api, isEnvelopeFailure, unwrapList, type FinanceAccount, type FinanceTransaction } from "../lib/api";
 import { escapeHtml, setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
-import { transactionsAtom } from "../lib/stores";
+import { takeFocus } from "../lib/focus";
+import { receiptsAtom, transactionsAtom } from "../lib/stores";
 import { transactionKind, transactionLabel } from "../lib/transactionLabel";
 import { backToDashboard, panelClose, panelOpen, statusBanner } from "./shared";
 
@@ -32,6 +33,8 @@ export function mount(root: HTMLElement): () => void {
   let baseCurrency = "EUR";
   let typeFilter = "";
   let accountFilter = "";
+  // A row another view asked to show ("Open" on a receipt's page).
+  let focusId: string | null = takeFocus("transactions");
 
   root.innerHTML = `
     ${panelOpen("Transactions", "Expenses, income and transfers")}
@@ -95,6 +98,7 @@ export function mount(root: HTMLElement): () => void {
           <div class="flex flex-wrap items-center gap-2">
             <span class="badge badge-xs ${TYPE_BADGE[kind] ?? "badge-ghost"}">${escapeHtml(kind)}</span>
             ${t.isDraft ? `<span class="badge badge-xs badge-warn">draft</span>` : ""}
+            ${t.receiptId ? `<button type="button" class="badge badge-xs badge-info" data-action="open-receipt" data-receipt="${escapeHtml(t.receiptId)}">receipt</button>` : ""}
             <span class="truncate text-sm text-ink-200">${escapeHtml(label)}</span>
           </div>
           <div class="mt-0.5 text-xs text-ink-500">${accountLeg(t)}${t.category ? ` • ${escapeHtml(t.category)}` : ""}</div>
@@ -122,6 +126,7 @@ export function mount(root: HTMLElement): () => void {
           .includes(q),
       );
     }
+    if (focusId) filtered = filtered.filter((t) => t.id === focusId);
     if (typeFilter) filtered = filtered.filter((t) => transactionKind(t) === typeFilter);
     if (accountFilter) {
       filtered = filtered.filter(
@@ -131,7 +136,7 @@ export function mount(root: HTMLElement): () => void {
     const shown = filtered.slice(0, 200);
     setHtml(
       countsEl,
-      `${filtered.length} transaction${filtered.length !== 1 ? "s" : ""}${filtered.length > shown.length ? ` (showing ${shown.length})` : ""}`,
+      `${filtered.length} transaction${filtered.length !== 1 ? "s" : ""}${filtered.length > shown.length ? ` (showing ${shown.length})` : ""}${focusId ? ` · <button type="button" class="link link-accent" data-action="show-all">show all</button>` : ""}`,
     );
     setHtml(
       listEl,
@@ -153,6 +158,20 @@ export function mount(root: HTMLElement): () => void {
         )
         .join("")}`;
   };
+
+  root.addEventListener("click", (event) => {
+    const t = event.target as HTMLElement;
+    if (t.closest("[data-action='show-all']")) {
+      focusId = null;
+      render();
+      return;
+    }
+    const open = t.closest<HTMLElement>("[data-action='open-receipt']");
+    if (open?.dataset.receipt) {
+      receiptsAtom.set({ ...receiptsAtom.get(), selectedId: open.dataset.receipt });
+      window.location.hash = "#/receipts";
+    }
+  });
 
   // Live filter on keystrokes — updates the list container only.
   root.addEventListener("input", (event) => {
