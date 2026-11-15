@@ -1,7 +1,7 @@
 # Receipt matching: receipts ↔ stores, receipts ↔ transactions, lines ↔ products
 
-**Status:** not started; every task is open. The schema is still at v15, so the v16/v17
-migrations this plan needs do not exist yet.
+**Status:** done 2026-11-15 (server, desktop, phone); not deployed or run against the live
+database yet. See the deviations at the end and `context/receipts/matching.md`.
 
 > Server and desktop, plus one small phone task (TM1). It builds on the manual link
 > (`src/receipt_links.rs`, `PUT`/`DELETE /receipt-pictures/:id/transaction`, abeb509) and the
@@ -330,13 +330,13 @@ rows. Prices already have it through `receipt_line_matches`.
 ## Tasks
 
 ### Stage 0: the reading (no migration)
-- [ ] T0.1 OCR schema v2 (section 0), the prompt, and the tests.
-- [ ] T0.2 Re-parse: `POST /receipt-pictures/:id/parse`, and the desktop's "Read again".
-- [ ] T0.3 The desktop receipt detail shows the new fields: store block, payment, per-line
+- [x] T0.1 OCR schema v2 (section 0), the prompt, and the tests.
+- [x] T0.2 Re-parse: `POST /receipt-pictures/:id/parse`, and the desktop's "Read again".
+- [x] T0.3 The desktop receipt detail shows the new fields: store block, payment, per-line
       quantity, unit and discount, VAT.
 
 ### Phone
-- [ ] TM1 The phone forgets a receipt once it is sent.
+- [x] TM1 The phone forgets a receipt once it is sent.
   - When the server accepts the upload (`202`), the phone hard-deletes the row and the image, with
     no tombstone, and stops polling the parse. Today it waits for the parse first
     (`budget_sync.dart`, `uploadAndParse`).
@@ -344,19 +344,19 @@ rows. Prices already have it through `receipt_line_matches`.
   - The phone's copy of the OCR client (`fetchParse`) goes, along with its tests.
 
 ### Stage A: stores (migration v16)
-- [ ] TA1 `src/matching/text.rs`: the normaliser and the purchase-day extractor.
-- [ ] TA2 v16: the identifier columns on `stores`, `store_aliases`, `receipts.store_id` and
+- [x] TA1 `src/matching/text.rs`: the normaliser and the purchase-day extractor.
+- [x] TA2 v16: the identifier columns on `stores`, `store_aliases`, `receipts.store_id` and
       `store_source`. `push_stores` becomes insert-only for the name.
       `matching::stores::resolve` runs after a parse.
-- [ ] TA3 The recommendations (rename, new store, same store), and the endpoints to accept each
+- [x] TA3 The recommendations (rename, new store, same store), and the endpoints to accept each
       one. `match_receipt_item` takes `receiptId`.
-- [ ] TA4 Desktop: the store on a receipt, with its source and Change, and the recommendations on
+- [x] TA4 Desktop: the store on a receipt, with its source and Change, and the recommendations on
       the receipt and in the Stores view, where details can be edited too.
 
 ### Stage B: transactions (migration v16)
-- [ ] TB1 v16: `receipts.link_source`, `receipt_match_rejections`. `receipt_links` takes the
+- [x] TB1 v16: `receipts.link_source`, `receipt_match_rejections`. `receipt_links` takes the
       source and writes a rejection on an automatic undo.
-- [ ] TB2 `matching::transactions` as pure functions. Unit tests cover:
+- [x] TB2 `matching::transactions` as pure functions. Unit tests cover:
   - a purchase day across New Year;
   - two identical receipts;
   - a foreign currency;
@@ -364,36 +364,36 @@ rows. Prices already have it through `receipt_line_matches`.
   - a cash receipt;
   - a rejected pair;
   - a receipt on its own draft.
-- [ ] TB3 The triggers, `POST /receipt-pictures/match` and the candidates endpoint.
-- [ ] TB4 Desktop:
+- [x] TB3 The triggers, `POST /receipt-pictures/match` and the candidates endpoint.
+- [x] TB4 Desktop:
   - the source badge, with Undo or Change;
   - the server's candidates in the picker;
   - no more drafts on import (`create_receipt_transaction` deleted);
   - "Match all".
 
 ### Stage C: products (migration v17)
-- [ ] TC1 v17: `product_aliases`, `receipt_line_matches`. A manual match writes both, and records
+- [x] TC1 v17: `product_aliases`, `receipt_line_matches`. A manual match writes both, and records
       the price from the reading's quantity and unit.
-- [ ] TC2 Automatic pricing from an alias, with Undo (which forgets the alias) and Change.
-- [ ] TC3 The line candidates endpoint. The dialog shows them first, and each line shows its state
+- [x] TC2 Automatic pricing from an alias, with Undo (which forgets the alias) and Change.
+- [x] TC3 The line candidates endpoint. The dialog shows them first, and each line shows its state
       and kind.
 
 ### Stage D: AI assist
-- [ ] TD1 `matching::assist`: the prompt, the schema, and dropping unknown ids. `POST
+- [x] TD1 `matching::assist`: the prompt, the schema, and dropping unknown ids. `POST
       /receipt-pictures/:id/assist`.
-- [ ] TD2 Desktop: "Improve with AI" per receipt and for all unmatched ones. Inline proposals with
+- [x] TD2 Desktop: "Improve with AI" per receipt and for all unmatched ones. Inline proposals with
       accept and accept all. A new-ingredient proposal opens the prefilled form.
 
 ### Stage E: the receipt's page (built alongside A–D)
-- [ ] TE1 `receipt_effects` in v16. Every writer from A, B and C records its effect, and the
+- [x] TE1 `receipt_effects` in v16. Every writer from A, B and C records its effect, and the
       effects, open items and undo endpoints exist. Stage A starts with this, so every later
       writer has somewhere to record.
-- [ ] TE2 Desktop: the receipt page laid out as in section E, with Open, Edit and Undo per
+- [x] TE2 Desktop: the receipt page laid out as in section E, with Open, Edit and Undo per
       effect, the open items, and the "from receipt" back links on stores, transactions and
       ingredient prices.
 
 ### Docs
-- [ ] TDoc: `context/receipts/matching.md`, a pointer from `account-tree.md`, an overview entry,
+- [x] TDoc: `context/receipts/matching.md`, a pointer from `account-tree.md`, an overview entry,
       and an update to the context-map row.
 
 ## Done when
@@ -418,3 +418,29 @@ rows. Prices already have it through `receipt_line_matches`.
 - Matching refunds automatically.
 - A receipt split over two payments.
 - Running the AI pass automatically.
+
+## Deviations from the plan (2026-11-15)
+
+- **Endpoints.** The page is served as one endpoint, `GET
+  /receipt-pictures/:id/matching`, instead of separate `effects`,
+  `transaction-candidates` and `line-candidates` endpoints. The undo is
+  `POST /receipt-pictures/:id/effects/:effect/undo`, and the back links come
+  from `GET /receipt-effects?table=&id=`. Lines are matched through `PUT`/`DELETE
+  /receipt-pictures/:id/lines/:line`, and `POST /ingredient-prices/match` is
+  left as it was for other callers.
+- **Rejections.** `receipt_match_rejections` became one `receipt_rejections`
+  table, with a `kind` (store, transaction, ingredient) and a `line`, so every
+  undo is remembered the same way.
+- **Reading keys** are snake_case (`tax_id`, `card_last4`), the Rust field
+  names, rather than the camelCase the tables above show.
+- **Store pushes** only add stores. They also name a placeholder, a store named
+  after its own id that a price push made, which an existing test relies on.
+  They never revive a deleted store.
+- **The desktop's draft-expense command** (`create_receipt_transaction`) and
+  the old link commands were removed. The page goes through one
+  `matching_request` command, limited to the matching routes.
+- **Not checked yet:**
+  - the desktop at runtime;
+  - the live model with the v2 schema (the stubbed-Gemini tests still pass);
+  - `nix build .#maia-desktop`;
+  - migrating the live database to v17.

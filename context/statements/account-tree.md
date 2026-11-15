@@ -15,7 +15,8 @@ ends (`transactions.receipt_id` too) by `src/receipt_links.rs` through `PUT`/`DE
 /receipt-pictures/:id/transaction`, which the desktop's receipt detail calls
 from its picker. Only an expense or an income takes a receipt, one each way.
 Relinking off a draft made from the receipt deletes the draft. A receipt or
-transaction push can fill an empty end but never clears or replaces one.
+transaction push can fill an empty end but never clears or replaces one. The
+server also links it on its own; see [../receipts/matching.md](../receipts/matching.md).
 
 ## The tables
 
