@@ -13,6 +13,12 @@ Planned in `context/plans/receipt-matching.md`.
   (`POST /receipt-pictures/upload`). Once the server accepts it (`202`), the
   phone hard-deletes its row and image, with no tombstone and no log. It never
   reads a parse and creates nothing.
+  The sync screen's "Receipts" push sends every receipt still on the phone
+  the same way. Its "Ingredients" push sends the stores, then each live
+  ingredient with its pictures and prices (`POST /ingredients`). The server
+  never revives an ingredient or price it deleted (an undone match stays
+  undone), never overwrites a price a receipt made, and skips a price that
+  clashes with one it already has at that store and moment.
 - **The server** reads the receipt, then matches its store, its transaction
   and its lines (`src/matching`). It never books anything.
 - **The desktop** shows the receipt's page and sends the user's choices

@@ -233,7 +233,7 @@ pub async fn push_ingredient(
     let tx = conn.unchecked_transaction().unwrap();
 
     tx.execute(
-        "INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, sodium_per100g, fiber_per100g, sugar_per100g, is_archived, brand, barcode, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name, calories_per100g=excluded.calories_per100g, protein_per100g=excluded.protein_per100g, carbs_per100g=excluded.carbs_per100g, fat_per100g=excluded.fat_per100g, sodium_per100g=excluded.sodium_per100g, fiber_per100g=excluded.fiber_per100g, sugar_per100g=excluded.sugar_per100g, is_archived=excluded.is_archived, brand=excluded.brand, barcode=excluded.barcode, created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=NULL",
+        "INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, sodium_per100g, fiber_per100g, sugar_per100g, is_archived, brand, barcode, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name, calories_per100g=excluded.calories_per100g, protein_per100g=excluded.protein_per100g, carbs_per100g=excluded.carbs_per100g, fat_per100g=excluded.fat_per100g, sodium_per100g=excluded.sodium_per100g, fiber_per100g=excluded.fiber_per100g, sugar_per100g=excluded.sugar_per100g, is_archived=excluded.is_archived, brand=excluded.brand, barcode=excluded.barcode, created_at=excluded.created_at, updated_at=excluded.updated_at WHERE ingredients.deleted_at IS NULL",
         rusqlite::params![
             payload.id,
             payload.name,
@@ -264,6 +264,11 @@ pub async fn push_ingredient(
         .unwrap();
     }
 
+    // The phone keeps copies of prices it pulled. A copy must not undo the
+    // server: a price the server deleted (an undone receipt match) stays
+    // deleted, and a price a receipt made is the receipt's, edited only from
+    // its page. Both keep their row; a new id still inserts, unless the server
+    // already has that ingredient's price at that store and moment.
     for price in payload.prices {
         tx.execute(
             "INSERT OR IGNORE INTO stores (id, name, created_at, updated_at) VALUES (?1, ?1, ?2, ?2)",
@@ -271,7 +276,7 @@ pub async fn push_ingredient(
         )
         .unwrap();
         tx.execute(
-            "INSERT INTO ingredient_prices (id, ingredient_id, store_id, price, currency_code, package_grams, recorded_at, source_url, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?7, ?9, NULL) ON CONFLICT(id) DO UPDATE SET ingredient_id=excluded.ingredient_id, store_id=excluded.store_id, price=excluded.price, currency_code=excluded.currency_code, package_grams=excluded.package_grams, recorded_at=excluded.recorded_at, source_url=excluded.source_url, updated_at=excluded.updated_at, deleted_at=NULL",
+            "INSERT INTO ingredient_prices (id, ingredient_id, store_id, price, currency_code, package_grams, recorded_at, source_url, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?7, ?9, NULL) ON CONFLICT(id) DO UPDATE SET ingredient_id=excluded.ingredient_id, store_id=excluded.store_id, price=excluded.price, currency_code=excluded.currency_code, package_grams=excluded.package_grams, recorded_at=excluded.recorded_at, source_url=excluded.source_url, updated_at=excluded.updated_at WHERE ingredient_prices.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM receipt_line_matches m WHERE m.ingredient_price_id = ingredient_prices.id) ON CONFLICT DO NOTHING",
             rusqlite::params![
                 price.id,
                 price.ingredient_id,

@@ -382,6 +382,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn push_ingredient_keeps_deleted_and_receipt_prices() {
+        let pool = crate::db::init_memory().unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute_batch(
+                "INSERT INTO stores (id, name, created_at, updated_at) VALUES ('s1','Lidl',1,1);
+                 INSERT INTO ingredients (id, name, calories_per100g, protein_per100g, carbs_per100g, fat_per100g, created_at, updated_at) VALUES ('i1','Oats',1,1,1,1,1,1);
+                 INSERT INTO ingredient_prices (id, ingredient_id, store_id, price, currency_code, recorded_at, created_at, updated_at, deleted_at) VALUES ('gone','i1','s1',1.0,'EUR',1,1,1,5);
+                 INSERT INTO ingredient_prices (id, ingredient_id, store_id, price, currency_code, recorded_at, created_at, updated_at) VALUES ('rcpt','i1','s1',2.0,'EUR',2,2,2);
+                 INSERT INTO receipts (id, local_path, created_at, updated_at) VALUES ('r1','',1,1);
+                 INSERT INTO receipt_line_matches (receipt_id, line, printed, ingredient_id, ingredient_price_id, source, created_at) VALUES ('r1',0,'oats','i1','rcpt','manual',1);",
+            )
+            .unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let price = |id: &str, p: f64, at: i64| serde_json::json!({"id": id, "ingredientId": "i1", "storeId": "s1", "price": p, "currencyCode": "EUR", "recordedAt": at});
+        let payload = serde_json::json!({
+            "id": "i1", "name": "Oats", "caloriesPer100g": 1.0, "proteinPer100g": 1.0, "carbsPer100g": 1.0, "fatPer100g": 1.0,
+            "isArchived": false, "createdAt": 1, "pictures": [],
+            "prices": [price("gone", 9.0, 1), price("rcpt", 9.0, 2), price("new", 3.0, 3), price("clash", 9.0, 2)]
+        });
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/ingredients"))
+            .header("Authorization", "Bearer test-key")
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let conn = pool.get().unwrap();
+        let row = |id: &str| -> (f64, Option<i64>) {
+            conn.query_row("SELECT price, deleted_at FROM ingredient_prices WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+        };
+        assert_eq!(row("gone"), (1.0, Some(5)), "a deleted price stays deleted");
+        assert_eq!(row("rcpt"), (2.0, None), "a receipt's price is not overwritten");
+        assert_eq!(row("new"), (3.0, None), "a new price is added");
+        let clash: i64 = conn.query_row("SELECT COUNT(*) FROM ingredient_prices WHERE id = 'clash'", [], |r| r.get(0)).unwrap();
+        assert_eq!(clash, 0, "a second price at the same store and moment is skipped");
+        handle.abort();
+    }
+
+    #[tokio::test]
     async fn match_receipt_item_creates_a_price_and_upserts_the_store_by_name() {
         let pool = crate::db::init_memory().unwrap();
         {
