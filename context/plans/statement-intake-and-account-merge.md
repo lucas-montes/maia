@@ -71,7 +71,7 @@ Three adjacent problems, reported in the same work stream:
   and points at the right shape — a *separate*, user-owned **intake** folder that the service drains
   into the managed tree, leaving the lifecycle roots managed.
 
-Also resolved by this investigation: **T01/T02 of `statement-review-ui-fixes` are answered.**
+Also resolved by this investigation: **T01/T02 of the (since removed) `statement-review-ui-fixes` plan are answered.**
 `sourcePath` does reach the client (`src/handlers/statements.rs:103`, non-null on every row) and
 `groupStatements` works. The list looked ungrouped because a single file card held 34 rows. That
 plan's T03 (checkbox alignment) and T04 (select-all) are still open and live in the same file, so
@@ -274,7 +274,7 @@ they are carried here and that plan is superseded.
       Remaining manual steps*
 - [x] `cash-flow.csv` and `statement.csv` in intake are untouched after a full scan
 - [x] Entry checkboxes align with their row content, and select-all works on the list and inside one
-      file review (inherited `statement-review-ui-fixes` T03/T04)
+      file review (inherited `statement-review-ui-fixes` T03/T04, a plan since removed)
 - [x] `cargo test -p maia` (the crate is `maia`, not `sync-server` — the plan inherited a stale
       name), `cargo test -p maia-ui`, `npx tsc --noEmit`, `npx vite build`, `npx vitest run`,
       `nix build .#maia-desktop` all green
@@ -390,7 +390,7 @@ they are carried here and that plan is superseded.
     accounts screen owns that).
 
 - [x] T10: Inherited UI fixes — checkbox alignment and select-all (status:done, 2026-11-10)
-  - Goal: finish `statement-review-ui-fixes` T03/T04 in the file they already belong to.
+  - Goal: finish `statement-review-ui-fixes` T03/T04 in the file they already belong to (that plan has since been removed; the work landed here).
   - Boundaries: In — `lineRow`/table cell alignment, a working select-all-pending inside a file
     review and select-all-pending on the list, indeterminate states kept in sync. Out — the grouping
     diagnosis (answered above).
@@ -398,13 +398,13 @@ they are carried here and that plan is superseded.
     `vertical-align: middle` over a two-line cell (~9px, ~25px zoomed) and the list row's `mt-2`.
     Select-all existed at both levels but selected every `pending` line including ones rendered
     without a checkbox; selection now comes from `src/lib/statementReview.ts::selectableLineIds`,
-    which the render consumes too. Measurements and screenshots in `statement-review-ui-fixes`.
+    which the render consumes too. Measurements and screenshots in `statement-review-ui-fixes` (since removed).
   - Note for T08/T09: a pending line whose transfer counterpart is already settled still has **no**
     checkbox anywhere, so it cannot be imported from this screen. Honest now (select-all no longer
     pretends to pick it), but the preview-led rewrite should give it a control.
 
 - [x] T11: Docs and packaging (status:done)
-  - Boundaries: In — mark `statement-review-ui-fixes` superseded, register this plan in
+  - Boundaries: In — mark `statement-review-ui-fixes` superseded (that plan has since been removed), register this plan in
     `context/context-map.md`, add the lifecycle/intake/preview model to `context/overview.md`, full
     test and `nix build` runs. Out — utoipa.
 

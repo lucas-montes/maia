@@ -1,7 +1,7 @@
 # Waybar: the `/agenda` module
 
-Supersedes the socket-based sketch in `context/plans/system-waybar.md` (that daemon no longer
-exists). This is a copy-pasteable Waybar `custom` module against the real, currently-running
+Replaces the old socket-based daemon sketch (that daemon no longer exists).
+This is a copy-pasteable Waybar `custom` module against the real, currently-running
 `maia` service's `GET /agenda` endpoint.
 
 `/agenda` is Bearer-authed exactly like every other `maia` route — there is no unauthenticated

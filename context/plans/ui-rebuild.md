@@ -98,7 +98,7 @@ T10 — URL ingestion workflow
 - Goal: Define how the Chrome extension hands off URLs to the daemon and how the UI marks them as new.
 - Scope: Extension pushes URLs immediately; daemon periodically pulls or consumes them; UI shows a `new` badge until the item is reviewed or acknowledged.
 - Acceptance: URLs appear in the app with a visible freshness state and can be cleared once processed.
-- Status: skipped (2026-06-01) — acceptance criteria already met by T09 (is_new badge, mark read, open clears badge). Daemon/extension wiring deferred to `kb-chrome-extension` plan.
+- Status: skipped (2026-06-01) — acceptance criteria already met by T09 (is_new badge, mark read, open clears badge). Daemon/extension wiring deferred to a Chrome plan — since shipped: the extension posts straight to the server's `urls` resource.
 
 T11 — Validation and cleanup
 - Goal: Verify resizing, collapse behavior, file editing, settings persistence, and receipt path tracking.
@@ -150,7 +150,7 @@ T11 — Validation and cleanup
 - No automated UI tests — manual Tauri window testing needed for resize/collapse behavior
 - Receipt image preview deferred (paths shown as text; needs Tauri asset protocol for visual rendering)
 - Snapshot files for URLs not implemented (deferred per user decision)
-- Chrome extension ingestion not wired (deferred to `kb-chrome-extension` plan)
+- Chrome extension ingestion not wired at the time (deferred to a Chrome plan — since shipped: the extension posts straight to the server's `urls` resource)
 
 - The app shell fills the full window and resizes fluidly.
 - The sidebar is compact, collapsible, and visually understated.

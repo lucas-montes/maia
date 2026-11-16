@@ -2,8 +2,8 @@
 
 **Status:** completed — `GET /agenda`, the background `notify-send` notifier, the systemd D-Bus wiring and the Waybar doc all shipped. The D-Bus fix is still not verified end-to-end against the live deployed `maia.service`; that needs deploy access.
 
-Supersedes `system-waybar.md`, which targeted the deprecated socket-based daemon architecture (no
-longer exists — `sync-server`/`maia` replaced it). This plan targets the current HTTP service.
+Replaces the old socket-based daemon sketch, which targeted a daemon that no
+longer exists — the HTTP `maia` service replaced it. This plan targets the current HTTP service.
 
 ## Change summary
 A new authenticated `GET /agenda` endpoint on the `maia` service returns what needs attention right
