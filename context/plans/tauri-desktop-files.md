@@ -1,7 +1,7 @@
 
 # File-based notes & receipts (Tauri)
 
-**Status:** largely implemented — the receipt browser, the thumbnails and the archive/restore shipped. Notes are shown read-only from the DB, and `list_files` / `read_file_bytes` / `write_json` / `open_path` were replaced by domain commands (`list_notes`, `read_note`, `list_receipts`, …).
+**Status:** finished (closed 2026-11-17) — the receipt browser, the thumbnails and the archive/restore shipped. Notes are shown read-only from the DB, and `list_files` / `read_file_bytes` / `write_json` / `open_path` were replaced by domain commands (`list_notes`, `read_note`, `list_receipts`, …).
 
 ## Summary
 

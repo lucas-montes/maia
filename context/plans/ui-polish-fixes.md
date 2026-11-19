@@ -1,6 +1,6 @@
 # Maia UI Polish & Fixes
 
-**Status:** partially implemented — the settings form editor, the missing-config guard and the zoom all shipped (the zoom is a CSS custom property; the base size stayed 16px). The datepicker (T01) and the goal dropdown / inline tasks (T04/T05) are moot: the later read-only rewrite removed the task and goal forms entirely.
+**Status:** finished (closed 2026-11-17) — the settings form editor, the missing-config guard and the zoom all shipped (the zoom is a CSS custom property; the base size stayed 16px). The datepicker (T01) and the goal dropdown / inline tasks (T04/T05) are moot: the later read-only rewrite removed the task and goal forms entirely.
 
 ## Summary
 

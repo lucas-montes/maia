@@ -1,6 +1,6 @@
 # Fix FitFat POST Calls — Full Verification & Migration
 
-**Status:** completed except the OpenAPI documentation — the 12 POSTs, the missing pulls, the v30 nuke and UUID v7 all shipped, but `src/openapi.rs` has empty `paths()` / `components()` and there is no `#[utoipa::path]` anywhere, so `/docs` serves an empty document (T06 open).
+**Status:** finished (closed 2026-11-17) — the 12 POSTs, the missing pulls, the v30 nuke and UUID v7 all shipped. The OpenAPI documentation (T06) was dropped: `src/openapi.rs` keeps empty `paths()` / `components()`, so `/docs` serves an empty document.
 
 ## Change summary
 Align `maia` `sync-server` with FitFat mobile `lib/src/sync/data_push_service.dart` + `docs/api/openapi.yaml` (12 POSTs). Fix `uuid v7`, unify `maia.db` to FitFat Drift v30 (38 tables, TEXT PK, epoch ms, JSON arrays, composite PKs), fix camelCase `TasksPush/NotesPush/...` + `deleted[]` → `deleted_at`, fix `receipt-pictures` `picturePath→localPath` multipart bug + add `note_audio` handling, add missing `GET` pulls for 6 push-only resources, generate OpenAPI via `utoipa`/`utoipa-axum` at `/api-docs/openapi.json` + `/docs`, delete legacy INTEGER `notes/tasks/goals/receipts/urls` schema, and add `gst-plugins-bad` for WebKit WebVTT.

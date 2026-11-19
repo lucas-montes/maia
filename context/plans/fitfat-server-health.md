@@ -1,6 +1,6 @@
 # FitFat Server Health — Logs + Diagnostics
 
-**Status:** partially implemented — the per-request log line (method, path, status, latency, masked auth), the ring buffer and the `get_server_diagnostics` command exist, but the frontend never calls the diagnostics command, `get_server_logs` is gone, and there is no Test Connection button or firewall/subnet hint.
+**Status:** finished (closed 2026-11-17) — the per-request log line (method, path, status, latency, masked auth), the ring buffer and the `get_server_diagnostics` command exist. The frontend diagnostics view, a Test Connection button and a firewall/subnet hint were dropped.
 
 ## Change summary
 Make `sync-server` (0.0.0.0:3030) observable: add request logs (method, path, status, latency, lan-ip, without leaking full Bearer) via `tracing` + `TraceLayer`, plus in-memory ring buffer exposed via Tauri for UI. Add desktop UI health indicator (● Online/○ Offline) via `fetch /health` polling, `Test Connection` button in FitFat + Settings (checks `127.0.0.1:3030/health` and `lanUrl/health` with Bearer), diagnostics collapsible (`get_server_diagnostics`), firewall + subnet hints, and `curl` copy. Keeps `0.0.0.0:3030` deterministic bind, `lanUrl` for QR already done.

@@ -1,7 +1,7 @@
 ```markdown
 # Tauri Desktop UI Plan (merged)
 
-**Status:** largely implemented — the Tauri app is built, Nix-packaged as `maia-desktop` and installed by `services.maia.desktop.enable`. The generic filesystem command surface (F03), the sidecar-JSON write (F04) and a CSP (F07) were never built, and the settings write path became a per-user overlay instead of editing `maia.json`.
+**Status:** finished (closed 2026-11-17) — the Tauri app is built, Nix-packaged as `maia-desktop` and installed by `services.maia.desktop.enable`. The generic filesystem command surface (F03), the sidecar-JSON write (F04) and a CSP (F07) were dropped, and the settings write path became a per-user overlay instead of editing `maia.json`.
 
 ## Summary
 

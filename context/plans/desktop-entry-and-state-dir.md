@@ -1,6 +1,6 @@
 # Desktop Entry Discovery and First-Boot State Directory
 
-**Status:** partially implemented — T01 landed by another route (`StateDirectory` in `nix/module.nix`), but T02 is open: there is no `.desktop` file anywhere in the repo, no `makeDesktopItem` in `nix/packages.nix` and no `/etc/applications` entry, so rofi still cannot see Maia. The `2775` / group-`maia` permission target was not met either (the directory is `0755`, owned by the user).
+**Status:** finished (closed 2026-11-17) — T01 landed (`StateDirectory` in `nix/module.nix`). T02 was closed without building: no `.desktop` file in the repo, no `makeDesktopItem` in `nix/packages.nix`, no `/etc/applications` entry, and the `2775` / group-`maia` permission target was dropped (the directory is `0755`, owned by the user).
 
 ## Change summary
 Two defects found while bringing `services.maia` up on luctop.

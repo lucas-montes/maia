@@ -1,6 +1,6 @@
 # Unified Maia UI — Grouped Tabs for All Models
 
-**Status:** completed except the Experiments tab — the grouped collapsible sidebar and 24 of the 25 registered views shipped. There is no `maia-ui/src/views/experiments.ts`; the server still carries the `experiments` tables but the phone dropped the feature in schema v37.
+**Status:** finished (closed 2026-11-17) — the grouped collapsible sidebar and 24 of the 25 registered views shipped. There is no `maia-ui/src/views/experiments.ts`: the phone dropped the Experiments feature in schema v37, so the tab is gone on purpose.
 
 ## Change summary
 Rebuild `maia-ui` from FitFat-is-separate to Maia-is-one: collapsible grouped sidebar with sections Training/Nutrition/Health/Planning/Finance, subtabs where needed, virtual-scroll + lazy media for 3799 exercises, per-tab search + per-tab sync indicator, read-only desktop for most models (editable: ingredients, exercises, workout_templates; add-only fx_rates), full ledger for finance, and read-only experiments/tags with linked-table displays. Single `maia.db` is source of truth; desktop reads via Tauri commands (direct DB) while mobile syncs via `sync-server` HTTP on `0.0.0.0:3030`.

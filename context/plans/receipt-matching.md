@@ -1,7 +1,8 @@
 # Receipt matching: receipts ↔ stores, receipts ↔ transactions, lines ↔ products
 
-**Status:** done 2026-11-15 (server, desktop, phone); not deployed or run against the live
-database yet. See the deviations at the end and `context/receipts/matching.md`.
+**Status:** finished 2026-11-17 (server, desktop, phone) — deployed: migrations v16 and v17 are
+live; the feature is idle until the first receipt arrives (0 receipts in the live database).
+See the deviations at the end and `context/receipts/matching.md`.
 
 > Server and desktop, plus one small phone task (TM1). It builds on the manual link
 > (`src/receipt_links.rs`, `PUT`/`DELETE /receipt-pictures/:id/transaction`, abeb509) and the

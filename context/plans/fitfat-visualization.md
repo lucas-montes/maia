@@ -1,6 +1,6 @@
 # FitFat Visualization — HTTP-leveraged, Per-Chart Filters, Settings QR with Auth
 
-**Status:** implemented in substance, reshaped since — the FitFat sidebar tab and the Settings QR canvas no longer exist; the charts live in `views/insights.ts` and `views/bodyMetrics.ts`, and the pairing QR moved to the Sync view. A distinct "workouts per week" count chart is still missing.
+**Status:** finished (closed 2026-11-17) — the FitFat sidebar tab and the Settings QR canvas no longer exist; the charts live in `views/insights.ts` and `views/bodyMetrics.ts`, and the pairing QR moved to the Sync view. The "workouts per week" count chart was dropped.
 
 ## Change summary
 Add read + visualize for FitFat synced data in `maia-ui` by reusing `sync-server` (`0.0.0.0:3030` deterministic) as source of truth. Extend `sync-server` with `GET` read endpoints for pushed entities (`/workouts`, `/meals`, `/body-metrics`, `/tasks`, `/goals`, `/transactions`) returning `{server_time, items, deleted}` with `?since` filtering (reuse `updated_at`/`deleted_at` + Bearer auth). Frontend adds `ViewId="fitfat"` with per-chart `since`/`date` filters, fetches via `fetch(http://{get_sync_url}/... Authorization: Bearer {get_sync_api_key})` (no duplicate Tauri DB SELECTs), renders with `Chart.js` in dark Tailwind theme. Settings exposes `sync_api_key` + QR encoding `{"url":"http://<lan-ip>:3030","apiKey":"<token>"}` for mobile pairing.

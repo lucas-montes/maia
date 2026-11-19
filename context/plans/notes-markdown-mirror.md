@@ -1,6 +1,6 @@
 # Notes — Markdown Mirror + Editor + Audio Round-Trip
 
-**Status:** completed except the end-to-end pass — the mirror, the inotify watcher, `GET /notes/audio/:id`, the pull's `noteAudio` list and the mobile markdown editor all shipped; T07 (a scripted end-to-end walkthrough plus docs) is still open.
+**Status:** finished (closed 2026-11-17) — the mirror, the inotify watcher, `GET /notes/audio/:id`, the pull's `noteAudio` list and the mobile markdown editor all shipped. T07 (a scripted end-to-end walkthrough plus docs) was dropped.
 
 ## Change summary
 Keep SQLite as the sync source of truth for notes, but have the server mirror every note to a `.md` file
