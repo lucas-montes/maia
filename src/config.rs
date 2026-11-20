@@ -67,6 +67,29 @@ impl Default for T212FeedConfig {
     }
 }
 
+/// Periodic FX rate pull. The server is the only writer of `fx_rates`, so
+/// this is what keeps statement imports from failing on a missing rate.
+/// Deployment-owned: the service is what makes the outbound calls.
+#[derive(Clone, Debug)]
+pub struct FxConfig {
+    pub enabled: bool,
+    pub interval_hours: u64,
+    /// Frankfurter-compatible API root (`{base_url}/{start}..{end}?base=..&symbols=..`).
+    pub base_url: String,
+}
+
+impl FxConfig {
+    pub const DEFAULT_BASE_URL: &str = "https://api.frankfurter.dev/v1";
+
+    fn enabled() -> Self {
+        Self {
+            enabled: true,
+            interval_hours: 6,
+            base_url: Self::DEFAULT_BASE_URL.to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub bind_addr: String,
@@ -138,6 +161,10 @@ pub struct Config {
     pub statements_intake_dir: Option<PathBuf>,
     /// Trading 212 feed. Credentials in here come from the overlay only.
     pub t212: T212FeedConfig,
+    pub fx: FxConfig,
+    /// The `pdftotext` (poppler) binary Firstrade PDF statements are read
+    /// with. `None` means whatever `pdftotext` is on `PATH`.
+    pub pdftotext_bin: Option<String>,
 }
 
 impl Config {
@@ -161,6 +188,8 @@ impl Config {
             statements_failed_dir: None,
             statements_intake_dir: None,
             t212: T212FeedConfig::default(),
+            fx: FxConfig::enabled(),
+            pdftotext_bin: None,
         }
     }
 
@@ -486,7 +515,31 @@ impl Config {
         {
             cfg.t212.api_secret = secret.trim().to_string();
         }
+
+        // FX pull: deployment-owned, like the base currency it converts into.
+        if let Some(fx) = deployment.get("fx").and_then(Value::as_object) {
+            if let Some(enabled) = fx.get("enabled").and_then(Value::as_bool) {
+                cfg.fx.enabled = enabled;
+            }
+            if let Some(hours) = fx.get("interval_hours").and_then(Value::as_u64) {
+                cfg.fx.interval_hours = hours.clamp(1, 24 * 7);
+            }
+            if let Some(url) = fx
+                .get("base_url")
+                .and_then(Value::as_str)
+                .map(|url| url.trim().trim_end_matches('/'))
+                .filter(|url| !url.is_empty())
+            {
+                cfg.fx.base_url = url.to_string();
+            }
+        }
+        cfg.pdftotext_bin = get(&deployment, "pdftotext_bin");
         cfg
+    }
+
+    /// The `pdftotext` command to run.
+    pub fn pdftotext_bin(&self) -> &str {
+        self.pdftotext_bin.as_deref().unwrap_or("pdftotext")
     }
 }
 
@@ -548,6 +601,10 @@ impl Default for Config {
             statements_failed_dir: None,
             statements_intake_dir: None,
             t212: T212FeedConfig::default(),
+            // Tests never reach the network: the puller stays off unless a
+            // test turns it on against a local stub.
+            fx: FxConfig { enabled: false, ..FxConfig::enabled() },
+            pdftotext_bin: None,
         }
     }
 }

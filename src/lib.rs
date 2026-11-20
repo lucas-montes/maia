@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod finance_scenarios;
+pub mod fx;
 pub mod handlers;
 pub mod logs;
 pub mod matching;
@@ -944,70 +945,23 @@ mod tests {
         handle.abort();
     }
 
+    /// Rates come from the server's own puller (`crate::fx`) and nowhere
+    /// else, so the sync surface for them is pull-only.
     #[tokio::test]
-    async fn push_fx_rates_preserves_the_manual_flag() {
-        let pool = crate::db::init_memory().unwrap();
-        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
-        let client = reqwest::Client::new();
-        let url = format!("http://127.0.0.1:{port}/fx-rates");
-
-        let payload = serde_json::json!({
-            "rates": [{ "code": "EUR", "baseCode": "USD", "rateDate": "2024-01-02", "rateToBase": 1.09, "manual": true }]
-        });
-        assert_eq!(
-            client.post(&url).header("Authorization", "Bearer test-key").json(&payload).send().await.unwrap().status(),
-            200
-        );
-
-        // Pulling it back has to carry the flag, or a client that reads a rate,
-        // edits it and pushes it again would silently lose the distinction.
-        let pulled: serde_json::Value = client
-            .get(format!("http://127.0.0.1:{port}/fx-rates?base=USD&date=2024-01-02&since=0"))
-            .header("Authorization", "Bearer test-key")
-            .send().await.unwrap().json().await.unwrap();
-        assert_eq!(pulled["items"][0]["manual"], true);
-        handle.abort();
-    }
-
-    #[tokio::test]
-    async fn push_fx_rates_tombstone_needs_the_whole_key() {
-        let pool = crate::db::init_memory().unwrap();
-        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
-        let client = reqwest::Client::new();
-        let url = format!("http://127.0.0.1:{port}/fx-rates");
-
+    async fn fx_rates_cannot_be_pushed() {
+        let (port, handle) = crate::server::start_test_server().await;
         let payload = serde_json::json!({
             "rates": [{ "code": "EUR", "baseCode": "USD", "rateDate": "2024-01-02", "rateToBase": 1.09 }]
         });
-        assert_eq!(
-            client.post(&url).header("Authorization", "Bearer test-key").json(&payload).send().await.unwrap().status(),
-            200
-        );
-
-        // The primary key is the triple, so a delete naming only the code must
-        // not take out the GBP row sharing the same base and date.
-        let seed = serde_json::json!({
-            "rates": [{ "code": "GBP", "baseCode": "USD", "rateDate": "2024-01-02", "rateToBase": 0.79 }]
-        });
-        client.post(&url).header("Authorization", "Bearer test-key").json(&seed).send().await.unwrap();
-
-        let del = serde_json::json!({
-            "deleted": [{ "code": "EUR", "baseCode": "USD", "rateDate": "2024-01-02" }]
-        });
-        assert_eq!(
-            client.post(&url).header("Authorization", "Bearer test-key").json(&del).send().await.unwrap().status(),
-            200
-        );
-
-        let conn = pool.get().unwrap();
-        let eur_live: i64 = conn
-            .query_row("SELECT count(*) FROM fx_rates WHERE code='EUR' AND deleted_at IS NOT NULL", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(eur_live, 1, "the named triple should be tombstoned");
-        let gbp_live: i64 = conn
-            .query_row("SELECT count(*) FROM fx_rates WHERE code='GBP' AND deleted_at IS NULL", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(gbp_live, 1, "a delete naming only EUR must not touch GBP");
+        let status = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/fx-rates"))
+            .header("Authorization", "Bearer test-key")
+            .json(&payload)
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, 405);
         handle.abort();
     }
 

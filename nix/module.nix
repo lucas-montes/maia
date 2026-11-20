@@ -38,6 +38,9 @@
     # Statement imports resolve FX into this currency. The phone keeps its own
     # display currency; this one is what the server stores alongside each draft.
     base_currency = cfg.baseCurrency;
+    # Firstrade PDF statements are read through poppler. An absolute store
+    # path, so the unit does not depend on what happens to be on PATH.
+    pdftotext_bin = "${pkgs.poppler-utils}/bin/pdftotext";
     statements = {
       # Lifecycle dirs for dropped statements. The settings are deployment-
       # owned (the server moves files around inside them), and unset only when

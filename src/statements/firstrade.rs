@@ -17,9 +17,10 @@
 
 use std::{collections::BTreeMap, future::Future, path::PathBuf};
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 
 use super::{
+    firstrade_pdf::{self, PdfExtract, PdfTransaction},
     DocumentKind, ParseContext, Parser, RawDocument, SourceError, SourceId, ToDatabaseRecord,
     draft::{LineKind, StatementDraft, StatementLineDraft, SuggestedType, TradeDetails, TradeSide},
     sha256_hex,
@@ -28,6 +29,11 @@ use super::{
 pub struct FirstradeSource {
     path: PathBuf,
     account_number: String,
+    /// The reading of a PDF statement, done before `parse` because it needs
+    /// pdftotext and the model (see [`super::firstrade_pdf`]). A failed read
+    /// is kept as its message so `parse` reports it, and the review screen
+    /// shows why the file did not stage.
+    extract: Option<Result<PdfExtract, String>>,
 }
 
 impl FirstradeSource {
@@ -35,7 +41,17 @@ impl FirstradeSource {
         Self {
             path,
             account_number: "firstrade".to_string(),
+            extract: None,
         }
+    }
+
+    pub fn with_extract(mut self, extract: Result<Option<PdfExtract>, SourceError>) -> Self {
+        self.extract = match extract {
+            Ok(None) => None,
+            Ok(Some(reading)) => Some(Ok(reading)),
+            Err(error) => Some(Err(error.to_string())),
+        };
+        self
     }
 }
 
@@ -55,7 +71,12 @@ impl Parser for FirstradeSource {
                     path: path.display().to_string(),
                     source,
                 })?;
-            Ok(vec![RawDocument::file(DocumentKind::Csv, bytes, path)])
+            let kind = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .and_then(DocumentKind::parse_extension)
+                .unwrap_or(DocumentKind::Csv);
+            Ok(vec![RawDocument::file(kind, bytes, path)])
         }
     }
 
@@ -63,17 +84,34 @@ impl Parser for FirstradeSource {
         let doc = docs
             .first()
             .ok_or_else(|| SourceError::malformed("no Firstrade document"))?;
-        if doc.kind != DocumentKind::Csv {
-            return Err(SourceError::Unsupported(
-                "Firstrade import supports CSV exports".to_string(),
-            ));
-        }
-        let (text, _, _) = encoding_rs::UTF_8.decode(&doc.bytes);
-        let rows = parse_csv(&text)?;
+        // Both formats become the same rows, so a PDF line is fingerprinted,
+        // classified and staged exactly like a CSV one.
+        let (rows, mut warnings, pdf) = match doc.kind {
+            DocumentKind::Csv => {
+                let (text, _, _) = encoding_rs::UTF_8.decode(&doc.bytes);
+                (parse_csv(&text)?, Vec::new(), None)
+            }
+            DocumentKind::Pdf => {
+                let extract = match &self.extract {
+                    Some(Ok(extract)) => extract,
+                    Some(Err(message)) => return Err(SourceError::malformed(message.clone())),
+                    None => {
+                        return Err(SourceError::malformed(
+                            "the Firstrade PDF was not read before parsing",
+                        ));
+                    }
+                };
+                (rows_from_pdf(extract), firstrade_pdf::reconcile(extract), Some(extract))
+            }
+            DocumentKind::Json => {
+                return Err(SourceError::Unsupported(
+                    "Firstrade import supports CSV exports and PDF statements".to_string(),
+                ));
+            }
+        };
 
         let mut lines: Vec<StatementLineDraft> = Vec::new();
         let mut occurrences: BTreeMap<(String, String, String, String), usize> = BTreeMap::new();
-        let mut warnings = Vec::new();
         // How many rows the file held, and how many of them became entries. A
         // row the parser cannot date is dropped, and the difference is what
         // went missing.
@@ -102,8 +140,15 @@ impl Parser for FirstradeSource {
             // fingerprint would make every line of an already-imported export
             // look new on re-drop and book a second transaction for it.
             let month = month_key(posted_at);
-            let (line_kind, suggested_type) = classify(&row.action, row.amount);
-            let trade = if line_kind == LineKind::Trade {
+            // A security that only moved (received, delivered, journaled
+            // between account types) is a trade line with no trade details,
+            // which the review shows as informational and never imports.
+            let (line_kind, suggested_type) = if row.security_only {
+                (LineKind::Trade, None)
+            } else {
+                classify(&row.action, row.amount)
+            };
+            let trade = if line_kind == LineKind::Trade && !row.security_only {
                 TradeSide::from_action(&row.action).map(|side| TradeDetails {
                     side,
                     symbol: row.symbol.clone(),
@@ -172,22 +217,38 @@ impl Parser for FirstradeSource {
                 line_kind,
                 suggested_type,
                 suggested_category: category,
-                metadata: serde_json::json!({
-                    "action": row.action,
-                    "symbol": row.symbol,
-                    "quantity": row.quantity,
-                    "price": row.price,
-                    "reference": row.reference,
-                    "raw": row.raw,
-                }),
+                metadata: {
+                    let mut metadata = serde_json::json!({
+                        "action": row.action,
+                        "symbol": row.symbol,
+                        "quantity": row.quantity,
+                        "price": row.price,
+                        "reference": row.reference,
+                        "raw": row.raw,
+                    });
+                    if let (Some(extra), Some(object)) = (&row.extra, metadata.as_object_mut()) {
+                        object.extend(extra.clone());
+                    }
+                    metadata
+                },
                 trade,
                 fingerprint,
                 dedupe_key,
             });
         }
 
-        let (period_start, period_end) = span(&lines);
+        // A PDF states its own period, which is wider than its rows when the
+        // month was quiet. A CSV export is only as wide as what it holds.
+        let (period_start, period_end) = match pdf {
+            Some(extract) if extract.period_start.is_some() => {
+                (extract.period_start.clone(), extract.period_end.clone())
+            }
+            _ => span(&lines),
+        };
         Ok(vec![FirstradeStatement {
+            format: if pdf.is_some() { "pdf" } else { "csv" },
+            opening_balance: pdf.and_then(|extract| extract.opening_cash),
+            closing_balance: pdf.and_then(|extract| extract.closing_cash),
             account_number: self.account_number.clone(),
             period_start,
             period_end,
@@ -213,6 +274,11 @@ fn span(lines: &[StatementLineDraft]) -> (Option<String>, Option<String>) {
 #[derive(Debug, Clone)]
 pub struct FirstradeStatement {
     pub account_number: String,
+    /// `csv` or `pdf`, recorded so the review can tell the two apart.
+    pub format: &'static str,
+    /// Cash at the start and end of the period, as a PDF statement prints it.
+    pub opening_balance: Option<f64>,
+    pub closing_balance: Option<f64>,
     /// The span of the rows in the file, `None` for a file whose every row was
     /// unreadable (its warnings are still worth showing).
     pub period_start: Option<String>,
@@ -249,8 +315,8 @@ impl FirstradeStatement {
             currency_code: "USD".to_string(),
             period_start: self.period_start.clone(),
             period_end: self.period_end.clone(),
-            opening_balance: None,
-            closing_balance: None,
+            opening_balance: self.opening_balance,
+            closing_balance: self.closing_balance,
             source_path: self.source_path,
             stored_path: self.stored_path,
             // The file is the unit, so the key is the bytes: re-dropping the
@@ -265,6 +331,7 @@ impl FirstradeStatement {
             ),
             source_hash: self.source_hash,
             parsed: serde_json::json!({
+                "format": self.format,
                 "lines": self.lines.len(),
                 "rowsRead": self.rows_read,
                 "rowsKept": self.lines.len(),
@@ -289,6 +356,75 @@ struct FirstradeRow {
     amount: f64,
     reference: Option<String>,
     raw: Vec<String>,
+    /// The row moves a security but no cash.
+    security_only: bool,
+    /// Extra metadata a format carries (a PDF's withholding and CUSIP).
+    extra: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// The model's reading of a PDF statement, as the rows a CSV would give.
+///
+/// The TRANSACTION words are normalised onto the vocabulary [`classify`] and
+/// [`TradeSide::from_action`] already know. `BOUGHT`, `SOLD`, `DIVIDEND` and
+/// `INTEREST` pass through as they are. A wire becomes `Wire In` or `Wire
+/// Out`. A journal that costs money (the ADR custody fee) becomes `Fee`. Any
+/// row that moves no cash only moved a security.
+fn rows_from_pdf(extract: &PdfExtract) -> Vec<FirstradeRow> {
+    extract.transactions.iter().map(pdf_row).collect()
+}
+
+fn pdf_row(t: &PdfTransaction) -> FirstradeRow {
+    let amount = t.net();
+    let upper = t.action.trim().to_uppercase();
+    let description = t.description.split_whitespace().collect::<Vec<_>>().join(" ");
+    let security_only = t.moves_no_cash() && !matches!(upper.as_str(), "BOUGHT" | "SOLD");
+    let action = if security_only {
+        upper.clone()
+    } else {
+        match upper.as_str() {
+            "WIRE" | "ACH" | "FUNDS" if amount >= 0.0 => "Wire In".to_string(),
+            "WIRE" | "ACH" | "FUNDS" => "Wire Out".to_string(),
+            "JOURNAL" if amount < 0.0 || description.to_uppercase().contains("FEE") => "Fee".to_string(),
+            _ => upper.clone(),
+        }
+    };
+    let mut extra = serde_json::Map::new();
+    extra.insert("format".into(), "pdf".into());
+    if let Some(withheld) = t.withheld.filter(|w| w.abs() >= 0.005) {
+        extra.insert("withheld".into(), withheld.abs().into());
+    }
+    if let Some(cusip) = t.cusip.as_ref().filter(|c| !c.is_empty()) {
+        extra.insert("cusip".into(), cusip.clone().into());
+    }
+    if let Some(section) = &t.section {
+        extra.insert("section".into(), section.clone().into());
+    }
+    FirstradeRow {
+        posted_at: parse_pdf_date(&t.date),
+        action,
+        symbol: t.symbol.clone().unwrap_or_default().trim().to_uppercase(),
+        description,
+        quantity: t.quantity,
+        price: t.price,
+        amount,
+        reference: None,
+        raw: vec![t.date.clone(), t.action.clone(), t.description.clone()],
+        security_only,
+        extra: Some(extra),
+    }
+}
+
+/// The model is asked for ISO dates. `MM/DD/YY` as printed is accepted too,
+/// and anything that would land before 2000 is refused: `%m/%d/%Y` would
+/// happily read `03/30/23` as the year 23.
+fn parse_pdf_date(raw: &str) -> Option<i64> {
+    let raw = raw.trim();
+    let date = NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .or_else(|_| NaiveDate::parse_from_str(raw, "%m/%d/%y"))
+        .ok()
+        .filter(|date| date.year() >= 2000)?;
+    date.and_hms_opt(0, 0, 0)
+        .map(|dt| dt.and_utc().timestamp_millis())
 }
 
 fn parse_csv(text: &str) -> Result<Vec<FirstradeRow>, SourceError> {
@@ -352,6 +488,8 @@ fn parse_csv(text: &str) -> Result<Vec<FirstradeRow>, SourceError> {
             amount,
             reference,
             raw: fields,
+            security_only: false,
+            extra: None,
         });
     }
 
@@ -819,5 +957,130 @@ mod tests {
         assert_eq!(draft.parsed["rowsRead"], 2);
         assert_eq!(draft.parsed["rowsKept"], 1);
         assert_eq!(draft.parsed["rowsSkipped"], 1);
+    }
+
+    fn pdf_row(date: &str, action: &str, description: &str) -> PdfTransaction {
+        PdfTransaction {
+            date: date.into(),
+            action: action.into(),
+            description: description.into(),
+            ..Default::default()
+        }
+    }
+
+    /// A hand-written reading standing in for the model, covering every row
+    /// shape the 2021–2023 statements print.
+    fn pdf_reading() -> PdfExtract {
+        PdfExtract {
+            period_start: Some("2023-03-01".into()),
+            period_end: Some("2023-03-31".into()),
+            opening_cash: Some(100.0),
+            closing_cash: Some(100.0 + 1568.70 + 49.64 + 11160.91 - 0.32),
+            transactions: vec![
+                PdfTransaction {
+                    symbol: Some("baba".into()),
+                    quantity: Some(16.0),
+                    price: Some(98.0447),
+                    credit: Some(1568.70),
+                    section: Some("buy_sell".into()),
+                    ..pdf_row("2023-03-30", "SOLD", "ALIBABA GROUP HOLDING LTD  SPONSORED ADR")
+                },
+                PdfTransaction {
+                    symbol: Some("INTC".into()),
+                    credit: Some(58.40),
+                    withheld: Some(8.76),
+                    cusip: Some("458140100".into()),
+                    ..pdf_row("2023-03-01", "DIVIDEND", "INTEL CORP CASH DIV ON 160 SHS")
+                },
+                PdfTransaction {
+                    credit: Some(11160.91),
+                    ..pdf_row("2023-03-06", "WIRE", "Wire Funds Received")
+                },
+                PdfTransaction {
+                    debit: Some(0.32),
+                    ..pdf_row("2023-03-12", "JOURNAL", "ALIBABA GROUP HOLDING LTD ADR Fee 2022-03-31")
+                },
+                PdfTransaction {
+                    quantity: Some(-37.0),
+                    ..pdf_row("2023-03-18", "JOURNAL", "INDUSTRIAS BACHOCO FROM TYPE 1 TO TYPE 7")
+                },
+            ],
+        }
+    }
+
+    fn parse_pdf(reading: Result<Option<PdfExtract>, SourceError>) -> Result<Vec<FirstradeStatement>, SourceError> {
+        let doc = RawDocument::file(DocumentKind::Pdf, b"%PDF".to_vec(), PathBuf::from("s.pdf"));
+        FirstradeSource::new(PathBuf::from("s.pdf"))
+            .with_extract(reading)
+            .parse(&[doc], &ctx())
+    }
+
+    #[test]
+    fn a_pdf_reading_lowers_onto_the_csv_line_kinds() {
+        let statements = parse_pdf(Ok(Some(pdf_reading()))).unwrap();
+        let statement = &statements[0];
+        assert!(statement.warnings.is_empty(), "{:?}", statement.warnings);
+        let lines = &statement.lines;
+        assert_eq!(lines.len(), 5);
+
+        let sold = &lines[0];
+        assert_eq!(sold.line_kind, LineKind::Trade);
+        assert_eq!(sold.amount, 1568.70);
+        let trade = sold.trade.as_ref().expect("a sale has trade details");
+        assert_eq!(trade.side, TradeSide::Sell);
+        assert_eq!(trade.symbol, "BABA");
+        assert_eq!(sold.description, "ALIBABA GROUP HOLDING LTD SPONSORED ADR");
+
+        // Net of withholding, like the CSV records it.
+        let dividend = &lines[1];
+        assert_eq!(dividend.line_kind, LineKind::Dividend);
+        assert!((dividend.amount - 49.64).abs() < 1e-9, "{}", dividend.amount);
+        assert_eq!(dividend.metadata["withheld"], 8.76);
+        assert_eq!(dividend.metadata["cusip"], "458140100");
+
+        assert_eq!(lines[2].line_kind, LineKind::TransferIn);
+        assert_eq!(lines[2].amount, 11160.91);
+
+        assert_eq!(lines[3].line_kind, LineKind::Fee);
+        assert_eq!(lines[3].amount, -0.32);
+
+        // A security that only changed account type is shown, never imported.
+        assert!(lines[4].is_informational());
+        assert_eq!(lines[4].amount, 0.0);
+    }
+
+    #[test]
+    fn a_pdf_statement_keeps_its_printed_period_and_cash() {
+        let draft = parse_pdf(Ok(Some(pdf_reading()))).unwrap().into_drafts().remove(0);
+        assert_eq!(draft.period_start.as_deref(), Some("2023-03-01"));
+        assert_eq!(draft.period_end.as_deref(), Some("2023-03-31"));
+        assert_eq!(draft.opening_balance, Some(100.0));
+        assert_eq!(draft.parsed["format"], "pdf");
+        assert_eq!(draft.currency_code, "USD");
+        assert_eq!(draft.source_key, "firstrade:firstrade:hash");
+    }
+
+    #[test]
+    fn a_reading_that_does_not_add_up_warns() {
+        let mut reading = pdf_reading();
+        reading.transactions.remove(2);
+        let statement = parse_pdf(Ok(Some(reading))).unwrap().remove(0);
+        assert!(
+            statement.warnings.iter().any(|w| w.contains("do not reconcile")),
+            "{:?}",
+            statement.warnings
+        );
+    }
+
+    #[test]
+    fn a_failed_pdf_read_is_the_parse_error() {
+        let error = parse_pdf(Err(SourceError::Config("no model key".into()))).unwrap_err();
+        assert!(error.to_string().contains("no model key"), "{error}");
+    }
+
+    #[test]
+    fn a_two_digit_year_is_never_read_as_year_23() {
+        assert_eq!(parse_pdf_date("03/30/23"), parse_pdf_date("2023-03-30"));
+        assert!(parse_pdf_date("0023-03-30").is_none());
     }
 }

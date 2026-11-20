@@ -12,6 +12,7 @@
 pub mod ca;
 pub mod draft;
 pub mod firstrade;
+pub mod firstrade_pdf;
 pub mod preview;
 pub mod store;
 pub mod t212;
@@ -528,7 +529,7 @@ fn persist_raw(
 /// original file would be worse than a permissive one, and the caller's
 /// statement still saves.
 #[cfg(unix)]
-fn restrict(path: &Path, mode: u32) {
+pub(crate) fn restrict(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
         tracing::warn!(path = %path.display(), %error, "cannot restrict statement permissions");
@@ -536,7 +537,7 @@ fn restrict(path: &Path, mode: u32) {
 }
 
 #[cfg(not(unix))]
-fn restrict(_path: &Path, _mode: u32) {}
+pub(crate) fn restrict(_path: &Path, _mode: u32) {}
 
 /// SHA-256, hex encoded. Used for source and line identities.
 pub fn sha256_hex(parts: &[&str]) -> String {
@@ -592,10 +593,12 @@ async fn run_file_source(
         }
         SourceId::Firstrade => {
             let parser = firstrade::FirstradeSource::new(path.to_path_buf());
+            let docs = parser.acquire().await?;
+            // A PDF is read (pdftotext + the model) before the pure parse.
+            let parser = parser.with_extract(firstrade_pdf::extract(state, &docs).await);
             if persist {
-                run(&parser, state).await
+                run_documents(&parser, docs, state).await
             } else {
-                let docs = parser.acquire().await?;
                 run_spooled(&parser, docs, state).await
             }
         }
@@ -628,8 +631,9 @@ pub async fn run_upload(
             .await
         }
         SourceId::Firstrade => {
+            let extract = firstrade_pdf::extract(state, &docs).await;
             run_documents(
-                &firstrade::FirstradeSource::new(PathBuf::from("upload")),
+                &firstrade::FirstradeSource::new(PathBuf::from("upload")).with_extract(extract),
                 docs,
                 state,
             )

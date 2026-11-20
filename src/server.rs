@@ -99,7 +99,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/ingredients/import-from-barcode", axum::routing::post(crate::handlers::lookup::import_from_barcode))
         .route("/ingredients/item/:id", get(crate::handlers::pull::get_ingredient_item))
         .route("/foods", get(crate::handlers::pull::pull_foods).post(crate::handlers::push::push_foods))
-        .route("/fx-rates", get(crate::handlers::pull::pull_fx_rates).post(crate::handlers::push::push_fx_rates))
+        .route("/fx-rates", get(crate::handlers::pull::pull_fx_rates))
+        // The server is the only writer of rates (see `crate::fx`); the phone
+        // only pulls them. Refresh runs one pull now instead of waiting a tick.
+        .route("/fx-rates/refresh", post(crate::fx::refresh))
         .route("/workouts", get(crate::handlers::read::pull_workouts).post(crate::handlers::push::push_workouts))
         .route("/templates", get(crate::handlers::pull::pull_templates).post(crate::handlers::push::push_templates))
         .route("/notes", get(crate::handlers::pull::pull_notes).post(crate::handlers::push::push_notes))
@@ -398,6 +401,7 @@ where
     crate::statements::watch::spawn(state.clone());
     crate::notes_mirror::watch::spawn(state.clone());
     crate::notifier::spawn(state.clone());
+    crate::fx::spawn(state.clone());
     let router = create_router(state);
     let handle = tokio::spawn(async move {
         // Logged rather than unwrapped: a bind failure surfaces here after the

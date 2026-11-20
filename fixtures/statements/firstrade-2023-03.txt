@@ -1,0 +1,154 @@
+                                           Apex Clearing Corporation
+                                           350 N. St. Paul Street 1300
+                                           Dallas, TX 75201
+
+
+T
+
+N
+E   March 1, 2023 - March 31, 2023
+M                                                                                            PAGE 1 OF 8
+
+    ACCOUNT NUMBER                 000-00000-00 RR WWW
+E
+T
+A   JANE DOE    
+T
+                                                                                                                                               JANE DOE    
+S                                                                                                                                              1 EXAMPLE STREET
+                                                                                                                                               00000 SOMEWHERE
+                                                                                                                                               FRANCE
+T
+    Y o u r A c co un t I ns t r u c ti o ns
+N         Hold Securities in Account
+          Hold Proceeds
+U
+
+O
+
+C
+
+C
+                                                   OPENING BALANCE                CLOSING BALANCE
+A
+    Cash account                                          $726.86                      $2,350.47
+    NET ACCOUNT BALANCE                                     726.86                       2,350.47
+    Securities                                           6,849.88                        6,731.48
+                                                                                                                                                      Cash
+    TOTAL PRICED PORTFOLIO                               6,849.88                        6,731.48                                                     25.881%
+
+    Total Equity Holdings                              $7,576.74                       $9,081.95
+
+
+
+                                                          THIS PERIOD                   YEAR TO DATE
+
+    Taxable dividends                                       $64.35                          $64.35
+    Credit interest                                           $0.21                            $0.89
+    Non-resident tax paid                                      -9.65                            -9.65                               Equities
+                                                                                                                                    74.119%
+
+
+
+
+    See Reverse Side for Important Tax Information. This statement shall be conclusive if not objected to in
+    writing within ten days. Errors and omissions excepted. Please address all communications to the firm and not to individuals.
+    Address changes or other material changes on your account should be directed to the office servicing your account. Kindly
+    mention your account number. This statement should be retained for income tax purposes.
+    March 1, 2023 - March 31, 2023
+T
+                                                                    PAGE 2 OF 8
+N
+    ACCOUNT NUMBER           000-00000-00 RR WWW
+E
+
+M
+    JANE DOE                                                                                      Tax Season is approaching soon,
+E                                                                                                 It is time to plan.
+                                                                                                  Open an IRA and contribute to your retirement savings!
+T
+A
+T
+S
+                                                SYMBOL/       ACCOUNT                                        MARKET      LAST PERIOD'S               EST. ANNUAL   % OF TOTAL
+    DESCRIPTION                                 CUSIP         TYPE                QUANTITY     PRICE          VALUE      MARKET VALUE    % CHANGE         INCOME   PORTFOLIO
+
+    E QU I T I E S / OP T I O N S
+T
+    INTEL CORP                                  INTC          C               160            $32.67       $5,227.20       $3,988.80         31%            $80     57.556%
+N   VANGUARD S&P 500 ETF                        VOO           C                    4         376.07        1,504.28         1,456.44             3           24     16.563
+
+U   Total Equities                                                                                       $6,731.48                                       $104      74.119%
+
+O   Total Cash (Net Portfolio Balance)                                                                   $2,350.47                                                 25.881%
+C   TOTAL PRICED PORTFOLIO                                                                               $9,081.95                                       $104
+C
+
+A
+                                    ACCOUNT
+    TRANSACTION       DATE          TYPE    DESCRIPTION                                       QUANTITY           PRICE                   DEBIT            CREDIT
+
+    B U Y / SE L L T R A N S A C T I ON S
+    SOLD              03/30/23      C       ALIBABA GROUP HOLDING LTD                              16        $98.0447                                 $1,568.70
+                                              SPONSORED ADR
+                                              UNSOLICITED
+                                              CUSIP: 01609W102
+    Total Buy / Sell Transactions                                                                                                                    $1,568.70
+
+    DI V I DE ND S A N D I N T E RE ST
+    DIVIDEND          03/01/23      C       INTEL CORP                                                         $0.365                                    $58.40
+                                              CASH DIV ON 160 SHS                                                 WH                     8.76
+                                              REC 02/07/23 PAY 03/01/23
+                                              NON-RES TAX WITHHELD
+                                              CUSIP: 458140100
+     March 1, 2023 - March 31, 2023
+T
+                                                                     PAGE 3 OF 8
+N
+     ACCOUNT NUMBER         000-00000-00 RR WWW
+E
+
+M
+     JANE DOE    
+E
+T
+A
+T   ACCOUNT ACTIVITY (CONTINUED)
+
+S                                   ACCOUNT
+     TRANSACTION     DATE           TYPE    DESCRIPTION                            QUANTITY     PRICE    DEBIT    CREDIT
+
+     DI V I D E N D S A ND I NT E RE S T (continued)
+T    INTEREST        03/16/23       C        INTEREST ON CREDIT BALANCE                                            0.21
+                                               AT 0.350% 02/16 THRU 03/15
+N                                              CUSIP: 00099A109
+     DIVIDEND        03/29/23       C        VANGUARD S&P 500 ETF                             1.4874               5.95
+U                                              CASH DIV ON    4 SHS                              WH      0.89
+                                               REC 03/27/23 PAY 03/29/23
+O                                              NON-QUALIFIED DIVIDEND
+                                               NON-RES TAX WITHHELD
+C                                              CUSIP: 922908363
+     Total Dividends And Interest                                                                       $9.65    $64.56
+C
+
+A
+    March 1, 2023 - March 31, 2023
+T
+                                                                          PAGE 4 OF 8
+N
+    ACCOUNT NUMBER          000-00000-00 RR WWW
+E
+
+M
+    JANE DOE    
+E
+T
+A
+T
+S   IMPORTANT INFORMATION
+
+    Statement of Financial Condition
+T   A copy of Apex Clearing Corporation's Audited Statement of Financial Condition as of December 31, 2022 is available on the website at www.apexfintechsolutions.com/disclosures/. A copy
+    may also be obtained at no cost by calling Apex Clearing Corporation. As of December 31, 2022, Apex Clearing Corporation had a net capital of $466,254,287 and was $439,752,615 in
+N   excess of its required net capital of $26,501,672. As of January 31, 2023, Apex Clearing Corporation had a net capital of $503,778,156 and was $479,334,278 in excess of its required net
+    capital of $24,443,878.

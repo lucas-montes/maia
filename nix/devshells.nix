@@ -29,6 +29,7 @@
       pkgs.pnpm
       pkgs.nodejs
       pkgs.sqlite
+      pkgs.poppler-utils # pdftotext, for Firstrade PDF statements
       pkgs.librsvg
       pkgs.webkitgtk_4_1
       pkgs.gst_all_1.gstreamer
