@@ -440,7 +440,7 @@ pub async fn pull_foods(State(state): State<AppState>, Query(q): Query<SinceQuer
     // One query for every food that changed, then one for the composition of
     // exactly those. Ordering by ingredient name matches how clients present
     // the parts; there is no stored sort order to read.
-    let mut stmt = conn.prepare("SELECT id, name, created_at, archived_at, cooked_weight FROM foods WHERE deleted_at IS NULL AND (?1 <= 0 OR updated_at > ?1) ORDER BY updated_at").unwrap();
+    let mut stmt = conn.prepare("SELECT id, name, created_at, archived_at, cooked_weight FROM foods WHERE deleted_at IS NULL AND id NOT LIKE 'i:%' AND (?1 <= 0 OR updated_at > ?1) ORDER BY updated_at").unwrap();
     let rows: Vec<(String, String, i64, Option<i64>, Option<f64>)> = stmt
         .query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
         .unwrap()
@@ -467,7 +467,7 @@ pub async fn pull_foods(State(state): State<AppState>, Query(q): Query<SinceQuer
         })
         .collect();
 
-    let deleted: Vec<String> = conn.prepare("SELECT id FROM foods WHERE deleted_at IS NOT NULL AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
+    let deleted: Vec<String> = conn.prepare("SELECT id FROM foods WHERE deleted_at IS NOT NULL AND id NOT LIKE 'i:%' AND deleted_at > ?1").unwrap().query_map([since], |r| r.get(0)).unwrap().filter_map(|r|r.ok()).collect();
     Json(PullFoodsResponse{server_time, items, deleted})
 }
 pub async fn pull_templates(State(state): State<AppState>, Query(q): Query<SinceQuery>) -> impl IntoResponse {

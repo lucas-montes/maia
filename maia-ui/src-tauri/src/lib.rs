@@ -3753,7 +3753,7 @@ fn list_foods(state: tauri::State<AppState>) -> CommandResult<Vec<serde_json::Va
             };
         }
     };
-    let mut stmt = match conn.prepare("SELECT id, name, created_at, archived_at, cooked_weight FROM foods WHERE deleted_at IS NULL ORDER BY name") {
+    let mut stmt = match conn.prepare("SELECT id, name, created_at, archived_at, cooked_weight FROM foods WHERE deleted_at IS NULL AND id NOT LIKE 'i:%' ORDER BY name") {
         Ok(s)=>s,
         Err(e)=>return CommandResult{success:false,data:None,error:Some(format!("{e}"))},
     };

@@ -255,6 +255,13 @@ pub async fn push_ingredient(
         ],
     )
     .unwrap();
+    // An ingredient's derived wrapper (made when a meal first logs it) mirrors
+    // its name, so a rename reaches old meals as it does on the phone.
+    tx.execute(
+        "UPDATE foods SET name=?1 WHERE id=?2",
+        rusqlite::params![payload.name, format!("{DERIVED_FOOD_PREFIX}{}", payload.id)],
+    )
+    .unwrap();
 
     for pic in payload.pictures {
         tx.execute(
@@ -1396,24 +1403,30 @@ pub async fn push_meals(
             rusqlite::params![meal_id],
         );
     }
-    for mf in payload.meal_foods {
-        // A logged food may reference a recipe this server has never seen — the
-        // client can log a food before pushing it as a shareable recipe.
-        // `PRAGMA foreign_keys` is ON and every execute() unwraps, so
-        // inserting it would abort the whole request with a 500 and take the
-        // meal down with it. Skip instead: the row is self-contained (it carries
-        // its own frozen macros), so totals stay correct; it just cannot be
-        // linked back to the recipe until that is pushed too.
-        let known: i64 = tx
-            .query_row(
-                "SELECT count(*) FROM foods WHERE id=?1 AND deleted_at IS NULL",
-                rusqlite::params![mf.food_id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        if known == 0 {
-            continue;
+    // Every logged food must resolve to a `foods` row (the FK is enforced).
+    // A plain ingredient is logged through its 1:1 wrapper `i:<ingredientId>`,
+    // which phones never push, so it is created here from the ingredient.
+    // Anything still unknown rejects the whole push: skipping the row used to
+    // drop its calories silently, and the next pull then deleted it from the
+    // phone as well.
+    let mut missing: Vec<String> = Vec::new();
+    for mf in &payload.meal_foods {
+        if !ensure_food(&tx, &mf.food_id, server_time) && !missing.contains(&mf.food_id) {
+            missing.push(mf.food_id.clone());
         }
+    }
+    if !missing.is_empty() {
+        // Dropping `tx` uncommitted rolls the meal rows back too.
+        return error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "unknown foods {}: push ingredients and foods before meals",
+                missing.join(", ")
+            ),
+        )
+        .into_response();
+    }
+    for mf in payload.meal_foods {
         tx.execute(
             "INSERT INTO meal_foods (id, meal_id, food_id, amount, calories, protein, carbs, fat, sodium, fiber, sugar, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) ON CONFLICT(id) DO UPDATE SET meal_id=excluded.meal_id, food_id=excluded.food_id, amount=excluded.amount, calories=excluded.calories, protein=excluded.protein, carbs=excluded.carbs, fat=excluded.fat, sodium=excluded.sodium, fiber=excluded.fiber, sugar=excluded.sugar, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at",
             rusqlite::params![
@@ -1439,7 +1452,50 @@ pub async fn push_meals(
         let _ = tx.execute("UPDATE meal_foods SET deleted_at=?1, updated_at=?1 WHERE id=?2", rusqlite::params![server_time, id]);
     }
     tx.commit().unwrap();
-    Json(SyncAck { server_time })
+    Json(SyncAck { server_time }).into_response()
+}
+
+/// Prefix of the auto-created 1:1 food every ingredient has on the phone
+/// (`i:<ingredientId>`): how a meal logs an ingredient directly. Kept out of
+/// the recipe lists, which is where the phone keeps it out too.
+pub const DERIVED_FOOD_PREFIX: &str = "i:";
+
+/// Whether `food_id` names a food the server has, creating an ingredient's
+/// derived wrapper on demand. Tombstoned rows count: the FK only needs the row,
+/// and a logged snapshot keeps its food after the recipe is deleted.
+///
+/// The wrapper mirrors the phone's: the ingredient's name and one 100 g
+/// component, so `pricing` resolves it like any other recipe.
+fn ensure_food(tx: &rusqlite::Connection, food_id: &str, server_time: i64) -> bool {
+    let exists = tx
+        .query_row("SELECT 1 FROM foods WHERE id=?1", [food_id], |_| Ok(()))
+        .optional()
+        .unwrap()
+        .is_some();
+    if exists {
+        return true;
+    }
+    let Some(ingredient_id) = food_id.strip_prefix(DERIVED_FOOD_PREFIX) else {
+        return false;
+    };
+    let name: Option<String> = tx
+        .query_row("SELECT name FROM ingredients WHERE id=?1", [ingredient_id], |r| r.get(0))
+        .optional()
+        .unwrap();
+    let Some(name) = name else {
+        return false;
+    };
+    tx.execute(
+        "INSERT INTO foods (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+        rusqlite::params![food_id, name, server_time],
+    )
+    .unwrap();
+    tx.execute(
+        "INSERT INTO food_ingredients (food_id, ingredient_id, amount, updated_at) VALUES (?1, ?2, 100, ?3)",
+        rusqlite::params![food_id, ingredient_id, server_time],
+    )
+    .unwrap();
+    true
 }
 
 pub async fn push_transactions(

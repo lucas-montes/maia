@@ -2150,6 +2150,107 @@ mod tests {
         handle.abort();
     }
 
+    /// An ingredient logged directly goes through its derived `i:` food, which
+    /// phones never push. The server used to skip that row, so its calories
+    /// vanished from the server and, on the next pull, from the phone.
+    #[tokio::test]
+    async fn push_meals_keeps_an_ingredient_logged_directly() {
+        let pool = crate::db::init_memory().unwrap();
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = |p: &str| format!("http://127.0.0.1:{port}{p}");
+        let post = |p: &str, body: serde_json::Value| {
+            client.post(url(p)).header("Authorization", "Bearer test-key").json(&body).send()
+        };
+        let resp = post("/ingredients", serde_json::json!({
+            "id":"ing1","name":"Rice","caloriesPer100g":130,"proteinPer100g":2.7,"carbsPer100g":28,
+            "fatPer100g":0.3,"isArchived":false,"createdAt":1
+        })).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let resp = post("/foods", serde_json::json!({"items":[
+            {"id":"r1","name":"Rice bowl","createdAt":1,"components":[{"ingredientId":"ing1","amount":200}]}
+        ]})).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let resp = post("/meals", serde_json::json!({
+            "meals":[{"id":"m1","name":"Lunch","eatenAt":1000,"createdAt":1000}],
+            "mealFoods":[
+                {"id":"mf1","mealId":"m1","foodId":"i:ing1","amount":150,"calories":195,"protein":4,"carbs":42,"fat":0.45},
+                {"id":"mf2","mealId":"m1","foodId":"r1","amount":100,"calories":130,"protein":2.7,"carbs":28,"fat":0.3}
+            ]
+        })).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = client.get(url("/meals?since=0"))
+            .header("Authorization", "Bearer test-key").send().await.unwrap().json().await.unwrap();
+        let items = body["mealFoods"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        let total: f64 = items.iter().map(|i| i["calories"].as_f64().unwrap()).sum();
+        assert_eq!(total, 325.0);
+        let direct = items.iter().find(|i| i["foodId"] == "i:ing1").unwrap();
+        assert_eq!(direct["foodName"], "Rice");
+
+        // The wrapper resolves like a recipe of one ingredient at 100 g...
+        let amount: f64 = pool.get().unwrap()
+            .query_row("SELECT amount FROM food_ingredients WHERE food_id='i:ing1' AND ingredient_id='ing1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(amount, 100.0);
+        // ...but it is not a recipe, so it stays out of the shared food list.
+        let foods: serde_json::Value = client.get(url("/foods?since=0"))
+            .header("Authorization", "Bearer test-key").send().await.unwrap().json().await.unwrap();
+        let ids: Vec<&str> = foods["items"].as_array().unwrap().iter().map(|f| f["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["r1"]);
+
+        // Renaming the ingredient renames the wrapper, as on the phone.
+        post("/ingredients", serde_json::json!({
+            "id":"ing1","name":"White rice","caloriesPer100g":130,"proteinPer100g":2.7,"carbsPer100g":28,
+            "fatPer100g":0.3,"isArchived":false,"createdAt":1
+        })).await.unwrap();
+        let name: String = pool.get().unwrap()
+            .query_row("SELECT name FROM foods WHERE id='i:ing1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(name, "White rice");
+        handle.abort();
+    }
+
+    /// A food the server cannot resolve rejects the push instead of being
+    /// dropped: the meal keeps what the server had, so the pull that follows
+    /// cannot delete anything from the phone.
+    #[tokio::test]
+    async fn push_meals_rejects_an_unknown_food_without_touching_the_meal() {
+        let pool = crate::db::init_memory().unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute("INSERT INTO meals (id, name, eaten_at, created_at, updated_at) VALUES ('m1','Lunch',1000,1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO foods (id, name, created_at, updated_at) VALUES ('f1','Oats bowl',1000,1000)", []).unwrap();
+            conn.execute("INSERT INTO meal_foods (id, meal_id, food_id, amount, calories, protein, carbs, fat, updated_at) VALUES ('mf1','m1','f1',200,200,20,40,10,1000)", []).unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let resp = client.post(format!("http://127.0.0.1:{port}/meals"))
+            .header("Authorization", "Bearer test-key")
+            .json(&serde_json::json!({
+                "meals":[{"id":"m1","name":"Lunch v2","eatenAt":1000,"createdAt":1000}],
+                "mealFoods":[
+                    {"id":"mf1","mealId":"m1","foodId":"f1","amount":200,"calories":200,"protein":20,"carbs":40,"fat":10},
+                    {"id":"mf2","mealId":"m1","foodId":"never-pushed","amount":100,"calories":90,"protein":1,"carbs":1,"fat":1},
+                    {"id":"mf3","mealId":"m1","foodId":"i:no-such-ingredient","amount":100,"calories":50,"protein":1,"carbs":1,"fat":1}
+                ]
+            }))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 422);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let message = body["message"].as_str().unwrap();
+        assert!(message.contains("never-pushed") && message.contains("i:no-such-ingredient"), "{message}");
+
+        let conn = pool.get().unwrap();
+        let (name, updated): (String, i64) = conn
+            .query_row("SELECT name, updated_at FROM meals WHERE id='m1'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((name.as_str(), updated), ("Lunch", 1000));
+        let count: i64 = conn.query_row("SELECT count(*) FROM meal_foods WHERE meal_id='m1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1);
+        handle.abort();
+    }
+
     /// A child-only change must still return the whole workout: the phone had
     /// already seen the parent row, which used to suppress the graph forever.
     #[tokio::test]
