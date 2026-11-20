@@ -23,6 +23,7 @@ Every trade line carries:
 | Source | Cash | Fallback when the row has none |
 |---|---|---|
 | Firstrade CSV | `Amount` | quantity × price |
+| Firstrade PDF | the model's credit − debit (`firstrade_pdf.rs`) | none, and a `BOUGHT`/`SOLD` with no cash is informational |
 | Trading 212 CSV | `Total` (fees included, account currency) | none, because the price is in the instrument's currency |
 | Trading 212 API | the fill's `walletImpact.netValue` | none |
 
@@ -113,7 +114,7 @@ currency (see the plan's T18 deviation).
 | Concern | File |
 |---|---|
 | `TradeSide`, `TradeDetails`, what is informational | `src/statements/draft.rs` |
-| the parsers | `src/statements/{firstrade,t212_csv,t212}.rs` |
+| the parsers | `src/statements/{firstrade,firstrade_pdf,t212_csv,t212}.rs` |
 | staging, re-read, matching, `import_trade` | `src/statements/store.rs` |
 | the securities account in the preview | `src/statements/preview.rs` |
 | `trades` / `opening_positions` tables | `src/db.rs` (v14, v15) |

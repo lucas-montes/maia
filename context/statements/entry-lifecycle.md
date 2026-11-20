@@ -119,8 +119,12 @@ from the fresh lines rather than restored.
 
 ## Retrying a failed entry
 
-An `error` entry is one the import could not book — a missing FX rate is the
-usual reason — and it is the one the user wants to try again. The review
+An `error` entry is one the import could not book, and it is the one the user
+wants to try again. A missing FX rate used to be the usual reason. Since
+`src/fx.rs` backfills every currency in use, it now only happens before the
+first pull (or for a currency the ECB does not publish); `POST
+/fx-rates/refresh` pulls immediately, and the failed entries are then retried
+here. The puller never imports anything itself. The review
 offers it a checkbox like a pending entry, so it is **importable**: `pending`
 or `error`.
 
