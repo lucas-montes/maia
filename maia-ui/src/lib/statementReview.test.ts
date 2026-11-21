@@ -4,6 +4,7 @@ import {
   liveMatches,
   matchedLineIds,
   parsedRowsSummary,
+  extractedBy,
   reviewEmptiness,
   selectableLineIds,
   isUnbookableTrade,
@@ -200,6 +201,9 @@ describe("parsedRowsSummary", () => {
 
   test("a missing count is not invented", () => {
     expect(parsedRowsSummary({ rowsRead: 67, rowsSkipped: 1 })).toBe("");
+    expect(extractedBy({ extractedBy: "flash (gemini-2.5-flash)" })).toBe("flash (gemini-2.5-flash)");
+    expect(extractedBy({ rowsRead: 3 })).toBe("");
+    expect(extractedBy(null)).toBe("");
   });
 });
 

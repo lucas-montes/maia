@@ -8,7 +8,6 @@
 
 use std::path::PathBuf;
 
-use ai::Vllm;
 use axum::{
     extract::{Multipart, Path, State},
     http::StatusCode,
@@ -281,7 +280,7 @@ pub async fn reparse_receipt_picture(
 /// hang on `parsing` forever.
 async fn run_ocr(
     db_pool: db::DbPool,
-    model: std::sync::Arc<ai::Model>,
+    model: std::sync::Arc<ai::ModelChain>,
     id: String,
     bytes: Vec<u8>,
     mime: String,
@@ -290,23 +289,22 @@ async fn run_ocr(
     let now = db::server_time_ms();
 
     let outcome = match model.extract_image_bytes::<ParsedReceipt>(bytes, &mime).await {
-        Ok(Some(parsed)) => {
-            let json_text = serde_json::to_string(&parsed).unwrap_or_default();
+        Ok(generated) => {
+            let json_text = serde_json::to_string(&generated.value).unwrap_or_default();
+            let read_by = generated.model.to_string();
+            tracing::info!(id = %id, model = %read_by, fallbacks = generated.attempts.len(), "receipt read");
             let conn = db_pool.get().unwrap();
             let _ = conn.execute(
-                "UPDATE receipts SET parsed = 1, parsed_json = ?1, parse_error = NULL, upload_status = ?2, updated_at = ?3 WHERE id = ?4",
-                rusqlite::params![json_text, UPLOAD_STATUS_UPLOADED, now, id],
+                "UPDATE receipts SET parsed = 1, parsed_json = ?1, parse_error = NULL, upload_status = ?2,
+                        updated_at = ?3, parsed_model = ?5 WHERE id = ?4",
+                rusqlite::params![json_text, UPLOAD_STATUS_UPLOADED, now, id, read_by],
             );
             if let Err(e) = crate::matching::after_parse(&conn, &id, now) {
                 tracing::warn!(id = %id, error = %e, "receipt matching after a parse failed");
             }
             Ok(())
         }
-        Ok(None) => {
-            tracing::warn!(id = %id, "model returned no content");
-            Err("model returned no content".to_string())
-        }
-        Err(e) => Err(format!("{e:?}")),
+        Err(e) => Err(e.to_string()),
     };
 
     if let Err(message) = outcome {
@@ -336,7 +334,7 @@ pub async fn get_receipt_parse(
     let conn = state.db.get().unwrap();
     let row = conn
         .query_row(
-            "SELECT upload_status, parsed, parsed_json, parse_error FROM receipts WHERE id = ?1 AND deleted_at IS NULL",
+            "SELECT upload_status, parsed, parsed_json, parse_error, parsed_model FROM receipts WHERE id = ?1 AND deleted_at IS NULL",
             rusqlite::params![id],
             |r| {
                 Ok((
@@ -344,12 +342,13 @@ pub async fn get_receipt_parse(
                     r.get::<_, i64>(1)?,
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
                 ))
             },
         )
         .ok();
 
-    let Some((upload_status, parsed, parsed_json, parse_error)) = row else {
+    let Some((upload_status, parsed, parsed_json, parse_error, parsed_model)) = row else {
         return (StatusCode::NOT_FOUND, Json(json!({"message":"not found"}))).into_response();
     };
 
@@ -373,6 +372,9 @@ pub async fn get_receipt_parse(
             "id": id,
             "status": status,
             "parsed": parsed_value,
+            // Which saved model read it, `"<id> (<model>)"`; null for a reading
+            // that predates the column.
+            "model": parsed_model,
             "error": parse_error,
             "server_time": db::server_time_ms(),
         })),

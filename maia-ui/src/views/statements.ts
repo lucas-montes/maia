@@ -21,6 +21,7 @@ import {
   localMatchSide,
   matchedLineIds,
   parsedRowsSummary,
+  extractedBy,
   reviewEmptiness,
   selectableLineIds,
   tradeLabel,
@@ -362,6 +363,7 @@ function detailHtml(
           <div><span class="text-ink-500">Closing:</span> <span class="font-mono text-ink-300">${s.closingBalance === null ? "?" : escapeHtml(money(s.closingBalance, s.currencyCode))}</span></div>
           <div><span class="text-ink-500">Entries:</span> <span class="text-ink-300">${detail.lines.length} (${pending} pending${failed > 0 ? ` · ${failed} failed` : ""})</span></div>
           ${rows ? `<div><span class="text-ink-500">Rows:</span> <span class="text-ink-300">${escapeHtml(rows)}</span></div>` : ""}
+          ${extractedBy(s.parsed) ? `<div><span class="text-ink-500">Read by:</span> <span class="font-mono text-ink-300">${escapeHtml(extractedBy(s.parsed))}</span></div>` : ""}
           <div><span class="text-ink-500">Updated:</span> <span class="text-ink-300">${escapeHtml(formatEpoch(s.updatedAt))}</span></div>
         </div>
         ${s.parseError ? `<div class="mt-3 rounded border border-surface-800 bg-base-100 p-2 text-xs text-err-400">Parse failed: ${escapeHtml(s.parseError)}</div>` : ""}

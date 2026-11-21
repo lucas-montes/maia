@@ -299,7 +299,22 @@ pub const MIGRATIONS: &[(i64, Step)] = &[
             CREATE INDEX IF NOT EXISTS idx_receipt_line_matches_price ON receipt_line_matches(ingredient_price_id);",
         ),
     ),
+    // Which model produced a reading or a proposal, now that more than one can
+    // be configured and a task falls back through several: `receipts` keeps
+    // the model that read it, `receipt_effects` the model an accepted AI
+    // proposal came from. Both `"<id> (<provider model>)"`. Server-only.
+    (18, Step::Guarded(add_model_provenance)),
 ];
+
+fn add_model_provenance(conn: &Connection) -> anyhow::Result<()> {
+    for (table, column) in [("receipts", "parsed_model"), ("receipt_effects", "model")] {
+        if !column_exists(conn, table, column)? {
+            // Both names come from the list above, never from input.
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"))?;
+        }
+    }
+    Ok(())
+}
 
 const RECEIPT_MATCHING_TABLES: &str = "CREATE TABLE IF NOT EXISTS store_aliases (
                 alias TEXT PRIMARY KEY,
@@ -369,7 +384,7 @@ fn add_receipt_matching(conn: &Connection) -> anyhow::Result<()> {
 ///
 /// A database newer than this means the data is newer than the binary, which is
 /// what a Nix rollback looks like. `migrate` refuses rather than serving.
-pub const LATEST_VERSION: i64 = 17;
+pub const LATEST_VERSION: i64 = 18;
 
 /// The v1 schema, exactly as it shipped.
 ///

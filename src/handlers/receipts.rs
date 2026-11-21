@@ -184,6 +184,9 @@ pub struct LinkRequest {
     transaction_id: String,
     #[serde(default)]
     source: Option<String>,
+    /// The model that proposed the link, kept only with `source: "ai"`.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 fn link_error(e: crate::receipt_links::LinkError) -> axum::response::Response {
@@ -208,15 +211,18 @@ pub async fn put_receipt_transaction(
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
+    let model = crate::handlers::matching::proposed_by(source, request.model.as_deref());
     let conn = state.db.get().unwrap();
-    match crate::receipt_links::link(
-        &conn,
-        &id,
-        request.transaction_id.trim(),
-        source,
-        db::server_time_ms(),
-    ) {
-        Ok(outcome) => Json(outcome).into_response(),
+    let now = db::server_time_ms();
+    match crate::receipt_links::link(&conn, &id, request.transaction_id.trim(), source, now) {
+        Ok(outcome) => {
+            if let Some(model) = model.as_deref() {
+                if let Err(e) = crate::matching::effects::tag_model(&conn, &id, now, model) {
+                    tracing::warn!(id = %id, error = %e, "could not file the link under its model");
+                }
+            }
+            Json(outcome).into_response()
+        }
         Err(e) => link_error(e),
     }
 }

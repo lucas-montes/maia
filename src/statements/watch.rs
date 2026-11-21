@@ -1313,17 +1313,14 @@ mod tests {
                     "parsed_dir": lifecycle.parsed.display().to_string(),
                     "discarded_dir": lifecycle.discarded.display().to_string(),
                     "failed_dir": lifecycle.failed.display().to_string(),
+                    // Deployment-owned, like the roots beside it.
+                    "intake_dir": intake.display().to_string(),
                 }
             })
             .as_object()
             .unwrap()
             .clone(),
-            serde_json::json!({
-                "statements": { "intake_dir": intake.display().to_string() }
-            })
-            .as_object()
-            .unwrap()
-            .clone(),
+            serde_json::Map::new(),
         );
         AppState::new(config, crate::db::init_memory().unwrap())
     }

@@ -264,6 +264,10 @@
     @apply border-ok-700 bg-ok-900/30 text-ok-300;
   }
 
+  .banner-warn {
+    @apply border-warn-500/60 bg-warn-900/30 text-warn-400;
+  }
+
   .empty-state {
     @apply py-8 text-center text-base-content/50;
   }

@@ -44,6 +44,10 @@ pub struct PdfExtract {
     pub closing_cash: Option<f64>,
     #[serde(default)]
     pub transactions: Vec<PdfTransaction>,
+    /// The model that read the activity, `"<id> (<model>)"`. Cached with the
+    /// reading, so a re-import shows the model that actually read it.
+    #[serde(default)]
+    pub extracted_by: Option<String>,
 }
 
 /// One activity row as the model read it. Amounts are positive magnitudes in
@@ -120,22 +124,24 @@ pub async fn extract(state: &AppState, docs: &[RawDocument]) -> Result<Option<Pd
 
     let activity = activity_text(&text);
     if !activity.is_empty() {
-        let model = state.ocr.as_ref().ok_or_else(|| {
-            SourceError::Config("Firstrade PDF import needs a model key (`model_api` in the deployment config)".to_string())
+        let models = state.statement_extraction.as_ref().ok_or_else(|| {
+            SourceError::Config(
+                "Firstrade PDF import needs a model assigned to statement extraction (Settings → Models)".to_string(),
+            )
         })?;
         let prompt = format!(
             "Statement period: {} to {}.\n\n{activity}",
             reading.period_start.as_deref().unwrap_or("?"),
             reading.period_end.as_deref().unwrap_or("?"),
         );
-        let value = model
-            .generate_json(SYSTEM.to_string(), prompt, schema())
+        let generated = models
+            .generate_json(SYSTEM, &prompt, &schema())
             .await
-            .map_err(|error| SourceError::malformed(format!("model call failed: {error:?}")))?
-            .ok_or_else(|| SourceError::malformed("the model returned no reading of the statement"))?;
-        let parsed: ModelReading = serde_json::from_value(value)
+            .map_err(|error| SourceError::malformed(format!("model call failed: {error}")))?;
+        let parsed: ModelReading = serde_json::from_value(generated.value)
             .map_err(|error| SourceError::malformed(format!("the model's reading did not fit the schema: {error}")))?;
         reading.transactions = parsed.transactions;
+        reading.extracted_by = Some(generated.model.to_string());
     }
 
     write_cache(&cache, &reading);
@@ -441,6 +447,7 @@ mod tests {
             period_end: Some("2023-03-31".into()),
             opening_cash: Some(726.86),
             closing_cash: Some(2350.47),
+            extracted_by: None,
             transactions: vec![
                 row("SOLD", None, Some(1568.70), None),
                 row("DIVIDEND", None, Some(58.40), Some(8.76)),

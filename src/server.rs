@@ -33,9 +33,13 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub db: db::DbPool,
     pub logs: logs::LogBuffer,
-    /// Vision model for receipt OCR, `None` when no model key is configured.
-    /// Handlers check this to report `503` instead of calling the model.
-    pub ocr: Option<Arc<ai::Model>>,
+    /// Fallback chain for receipt OCR, `None` when no vision model is assigned.
+    /// Handlers check this to report `503` instead of calling a model.
+    pub ocr: Option<Arc<ai::ModelChain>>,
+    /// Fallback chain for receipt-matching assists.
+    pub matching: Option<Arc<ai::ModelChain>>,
+    /// Fallback chain for reading statement activity out of PDFs.
+    pub statement_extraction: Option<Arc<ai::ModelChain>>,
     /// Shared client for statement feeds. One pool of connections across syncs
     /// rather than a new client per request.
     pub http: reqwest::Client,
@@ -47,9 +51,10 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: Config, db: db::DbPool) -> Self {
-        let ocr = config
-            .ocr_enabled()
-            .then(|| Arc::new(ai::Model::with_model(config.model_api_key.clone(), config.model_name.clone())));
+        let assigned = |chain: ai::ModelChain| (!chain.is_empty()).then(|| Arc::new(chain));
+        let ocr = assigned(config.receipt_ocr_chain());
+        let matching = assigned(config.receipt_matching_chain());
+        let statement_extraction = assigned(config.statement_extraction_chain());
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .user_agent("maia")
@@ -60,6 +65,8 @@ impl AppState {
             db,
             logs: logs::new_buffer(200),
             ocr,
+            matching,
+            statement_extraction,
             http,
             notes_signatures: crate::notes_mirror::new_signature_map(),
         }
@@ -181,8 +188,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/statement-feeds", get(crate::handlers::statements::list_feeds))
         .route(
             "/statement-feeds/settings",
-            get(crate::handlers::statements::get_feed_settings)
-                .put(crate::handlers::statements::put_feed_settings),
+            // Read-only: feed behaviour comes from the Nix settings and the
+            // credentials are written by the desktop app into the overlay.
+            get(crate::handlers::statements::get_feed_settings),
         )
         .route(
             "/statement-feeds/:provider/sync",

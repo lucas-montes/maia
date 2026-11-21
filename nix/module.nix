@@ -6,68 +6,171 @@
   ...
 }: let
   cfg = config.services.maia;
-  inherit (lib) mkIf mkOption mkEnableOption types optionalAttrs;
+  inherit (lib) mkIf mkOption mkEnableOption types optionalAttrs mapAttrs hasPrefix removePrefix;
 
-  # The overlay holds the Trading 212 credentials and statement settings the
-  # server writes on the user's behalf. It lives under the home directory, so it
-  # has to exist before the unit starts (ReadWritePaths= fails on a missing
-  # path) and the unit has to be granted write access to it explicitly, since
-  # ProtectHome= makes /home read-only.
   userHome = (config.users.users.${cfg.user} or {}).home or null;
-  overlayDir = "${userHome}/.config/maia";
+
+  # Where things live, by who owns them:
+  #
+  #   - Service state (the database, archived receipts, notes, exercise media)
+  #     lives in `dataDir`, /var/lib/maia by default: only the service and the
+  #     desktop app (same uid) touch it, and systemd's StateDirectory creates,
+  #     owns and sandboxes it.
+  #   - Files the user drops in or browses (statement exports and their
+  #     lifecycle) live under the user's XDG data home.
+  #   - Secrets (the sync key, model keys, feed credentials) live in the
+  #     per-user overlay under the XDG config home, written by the desktop
+  #     Settings screen -- never in this module, so never in the Nix store.
+  overlayDir = "${cfg.xdg.configHome}/maia";
+  overlayFile = "${overlayDir}/config.json";
+
+  # systemd only manages state directories under /var/lib; anywhere else the
+  # directory is created by tmpfiles and granted with ReadWritePaths instead.
+  stateDirName =
+    if hasPrefix "/var/lib/" cfg.dataDir
+    then removePrefix "/var/lib/" cfg.dataDir
+    else null;
+  insideDataDir = path: hasPrefix "${cfg.dataDir}/" path;
+
+  statementDirs = lib.optionals (cfg.statementsRoot != null) (
+    map (name: "${cfg.statementsRoot}/${name}") ["dump" "staged" "parsed" "discarded" "failed"]
+  );
+
+  # Writable directories outside the state directory: each needs a tmpfiles
+  # rule (so it exists before the unit starts -- ReadWritePaths= fails on a
+  # missing path) and a ReadWritePaths= grant (ProtectHome= makes /home
+  # read-only).
+  writableDirs =
+    lib.optional (stateDirName == null) cfg.dataDir
+    ++ lib.filter (path: !(insideDataDir path)) [cfg.notesDir cfg.archiveDir]
+    ++ lib.optional (cfg.xdg.configHome != null) overlayDir
+    ++ lib.optionals (cfg.statementsRoot != null) ([cfg.statementsRoot] ++ statementDirs)
+    ++ lib.optional (cfg.statementsIntakeDir != null) cfg.statementsIntakeDir;
 
   # Everything the server needs, in one file. Rendered rather than assembled
   # from environment variables so that what the service reads is inspectable in
   # one place, and so the port the firewall opens and the port the server binds
   # cannot drift apart.
-  settings = {
-    database = "${cfg.dataDir}/maia.db";
-    bind_addr = "0.0.0.0:${toString cfg.port}";
-    # Read from sourceDir rather than derived from the database location, which
-    # is what lets the database live in /var/lib while the images stay in the
-    # working tree.
-    media_dir = "${cfg.sourceDir}/exercise_media";
-    notes_dir = "${cfg.dataDir}/notes";
-    # Where the server moves receipt images when a receipt is archived. Kept
-    # beside the database so it survives a rebuild and is not tied to whichever
-    # directory a process happened to start from.
-    archive_dir = "${cfg.dataDir}/receipts_archive";
-    api_key = cfg.apiKey;
-    model_api = cfg.modelApiKey;
-    model_name = cfg.modelName;
-    # Statement imports resolve FX into this currency. The phone keeps its own
-    # display currency; this one is what the server stores alongside each draft.
-    base_currency = cfg.baseCurrency;
-    # Firstrade PDF statements are read through poppler. An absolute store
-    # path, so the unit does not depend on what happens to be on PATH.
-    pdftotext_bin = "${pkgs.poppler-utils}/bin/pdftotext";
-    statements = {
-      # Lifecycle dirs for dropped statements. The settings are deployment-
-      # owned (the server moves files around inside them), and unset only when
-      # the deployment has no home directory to hang them on -- the server then
-      # falls back to the XDG default under the user's own data dir.
-      # A parsed file moves through these by itself: staged while its entries
-      # await review, parsed once they are imported, discarded once they are
-      # dismissed. The placement is derived from the database, so the server
-      # needs write access to all of them.
-      dump_dir = mkIf (cfg.statementsRoot != null) "${cfg.statementsRoot}/dump";
-      staged_dir = mkIf (cfg.statementsRoot != null) "${cfg.statementsRoot}/staged";
-      parsed_dir = mkIf (cfg.statementsRoot != null) "${cfg.statementsRoot}/parsed";
-      discarded_dir = mkIf (cfg.statementsRoot != null) "${cfg.statementsRoot}/discarded";
-      failed_dir = mkIf (cfg.statementsRoot != null) "${cfg.statementsRoot}/failed";
-      feeds.trading212 = {
-        enabled = cfg.trading212.enable;
-        environment = cfg.trading212.environment;
-        lookback_days = cfg.trading212.lookbackDays;
+  settings =
+    {
+      database = "${cfg.dataDir}/maia.db";
+      bind_addr = "0.0.0.0:${toString cfg.port}";
+      # Not read by the server; rendered so Settings can show the live value.
+      open_firewall = cfg.openFirewall;
+      media_dir = cfg.mediaDir;
+      notes_dir = cfg.notesDir;
+      # Where the server moves receipt images when a receipt is archived.
+      archive_dir = cfg.archiveDir;
+      # Statement imports resolve FX into this currency. The phone keeps its own
+      # display currency; this one is what the server stores alongside each draft.
+      base_currency = cfg.baseCurrency;
+      # Firstrade PDF statements are read through poppler. An absolute store
+      # path, so the unit does not depend on what happens to be on PATH.
+      pdftotext_bin = "${pkgs.poppler-utils}/bin/pdftotext";
+      # Model endpoints and which tasks use them. Keys are not here: they are
+      # joined in from the overlay by model id.
+      models = mapAttrs (_: model: {
+        inherit (model) provider model vision;
+        base_url = model.baseUrl;
+      }) cfg.models;
+      tasks = {
+        receipt_ocr = cfg.tasks.receiptOcr;
+        receipt_matching = cfg.tasks.receiptMatching;
+        statement_extraction = cfg.tasks.statementExtraction;
       };
+      statements =
+        {
+          feeds.trading212 = {
+            enabled = cfg.trading212.enable;
+            environment = cfg.trading212.environment;
+            lookback_days = cfg.trading212.lookbackDays;
+          };
+        }
+        # Lifecycle dirs for dropped statements. A parsed file moves through
+        # these by itself: staged while its entries await review, parsed once
+        # they are imported, discarded once they are dismissed. Unset only when
+        # there is no home to hang them on; the server then falls back to the
+        # XDG default under its own HOME.
+        // optionalAttrs (cfg.statementsRoot != null) {
+          dump_dir = "${cfg.statementsRoot}/dump";
+          staged_dir = "${cfg.statementsRoot}/staged";
+          parsed_dir = "${cfg.statementsRoot}/parsed";
+          discarded_dir = "${cfg.statementsRoot}/discarded";
+          failed_dir = "${cfg.statementsRoot}/failed";
+        }
+        // optionalAttrs (cfg.statementsIntakeDir != null) {
+          intake_dir = cfg.statementsIntakeDir;
+        };
+    }
+    // optionalAttrs (cfg.xdg.configHome != null) {
+      # The service has no XDG environment of its own, so it is told where the
+      # overlay is rather than guessing from HOME.
+      overlay_file = overlayFile;
+    }
+    // optionalAttrs (cfg.settingsFile != null) {
+      # Read by the desktop Settings screen, which edits that file and shows
+      # the rebuild command for this host.
+      nix_settings_file = cfg.settingsFile;
+      nixos_host = config.networking.hostName;
+    }
+    // optionalAttrs (cfg.seedDir != null) {
+      seed_dir = cfg.seedDir;
     };
-  } // optionalAttrs (cfg.seedDir != null) {
-    seed_dir = cfg.seedDir;
-  };
 
   configFile = "/etc/maia/config.json";
-in
-{
+
+  modelType = types.submodule ({config, ...}: {
+    options = {
+      provider = mkOption {
+        type = types.enum ["gemini" "openai"];
+        default = "gemini";
+        description = ''
+          Wire protocol. `openai` is any OpenAI-compatible
+          `/chat/completions` endpoint: OpenAI, OpenRouter, Ollama, llama.cpp,
+          vLLM.
+        '';
+      };
+      baseUrl = mkOption {
+        type = types.str;
+        default =
+          if config.provider == "gemini"
+          then "https://generativelanguage.googleapis.com/v1beta/models"
+          else "https://api.openai.com/v1";
+        defaultText = "the provider's public endpoint";
+        example = "http://localhost:11434/v1";
+        description = "API root. For OpenRouter `https://openrouter.ai/api/v1`; for a local Ollama `http://localhost:11434/v1`.";
+      };
+      model = mkOption {
+        type = types.str;
+        example = "gemini-2.5-flash";
+        description = "The provider's model id.";
+      };
+      vision = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Whether the model reads images. Only vision models may serve `tasks.receiptOcr`.";
+      };
+    };
+  });
+in {
+  imports = let
+    removed = name: why: lib.mkRemovedOptionModule ["services" "maia" name] why;
+  in [
+    (removed "apiKey" ''
+      The sync API key is a secret and no longer goes through Nix (it ended up
+      in the world-readable /etc/maia/config.json and the store). Set it in the
+      desktop app: Settings -> Server, which writes the per-user overlay.'')
+    (removed "modelApiKey" ''
+      Model keys are secrets and no longer go through Nix. Declare models with
+      `services.maia.models`, assign them with `services.maia.tasks`, and set
+      each key in the desktop app: Settings -> Models.'')
+    (removed "modelName" ''
+      Replaced by `services.maia.models.<id>.model` plus `services.maia.tasks`.'')
+    (removed "sourceDir" ''
+      Only the exercise media was read from the checkout. Set
+      `services.maia.mediaDir` to `<checkout>/exercise_media` instead.'')
+  ];
+
   options.services.maia = {
     enable = mkEnableOption "Maia sync server";
 
@@ -77,19 +180,70 @@ in
       description = "The maia package to run.";
     };
 
+    xdg = {
+      dataHome = mkOption {
+        type = types.nullOr types.str;
+        default =
+          if userHome != null
+          then "${userHome}/.local/share"
+          else null;
+        defaultText = "\${home}/.local/share";
+        description = ''
+          The service user's XDG data home. Read here rather than from the
+          environment, which Nix cannot see at evaluation time; set it from
+          home-manager's `config.xdg.dataHome` if yours is elsewhere.
+        '';
+      };
+      configHome = mkOption {
+        type = types.nullOr types.str;
+        default =
+          if userHome != null
+          then "${userHome}/.config"
+          else null;
+        defaultText = "\${home}/.config";
+        description = "The service user's XDG config home, which holds the secrets overlay `maia/config.json`.";
+      };
+    };
+
     dataDir = mkOption {
-      type = types.path;
+      type = types.str;
       default = "/var/lib/maia";
       description = ''
-        Writable state: the database, pre-migration snapshots, archived
-        receipts and uploaded backups. Created by systemd's StateDirectory and
-        owned by `user`.
+        Service state: the database, pre-migration snapshots, archived
+        receipts, notes and uploaded backups. Under /var/lib it is systemd's
+        StateDirectory; anywhere else it is created by tmpfiles and granted to
+        the unit. Owned by `user`.
 
         Nothing here changes ownership of what is already present, so an
         imported database has to arrive writable: copy it as `user`, or follow
         it with `chown -R $(id -un): dataDir`. A `sudo cp` leaves the copy owned
         by root, and SQLite opens read-write.
       '';
+    };
+
+    mediaDir = mkOption {
+      type = types.str;
+      default = "${cfg.dataDir}/exercise_media";
+      defaultText = "\${dataDir}/exercise_media";
+      description = ''
+        Exercise images and videos served by `GET /media/*`. Read-only to the
+        service, so it may point into a checkout to keep the media (several GB)
+        out of /var/lib.
+      '';
+    };
+
+    notesDir = mkOption {
+      type = types.str;
+      default = "${cfg.dataDir}/notes";
+      defaultText = "\${dataDir}/notes";
+      description = "Where notes are mirrored as Markdown.";
+    };
+
+    archiveDir = mkOption {
+      type = types.str;
+      default = "${cfg.dataDir}/receipts_archive";
+      defaultText = "\${dataDir}/receipts_archive";
+      description = "Where the server moves receipt images when a receipt is archived.";
     };
 
     user = mkOption {
@@ -103,17 +257,8 @@ in
       '';
     };
 
-    sourceDir = mkOption {
-      type = types.path;
-      default = "/home/lucas/Projects/maia/server";
-      description = ''
-        Read-only checkout. Holds the exercise images served by `GET /media/*`
-        and, when `seedDir` is set, the catalogue used to seed it.
-      '';
-    };
-
     seedDir = mkOption {
-      type = types.nullOr types.path;
+      type = types.nullOr types.str;
       default = null;
       description = ''
         Where to import the exercise catalogue from, looked for as `<dir>/parsed`,
@@ -124,6 +269,21 @@ in
       '';
     };
 
+    settingsFile = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "/home/lucas/.dotfiles/services/maia-settings.json";
+      description = ''
+        Absolute path of the JSON file this host's configuration imports into
+        `services.maia` (`builtins.fromJSON (builtins.readFile ./that.json)`).
+        The desktop Settings screen edits it and shows the rebuild command.
+
+        No default: it must sit inside the flake that configures this host,
+        and be tracked by git, because a pure flake cannot read anything else.
+        While null, Settings shows these values read-only.
+      '';
+    };
+
     port = mkOption {
       type = types.port;
       default = 3030;
@@ -131,31 +291,6 @@ in
         Port the API listens on. Written into `bind_addr` in the generated config
         and used for the firewall rule, so the two cannot disagree.
       '';
-    };
-
-    apiKey = mkOption {
-      type = types.str;
-      # No default on purpose: falling back silently would leave the API
-      # reachable on the LAN with a key that is in the source.
-      default = "";
-      description = ''
-        Bearer token the API requires. Rendered into the generated config file,
-        which is a symlink into /nix/store and therefore readable by any local
-        user -- worth knowing, and no worse than the compiled-in fallback, but
-        set it rather than relying on the default.
-      '';
-    };
-
-    modelApiKey = mkOption {
-      type = types.str;
-      default = "";
-      description = "Vision-model key for receipt OCR. Empty leaves the parse endpoints answering 503.";
-    };
-
-    modelName = mkOption {
-      type = types.str;
-      default = "gemini-2.5-flash";
-      description = "Vision model id used for receipt OCR.";
     };
 
     baseCurrency = mkOption {
@@ -169,15 +304,53 @@ in
       '';
     };
 
+    models = mkOption {
+      type = types.attrsOf modelType;
+      default = {};
+      example = {
+        gemini-flash = {
+          model = "gemini-2.5-flash";
+          vision = true;
+        };
+        local = {
+          provider = "openai";
+          baseUrl = "http://localhost:11434/v1";
+          model = "qwen2.5vl:7b";
+          vision = true;
+        };
+      };
+      description = ''
+        Saved model endpoints, by id. Keys are set per id in the desktop
+        Settings screen and kept in the overlay, never here.
+      '';
+    };
+
+    tasks = let
+      task = what: mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = ''
+          Model ids for ${what}, in fallback order: each is tried until one
+          answers, and the one that did is recorded beside the result. Empty
+          turns the feature off.
+        '';
+      };
+    in {
+      receiptOcr = task "reading receipt images (vision models only)";
+      receiptMatching = task "proposing receipt store, transaction and line matches";
+      statementExtraction = task "reading activity out of statement PDFs";
+    };
+
     statementsRoot = mkOption {
       type = types.nullOr types.str;
       # A string rather than `types.path` on purpose: a path value is copied
       # into the Nix store when the config is rendered, which would publish
       # personal bank exports to every local user.
       default =
-        if userHome != null
-        then "${userHome}/.local/share/maia/statements"
+        if cfg.xdg.dataHome != null
+        then "${cfg.xdg.dataHome}/maia/statements"
         else null;
+      defaultText = "\${xdg.dataHome}/maia/statements";
       description = ''
         Root of the statement lifecycle: files are dropped into
         `<root>/dump/<source>/` and staged automatically by the server, which
@@ -186,9 +359,24 @@ in
         `<root>/parsed/<source>/` once they are imported,
         `<root>/discarded/<source>/` once they are dismissed, or
         `<root>/failed/<source>/` with a reason beside them when the parse
-        never succeeded. Defaults to the service user's XDG data directory; set
-        it to keep the files somewhere specific. Each root and subdirectory is
-        created by the module and granted to the service.
+        never succeeded. Each root and subdirectory is created by the module
+        and granted to the service.
+      '';
+    };
+
+    statementsIntakeDir = mkOption {
+      type = types.nullOr types.str;
+      default =
+        if cfg.statementsRoot != null
+        then "${cfg.statementsRoot}/intake"
+        else null;
+      defaultText = "\${statementsRoot}/intake";
+      description = ''
+        A drop folder drained into the dump tree: name an export for its
+        source (`firstrade-2026-11.csv`, `t212_feb_aug.csv`, `ca-20261027.csv`)
+        and drop it here. The service only ever moves recognised files out, so
+        this may also point at a directory used for other things, such as
+        ~/Downloads. Null turns the drain off.
       '';
     };
 
@@ -244,40 +432,45 @@ in
   };
 
   config = mkIf cfg.enable {
+    assertions = let
+      tasks = {
+        "tasks.receiptOcr" = cfg.tasks.receiptOcr;
+        "tasks.receiptMatching" = cfg.tasks.receiptMatching;
+        "tasks.statementExtraction" = cfg.tasks.statementExtraction;
+      };
+      unknown = lib.concatLists (lib.mapAttrsToList (task: ids:
+        map (id: "${task} names `${id}`, which is not in services.maia.models")
+        (lib.filter (id: !(cfg.models ? ${id})) ids))
+      tasks);
+      notVision =
+        map (id: "tasks.receiptOcr names `${id}`, which is not a vision model (set models.${id}.vision = true)")
+        (lib.filter (id: cfg.models ? ${id} && !cfg.models.${id}.vision) cfg.tasks.receiptOcr);
+    in
+      map (message: {
+        assertion = false;
+        message = "services.maia: ${message}";
+      }) (unknown ++ notVision);
+
     environment.etc."maia/config.json" = {
       source = pkgs.writeText "maia-config.json" (builtins.toJSON settings);
     };
 
-    # Created here as well as by StateDirectory, so it exists before the unit runs.
-    # StateDirectory only creates it in the exec child, which would leave the desktop
-    # app unable to open the database whenever the service is not currently running --
-    # and the two are separate processes. Owner and mode match StateDirectory so
-    # systemd and tmpfiles do not disagree.
-    #
-    # The overlay directory itself is created by the tmpfiles rule below, so
-    # ReadWritePaths= has a path to open when the unit starts.
+    # The data directory is created here as well as by StateDirectory, so it
+    # exists before the unit runs: StateDirectory only creates it in the exec
+    # child, which would leave the desktop app unable to open the database
+    # whenever the service is not running. Owner and mode match StateDirectory
+    # so systemd and tmpfiles do not disagree.
     systemd.tmpfiles.rules =
-      let
-        statementRoots =
-          lib.optionals (cfg.statementsRoot != null) [
-            "d ${cfg.statementsRoot} 0750 ${cfg.user} users - -"
-            "d ${cfg.statementsRoot}/dump 0750 ${cfg.user} users - -"
-            "d ${cfg.statementsRoot}/staged 0750 ${cfg.user} users - -"
-            "d ${cfg.statementsRoot}/parsed 0750 ${cfg.user} users - -"
-            "d ${cfg.statementsRoot}/discarded 0750 ${cfg.user} users - -"
-            "d ${cfg.statementsRoot}/failed 0750 ${cfg.user} users - -"
-          ];
-      in
-      [
-        "d ${cfg.dataDir} 0755 ${cfg.user} users - - "
-      ]
-      ++ statementRoots
-      ++ lib.optional (userHome != null) "d ${overlayDir} 0700 ${cfg.user} users - - ";
+      ["d ${cfg.dataDir} 0755 ${cfg.user} users - -"]
+      ++ lib.optional (insideDataDir cfg.mediaDir) "d ${cfg.mediaDir} 0755 ${cfg.user} users - -"
+      ++ map (dir: "d ${dir} ${if dir == overlayDir then "0700" else "0750"} ${cfg.user} users - -")
+      (lib.unique (lib.filter (dir: dir != cfg.dataDir) writableDirs
+        ++ lib.filter insideDataDir [cfg.notesDir cfg.archiveDir]));
 
     systemd.services.maia = {
       description = "Maia sync server";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ];
+      wantedBy = ["multi-user.target"];
+      after = ["network.target"];
 
       serviceConfig = {
         # No ExecStartPre: `serve` applies pending migrations on the way up, via
@@ -333,32 +526,15 @@ in
           "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus"
         ];
 
-        # Required, and not implied by StateDirectoryMode: ProtectSystem mounts
-        # the whole hierarchy read-only, and StateDirectory is what carves
-        # `dataDir` back out as a writable bind mount owned by `user`. Without
-        # it SQLite cannot create its -wal and -shm sidecars and startup dies
-        # with SQLITE_CANTOPEN, which is where this went missing for a while.
-        StateDirectory = "maia";
-        StateDirectoryMode = "0755";
-
-        # The exercise images live in a home directory, so /home has to be
+        # Exercise images may live in a home directory, so /home has to be
         # readable. ProtectSystem makes the whole hierarchy read-only apart from
-        # StateDirectory and the paths below.
+        # the state directory and the paths below.
         ProtectHome = "read-only";
-        # Except the overlay, which the server writes when Settings saves the
-        # Trading 212 credentials, and the statement lifecycle roots, which the
-        # server empties and fills as files are staged. Without both the write
-        # fails with EROFS and the save looks successful until the next restart.
-        ReadWritePaths =
-          lib.optional (userHome != null) overlayDir
-          ++ lib.optionals (cfg.statementsRoot != null) [
-            "${cfg.statementsRoot}"
-            "${cfg.statementsRoot}/dump"
-            "${cfg.statementsRoot}/staged"
-            "${cfg.statementsRoot}/parsed"
-            "${cfg.statementsRoot}/discarded"
-            "${cfg.statementsRoot}/failed"
-          ];
+        # The overlay (which the server rewrites when a secret changes), the
+        # statement lifecycle and intake (which the server empties and fills),
+        # and any state kept outside /var/lib. Without these a write fails with
+        # EROFS and only shows up at the next restart.
+        ReadWritePaths = writableDirs;
         ProtectSystem = "strict";
         ProtectKernelTunables = true;
         ProtectKernelModules = true;
@@ -367,15 +543,21 @@ in
         PrivateDevices = true;
         NoNewPrivileges = true;
         RestrictSUIDSGID = true;
-        # No ReadWritePaths for dataDir: systemd makes StateDirectory writable
-        # under ProtectSystem, and naming it here instead is fatal on a first boot.
-        # The mount namespace is built before the directory is created, and a
-        # missing path in ReadWritePaths is an error rather than a warning.
+      }
+      // optionalAttrs (stateDirName != null) {
+        # Required, and not implied by StateDirectoryMode: ProtectSystem mounts
+        # the whole hierarchy read-only, and StateDirectory is what carves
+        # `dataDir` back out as a writable bind mount owned by `user`. Without
+        # it SQLite cannot create its -wal and -shm sidecars and startup dies
+        # with SQLITE_CANTOPEN. Not listed in ReadWritePaths: on a first boot
+        # the mount namespace is built before the directory exists.
+        StateDirectory = stateDirName;
+        StateDirectoryMode = "0755";
       };
     };
 
     networking.firewall = mkIf cfg.openFirewall {
-      allowedTCPPorts = [ cfg.port ];
+      allowedTCPPorts = [cfg.port];
     };
 
     # The desktop half is optional and independent of the service: it is a client
@@ -383,6 +565,6 @@ in
     # the service to be up in order to install. The desktop entry rides along
     # inside the package, so it lands in the system profile's share/applications,
     # which is on XDG_DATA_DIRS -- unlike /etc/applications.
-    environment.systemPackages = mkIf cfg.desktop.enable [ cfg.desktop.package ];
+    environment.systemPackages = mkIf cfg.desktop.enable [cfg.desktop.package];
   };
 }

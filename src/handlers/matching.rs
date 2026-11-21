@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use crate::{
     db,
     error::ErrorBody,
+    handlers::attempts_json,
     matching::{self, MANUAL, effects, products, stores, transactions},
     server::AppState,
 };
@@ -48,6 +49,14 @@ pub fn decided_by(source: Option<&str>) -> Result<&'static str, ApiError> {
         Some("ai") => Ok(matching::AI),
         Some(other) => Err(bad(format!("source must be manual or ai, not {other}"))),
     }
+}
+
+/// The model to file an accept under: only an AI accept has one, and a blank
+/// value is none.
+pub fn proposed_by(source: &str, model: Option<&str>) -> Option<String> {
+    (source == matching::AI)
+        .then(|| model.map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned))
+        .flatten()
 }
 
 fn ensure_receipt(conn: &rusqlite::Connection, id: &str) -> Result<(), ApiError> {
@@ -137,11 +146,11 @@ pub async fn get_matching(
         Some(s) => stores::load(&conn, s).map_err(internal)?,
         None => None,
     };
-    let (transaction_id, link_source): (Option<String>, Option<String>) = conn
+    let (transaction_id, link_source, read_by): (Option<String>, Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT transaction_id, link_source FROM receipts WHERE id = ?1",
+            "SELECT transaction_id, link_source, parsed_model FROM receipts WHERE id = ?1",
             rusqlite::params![id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(internal)?;
     let (recommendations, candidates, lines) = match &reading {
@@ -165,6 +174,9 @@ pub async fn get_matching(
     Ok(Json(json!({
         "receiptId": id,
         "read": reading.is_some(),
+        // The model that read the image, `"<id> (<model>)"`; null for a
+        // reading older than the column.
+        "readBy": read_by,
         "store": store,
         "storeSource": store_source,
         "recommendations": recommendations,
@@ -177,7 +189,7 @@ pub async fn get_matching(
 }
 
 /// Runs a page action in one transaction, then answers with the fresh page.
-async fn act<F>(state: AppState, id: String, action: F) -> Result<Json<Value>, ApiError>
+async fn act<F>(state: AppState, id: String, model: Option<String>, action: F) -> Result<Json<Value>, ApiError>
 where
     F: FnOnce(&rusqlite::Connection, i64) -> Result<(), ApiError>,
 {
@@ -185,7 +197,11 @@ where
         let conn = state.db.get().map_err(internal)?;
         ensure_receipt(&conn, &id)?;
         let tx = conn.unchecked_transaction().map_err(internal)?;
-        action(&tx, db::server_time_ms())?;
+        let now = db::server_time_ms();
+        action(&tx, now)?;
+        if let Some(model) = model.as_deref() {
+            effects::tag_model(&tx, &id, now, model).map_err(internal)?;
+        }
         tx.commit().map_err(internal)?;
     }
     get_matching(State(state), Path(id)).await
@@ -197,6 +213,10 @@ pub struct StoreChoice {
     pub store_id: String,
     #[serde(default)]
     pub source: Option<String>,
+    /// The model that proposed it, as `assist` returned it. Kept only with
+    /// `source: "ai"`.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// `PUT /receipt-pictures/:id/store` — this receipt is from that store.
@@ -206,8 +226,9 @@ pub async fn put_store(
     Json(body): Json<StoreChoice>,
 ) -> Result<Json<Value>, ApiError> {
     let source = decided_by(body.source.as_deref())?;
+    let model = proposed_by(source, body.model.as_deref());
     let receipt = id.clone();
-    act(state, id, move |conn, now| {
+    act(state, id, model, move |conn, now| {
         let reading = matching::reading(conn, &receipt).map_err(internal)?;
         let issuer = reading.as_ref().map(stores::Issuer::of);
         stores::assign(
@@ -235,6 +256,8 @@ pub struct NewStore {
     pub name: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// `POST /receipt-pictures/:id/store` — a new store, built from the reading.
@@ -244,8 +267,9 @@ pub async fn post_store(
     Json(body): Json<NewStore>,
 ) -> Result<Json<Value>, ApiError> {
     let source = decided_by(body.source.as_deref())?;
+    let model = proposed_by(source, body.model.as_deref());
     let receipt = id.clone();
-    act(state, id, move |conn, now| {
+    act(state, id, model, move |conn, now| {
         let reading = matching::reading(conn, &receipt)
             .map_err(internal)?
             .ok_or_else(|| bad("the receipt has not been read"))?;
@@ -344,7 +368,7 @@ pub async fn undo_effect(
     Path((id, effect_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let receipt = id.clone();
-    act(state, id, move |conn, now| {
+    act(state, id, None, move |conn, now| {
         let effect = effects::load(conn, &effect_id)
             .map_err(internal)?
             .filter(|e| e.receipt_id == receipt)
@@ -370,7 +394,7 @@ pub async fn match_one(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let receipt = id.clone();
-    act(state, id, move |conn, now| {
+    act(state, id, None, move |conn, now| {
         matching::run(conn, &receipt, now).map_err(internal)?;
         Ok(())
     })
@@ -409,6 +433,8 @@ pub struct LineChoice {
     pub package_grams: Option<f64>,
     #[serde(default)]
     pub source_url: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// `PUT /receipt-pictures/:id/lines/:line` — this line is that ingredient:
@@ -422,8 +448,9 @@ pub async fn put_line(
         return Err(bad("a package weighs more than zero grams"));
     }
     let source = decided_by(body.source.as_deref())?;
+    let model = proposed_by(source, body.model.as_deref());
     let receipt = id.clone();
-    act(state, id, move |conn, now| {
+    act(state, id, model, move |conn, now| {
         products::match_manually(
             conn,
             &receipt,
@@ -450,7 +477,7 @@ pub async fn delete_line(
     Path((id, line)): Path<(String, usize)>,
 ) -> Result<Json<Value>, ApiError> {
     let receipt = id.clone();
-    act(state, id, move |conn, now| {
+    act(state, id, None, move |conn, now| {
         products::unmatch(conn, &receipt, line, now).map_err(|e| match e {
             effects::UndoError::NotFound(_) => error(StatusCode::NOT_FOUND, e.to_string()),
             effects::UndoError::Db(_) => internal(e),
@@ -467,10 +494,10 @@ pub async fn assist(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let Some(model) = state.ocr.clone() else {
+    let Some(models) = state.matching.clone() else {
         return Err(error(
             StatusCode::SERVICE_UNAVAILABLE,
-            "no model configured: set a model api key on the server",
+            "no model is assigned to receipt matching: add one in Settings",
         ));
     };
     let (prompt, known) = {
@@ -481,16 +508,14 @@ pub async fn assist(
             .ok_or_else(|| bad("the receipt has not been read"))?;
         matching::assist::prompt(&conn, &id, &reading).map_err(internal)?
     };
-    let raw = model
-        .generate_json(
-            matching::assist::SYSTEM.to_string(),
-            prompt,
-            matching::assist::schema(),
-        )
+    let generated = models
+        .generate_json(matching::assist::SYSTEM, &prompt, &matching::assist::schema())
         .await
-        .map_err(|e| error(StatusCode::BAD_GATEWAY, format!("the model failed: {e:?}")))?
-        .ok_or_else(|| error(StatusCode::BAD_GATEWAY, "the model gave no answer"))?;
-    Ok(Json(
-        json!({ "proposals": matching::assist::validate(&raw, &known) }),
-    ))
+        .map_err(|e| error(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    Ok(Json(json!({
+        "proposals": matching::assist::validate(&generated.value, &known),
+        // Sent back with an accept, so the change is filed under it.
+        "model": generated.model.to_string(),
+        "attempts": attempts_json(&generated.attempts),
+    })))
 }

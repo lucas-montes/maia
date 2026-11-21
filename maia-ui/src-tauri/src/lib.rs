@@ -1,4 +1,5 @@
 pub mod api;
+mod settings;
 use std::fs;
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
@@ -241,10 +242,9 @@ fn get_server_diagnostics() -> serde_json::Value {
         "lanIp": lan_ip,
         "apiKeyMasked": masked,
         "hasApiKey": !api_key.is_empty(),
-        // Receipt OCR needs a vision-model key; without one the sync server
-        // answers the parse endpoints with 503.
-        "modelApiKeyMasked": mask_secret(&cfg.model_api_key),
-        "hasModelApiKey": !cfg.model_api_key.is_empty()
+        // Receipt OCR needs a vision model assigned; without one the sync
+        // server answers the parse endpoints with 503.
+        "ocrEnabled": cfg.ocr_enabled()
     })
 }
 
@@ -2569,21 +2569,6 @@ async fn list_statement_feeds() -> CommandResult<serde_json::Value> {
 }
 
 #[tauri::command]
-async fn get_statement_feed_settings() -> CommandResult<serde_json::Value> {
-    json_result(api::get("/statement-feeds/settings").await)
-}
-
-/// Writes the Trading 212 credentials to the per-user overlay on the server.
-/// The command never reads them back: the form only ever learns whether a
-/// secret is set, so a screen share or a screenshot cannot leak it.
-#[tauri::command]
-async fn save_statement_feed_settings(
-    settings: serde_json::Value,
-) -> CommandResult<serde_json::Value> {
-    json_result(api::put("/statement-feeds/settings", &settings).await)
-}
-
-#[tauri::command]
 async fn sync_statement_feed(provider: String) -> CommandResult<serde_json::Value> {
     json_result(
         api::post(
@@ -4630,214 +4615,7 @@ async fn delete_template_set(
     )
     .await)
 }
-// ---- Config commands (from T04) ----
-
-#[derive(Serialize)]
-struct ConfigResponse {
-    success: bool,
-    data: Option<String>,
-    error: Option<String>,
-}
-
-/// Keys the deployment config owns, which the Settings form may not write.
-///
-/// These decide where the database is, which port the API answers on, and which
-/// key it requires. A GUI editing them would desynchronise the app from the
-/// service, which reads the same file.
-const DEPLOYMENT_OWNED: &[&str] = &[
-    "database",
-    "bind_addr",
-    "media_dir",
-    "seed_dir",
-    "notes_dir",
-    "api_key",
-    "model_api",
-    "model_name",
-];
-
-/// The per-user overlay, or an empty object when absent.
-fn read_overlay() -> serde_json::Map<String, serde_json::Value> {
-    let path = maia::config::overlay_config_path();
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default()
-}
-
-/// The settings view: deployment values, with the overlay filling in the desktop
-/// paths the form is allowed to change.
-///
-/// Deployment keys are inserted first so they win, and the overlay's copy of
-/// them is dropped rather than shown as if editing it would do anything.
-#[tauri::command]
-fn read_config() -> ConfigResponse {
-    let cfg = sync_config();
-    let mut merged = serde_json::Map::new();
-    merged.insert(
-        "database".into(),
-        serde_json::json!(cfg.db_path.display().to_string()),
-    );
-    merged.insert("model_api".into(), serde_json::json!(cfg.model_api_key));
-    merged.insert("model_name".into(), serde_json::json!(cfg.model_name));
-    // The lifecycle roots are resolved rather than read back: they are
-    // deployment-owned and may be defaulted, so showing the configured value
-    // would leave the form's read-only boxes blank for every default install.
-    // The intake folder is not here — it is the user's, and comes from the
-    // overlay below.
-    merged.insert(
-        "statements".into(),
-        serde_json::json!({
-            "dump_dir": cfg.statements_dump_dir().display().to_string(),
-            "staged_dir": cfg.statements_staged_dir().display().to_string(),
-            "parsed_dir": cfg.statements_parsed_dir().display().to_string(),
-            "discarded_dir": cfg.statements_discarded_dir().display().to_string(),
-            "failed_dir": cfg.statements_failed_dir().display().to_string(),
-        }),
-    );
-    for (key, value) in read_overlay() {
-        if DEPLOYMENT_OWNED.contains(&key.as_str()) {
-            continue;
-        }
-        // Merge one level rather than `or_insert`, so the overlay's
-        // `statements.intake_dir` (and the feed settings beside it) survive
-        // the resolved roots inserted above, while a deployment value still
-        // wins key by key.
-        match (merged.get_mut(&key), value) {
-            (Some(serde_json::Value::Object(existing)), serde_json::Value::Object(incoming)) => {
-                for (inner, value) in incoming {
-                    existing.entry(inner).or_insert(value);
-                }
-            }
-            (Some(_), _) => {}
-            (None, value) => {
-                merged.insert(key, value);
-            }
-        }
-    }
-    ConfigResponse {
-        success: true,
-        data: Some(serde_json::Value::Object(merged).to_string()),
-        error: None,
-    }
-}
-
-/// Checks an incoming settings object against [`DEPLOYMENT_OWNED`].
-///
-/// Returns the names it refused rather than filtering them out, so the form can
-/// be told why a save did nothing instead of appearing to have worked.
-fn reject_deployment_keys(
-    incoming: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(), Vec<&str>> {
-    let rejected: Vec<&str> = incoming
-        .keys()
-        .filter(|key| DEPLOYMENT_OWNED.contains(&key.as_str()))
-        .map(String::as_str)
-        .collect();
-    if rejected.is_empty() {
-        Ok(())
-    } else {
-        Err(rejected)
-    }
-}
-
-/// Merges [incoming] into [base] instead of replacing it.
-///
-/// The form only knows the keys it renders, but the same overlay holds the
-/// Trading 212 feed settings written by the statement endpoints. Replacing the
-/// file wholesale would silently erase them on the next Settings save, so only
-/// the keys the form actually sent are overwritten. Objects merge recursively
-/// for the same reason one level down: `receipts.archived_dir` must not take
-/// the rest of `receipts` with it.
-fn merge_json_object(
-    mut base: serde_json::Map<String, serde_json::Value>,
-    incoming: serde_json::Map<String, serde_json::Value>,
-) -> serde_json::Map<String, serde_json::Value> {
-    for (key, value) in incoming {
-        let merged = match (base.get(&key), &value) {
-            (Some(serde_json::Value::Object(existing)), serde_json::Value::Object(new)) => {
-                serde_json::Value::Object(merge_json_object(existing.clone(), new.clone()))
-            }
-            _ => value,
-        };
-        base.insert(key, merged);
-    }
-    base
-}
-
-/// Writes the desktop paths to the per-user overlay.
-///
-/// Refuses deployment keys outright rather than silently dropping them: a form
-/// that quietly discards what the user typed is worse than one that explains
-/// why it cannot.
-#[tauri::command]
-fn save_config(json: String) -> ConfigResponse {
-    let incoming: serde_json::Value = match serde_json::from_str(&json) {
-        Ok(value) => value,
-        Err(e) => {
-            return ConfigResponse {
-                success: false,
-                data: None,
-                error: Some(format!("Invalid JSON: {e}")),
-            };
-        }
-    };
-    let serde_json::Value::Object(incoming) = incoming else {
-        return ConfigResponse {
-            success: false,
-            data: None,
-            error: Some("Configuration must be a JSON object".to_string()),
-        };
-    };
-
-    if let Err(rejected) = reject_deployment_keys(&incoming) {
-        return ConfigResponse {
-            success: false,
-            data: None,
-            error: Some(format!(
-                "Managed by the deployment config, not editable here: {}",
-                rejected.join(", ")
-            )),
-        };
-    }
-
-    let path = maia::config::overlay_config_path();
-    if let Some(parent) = path.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
-            return ConfigResponse {
-                success: false,
-                data: None,
-                error: Some(format!("Failed to create {}: {e}", parent.display())),
-            };
-        }
-    }
-    let merged = merge_json_object(read_overlay(), incoming);
-    if let Err(e) = fs::write(&path, serde_json::Value::Object(merged).to_string()) {
-        return ConfigResponse {
-            success: false,
-            data: None,
-            error: Some(format!("Failed to write {}: {e}", path.display())),
-        };
-    }
-    // The overlay can hold provider credentials written by the server, so keep
-    // it owner-only even though this path only writes desktop settings.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
-            return ConfigResponse {
-                success: false,
-                data: None,
-                error: Some(format!("Failed to secure {}: {e}", path.display())),
-            };
-        }
-    }
-    ConfigResponse {
-        success: true,
-        data: Some(path.display().to_string()),
-        error: None,
-    }
-}
+// Settings commands live in `settings.rs`.
 
 // ---- App entry point ----
 
@@ -4853,8 +4631,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
-            read_config,
-            save_config,
+            settings::read_settings,
+            settings::save_nix_settings,
+            settings::save_secrets,
+            settings::test_model,
             get_sync_port,
             get_sync_url,
             get_sync_api_key,
@@ -4922,8 +4702,6 @@ pub fn run() {
             add_statement_files,
             scan_statements,
             list_statement_feeds,
-            get_statement_feed_settings,
-            save_statement_feed_settings,
             sync_statement_feed,
             create_store,
             create_fx_rate,
@@ -4989,6 +4767,9 @@ mod tests {
         let registered: Vec<&str> = handler_block
             .lines()
             .filter_map(|l| l.trim().strip_suffix(',').map(str::trim))
+            // A command from a module is registered by path
+            // (`settings::read_settings`) but invoked by its bare name.
+            .map(|name| name.rsplit("::").next().unwrap_or(name))
             .filter(|name| {
                 !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '_')
             })
@@ -5193,11 +4974,6 @@ mod tests {
         assert!(task_detail(&conn, "nope").is_none());
     }
     use super::*;
-    use serde_json::json;
-
-    fn keys_of(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
-        value.as_object().unwrap().clone()
-    }
 
     // ---- Insights: bucketing and running balance ----
 
@@ -5443,73 +5219,9 @@ mod tests {
         assert_eq!(macros[0]["fat"], 37.5, "{macros:?}");
     }
 
-    #[test]
-    fn desktop_paths_are_accepted() {
-        let incoming = keys_of(json!({
-            "receipts_path": "/home/lucas/receipts",
-            "nutriments_path": "/home/lucas/nutriments",
-            "receipts": { "archived_dir": "/home/lucas/archive" },
-        }));
-        assert_eq!(reject_deployment_keys(&incoming), Ok(()));
-    }
 
-    #[test]
-    fn saving_desktop_paths_keeps_the_feed_settings() {
-        // The overlay is shared with the statement endpoints, which write
-        // `statements.feeds`. A Settings save must not erase what it does not
-        // render, or the next save would silently disable Trading 212.
-        let existing = json!({
-            "receipts_path": "/old",
-            "statements": { "feeds": { "trading212": { "enabled": true, "api_key": "secret" } } },
-            "receipts": { "archived_dir": "/old-archive", "other": "kept" },
-        })
-        .as_object()
-        .unwrap()
-        .clone();
-        let incoming = json!({
-            "receipts_path": "/new",
-            "receipts": { "archived_dir": "/new-archive" },
-        })
-        .as_object()
-        .unwrap()
-        .clone();
 
-        let merged = serde_json::Value::Object(merge_json_object(existing, incoming));
-        assert_eq!(merged["receipts_path"], "/new");
-        assert_eq!(merged["statements"]["feeds"]["trading212"]["enabled"], true);
-        assert_eq!(
-            merged["statements"]["feeds"]["trading212"]["api_key"],
-            "secret"
-        );
-        assert_eq!(merged["receipts"]["archived_dir"], "/new-archive");
-        assert_eq!(merged["receipts"]["other"], "kept");
-    }
 
-    #[test]
-    fn every_deployment_key_is_refused() {
-        for key in DEPLOYMENT_OWNED {
-            let incoming = keys_of(json!({ *key: "value" }));
-            let err = reject_deployment_keys(&incoming)
-                .unwrap_err_or_else(|| panic!("{key} should be refused"));
-            assert_eq!(err, vec![*key], "wrong key reported for {key}");
-        }
-    }
-
-    #[test]
-    fn a_refusal_names_every_offending_key() {
-        let incoming = keys_of(json!({
-            "receipts_path": "/ok",
-            "database": "/hijack.db",
-            "api_key": "stolen",
-        }));
-        let err = reject_deployment_keys(&incoming).unwrap_err();
-        assert!(err.contains(&"database"), "missing database: {err:?}");
-        assert!(err.contains(&"api_key"), "missing api_key: {err:?}");
-        assert!(
-            !err.contains(&"receipts_path"),
-            "flagged a permitted key: {err:?}"
-        );
-    }
 
     /// Unique scratch directory, removed on drop.
     struct Scratch(std::path::PathBuf);

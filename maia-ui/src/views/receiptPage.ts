@@ -68,6 +68,9 @@ function aiNote(confidence: number, reason: string): string {
 export function mountReceiptPage(slot: HTMLElement, receiptId: string, onChanged: () => void): void {
   let page: MatchingPage | null = null;
   let proposals: AiProposals | null = null;
+  /** The model the current proposals came from, and any that failed first. */
+  let proposalModel: string | null = null;
+  let proposalFallbacks = "";
   let showUndone = false;
   let busy = "";
   let stores: StoreDetails[] = [];
@@ -101,6 +104,8 @@ export function mountReceiptPage(slot: HTMLElement, receiptId: string, onChanged
       <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-surface-800 bg-base-100 p-3">
         <div class="text-sm ${open.length ? "text-warn-400" : "text-ok-400"}">
           ${open.length ? `Still open: ${escapeHtml(open.join(" · "))}` : "Everything on this receipt is matched."}
+          ${p.readBy ? `<div class="mt-0.5 text-xs text-ink-500">Read by <span class="font-mono">${escapeHtml(p.readBy)}</span></div>` : ""}
+          ${proposals && proposalModel ? `<div class="mt-0.5 text-xs text-ink-500">AI proposals from <span class="font-mono">${escapeHtml(proposalModel)}</span>${proposalFallbacks ? ` after ${escapeHtml(proposalFallbacks)}` : ""}</div>` : ""}
         </div>
         <div class="flex gap-2">
           ${busy ? `<span class="text-xs text-ink-500">${escapeHtml(busy)}</span>` : ""}
@@ -238,6 +243,7 @@ export function mountReceiptPage(slot: HTMLElement, receiptId: string, onChanged
         <div class="flex min-w-0 items-center gap-2">
           ${badge(e.source)}
           <span class="truncate text-sm text-ink-200">${escapeHtml(effectSentence(e))}</span>
+          ${e.model ? `<span class="shrink-0 font-mono text-xs text-ink-500" title="Proposed by this model">${escapeHtml(e.model)}</span>` : ""}
           ${e.targetLive || e.targetTable.endsWith("aliases") ? "" : `<span class="text-xs text-ink-500">(gone)</span>`}
         </div>
         <div class="flex shrink-0 gap-1">
@@ -320,14 +326,18 @@ export function mountReceiptPage(slot: HTMLElement, receiptId: string, onChanged
 
   // --- actions --------------------------------------------------------------
 
+  /** An AI accept carries the model that proposed it, so the change is
+   *  filed under that model. */
+  const decided = (source: "manual" | "ai") => (source === "ai" ? { source, model: proposalModel } : { source });
+
   const linkTo = (transactionId: string, source: "manual" | "ai" = "manual"): Promise<boolean> =>
-    send("Linking", "PUT", path("/transaction"), { transactionId, source });
+    send("Linking", "PUT", path("/transaction"), { transactionId, ...decided(source) });
 
   const chooseStore = (storeId: string, source: "manual" | "ai" = "manual"): Promise<boolean> =>
-    send("Choosing the store", "PUT", path("/store"), { storeId, source });
+    send("Choosing the store", "PUT", path("/store"), { storeId, ...decided(source) });
 
   const matchLine = (line: number, ingredientId: string, extra: Record<string, unknown> = {}, source: "manual" | "ai" = "manual"): Promise<boolean> =>
-    send("Matching the line", "PUT", path(`/lines/${line}`), { ingredientId, source, ...extra });
+    send("Matching the line", "PUT", path(`/lines/${line}`), { ingredientId, ...decided(source), ...extra });
 
   const editEffect = (effectId: string): void => {
     const e = page?.effects.find((x) => x.id === effectId);
@@ -349,7 +359,7 @@ export function mountReceiptPage(slot: HTMLElement, receiptId: string, onChanged
     const p = proposals;
     if (p.store?.storeId && p.store.storeId !== page.store?.id) await chooseStore(p.store.storeId, "ai");
     else if (!page.store && p.store?.newName)
-      await send("Creating the store", "POST", path("/store"), { name: p.store.newName, source: "ai" });
+      await send("Creating the store", "POST", path("/store"), { name: p.store.newName, ...decided("ai") });
     if (p.transaction?.transactionId && p.transaction.transactionId !== page.transactionId)
       await linkTo(p.transaction.transactionId, "ai");
     for (const l of p.lines) {
@@ -371,10 +381,14 @@ export function mountReceiptPage(slot: HTMLElement, receiptId: string, onChanged
           busy = "Asking the AI…";
           render();
           await Promise.all([loadStores(), loadIngredients()]);
-          const res = await api.matchingRequest<{ proposals: AiProposals }>("POST", path("/assist")).catch((e) => ({ success: false, error: String(e) }) as never);
+          const res = await api
+            .matchingRequest<{ proposals: AiProposals; model: string; attempts: { model: string; error: string }[] }>("POST", path("/assist"))
+            .catch((e) => ({ success: false, error: String(e) }) as never);
           busy = "";
           if (res.success && res.data) {
             proposals = res.data.proposals;
+            proposalModel = res.data.model ?? null;
+            proposalFallbacks = (res.data.attempts ?? []).map((a) => `${a.model} failed`).join(", ");
             const n = (proposals.store ? 1 : 0) + (proposals.transaction ? 1 : 0) + proposals.lines.length;
             toast(n ? `The AI proposed ${n} match${n === 1 ? "" : "es"}; nothing changes until you accept` : "The AI had nothing to add", "ok");
           } else {
@@ -398,7 +412,7 @@ export function mountReceiptPage(slot: HTMLElement, receiptId: string, onChanged
         void chooseStore(d.store!, "ai");
         break;
       case "ai-new-store":
-        void send("Creating the store", "POST", path("/store"), { name: d.name, source: "ai" });
+        void send("Creating the store", "POST", path("/store"), { name: d.name, ...decided("ai") });
         break;
       case "pick-store":
         void pickStore();

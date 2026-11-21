@@ -83,6 +83,14 @@ export function parsedRowsSummary(parsed: unknown): string {
   return `${read} row${read !== 1 ? "s" : ""} read · ${kept} kept · ${skipped} skipped`;
 }
 
+/** The model that read the statement, when a model did (a Firstrade PDF's
+ *  activity table); empty for a file a parser read on its own. */
+export function extractedBy(parsed: unknown): string {
+  if (!parsed || typeof parsed !== "object") return "";
+  const value = (parsed as Record<string, unknown>).extractedBy;
+  return typeof value === "string" ? value : "";
+}
+
 /** What a review can still import, and what stands in the way. */
 export interface ReviewEmptiness {
   /** Entries the review can still import. */

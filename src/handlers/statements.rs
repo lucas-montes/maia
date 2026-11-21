@@ -8,7 +8,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config, db,
+    db,
     error::ErrorBody,
     server::AppState,
     statements::{
@@ -749,129 +749,6 @@ pub async fn get_feed_settings(State(state): State<AppState>) -> Json<serde_json
             api_secret_set: !feed.api_secret.is_empty(),
         }
     }))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PutFeedSettings {
-    #[serde(default)]
-    pub trading212: Option<T212SettingsUpdate>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct T212SettingsUpdate {
-    #[serde(default)]
-    pub enabled: Option<bool>,
-    #[serde(default)]
-    pub environment: Option<String>,
-    #[serde(rename = "lookbackDays", default)]
-    pub lookback_days: Option<i64>,
-    #[serde(rename = "apiKey", default)]
-    pub api_key: Option<String>,
-    #[serde(rename = "apiSecret", default)]
-    pub api_secret: Option<String>,
-    #[serde(rename = "clearCredentials", default)]
-    pub clear_credentials: Option<bool>,
-}
-
-pub async fn put_feed_settings(
-    Json(body): Json<PutFeedSettings>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let Some(update) = body.trading212 else {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "missing trading212 settings",
-        ));
-    };
-    if let Some(environment) = update.environment.as_deref() {
-        if environment != "live" && environment != "demo" {
-            return Err(error(
-                StatusCode::BAD_REQUEST,
-                "environment must be live or demo",
-            ));
-        }
-    }
-    if let Some(days) = update.lookback_days {
-        if !(1..=3650).contains(&days) {
-            return Err(error(
-                StatusCode::BAD_REQUEST,
-                "lookbackDays must be between 1 and 3650",
-            ));
-        }
-    }
-
-    update_overlay(|root| {
-        let statements = root
-            .entry("statements".to_string())
-            .or_insert_with(|| serde_json::json!({}));
-        let feeds = statements
-            .as_object_mut()
-            .expect("statements is an object")
-            .entry("feeds".to_string())
-            .or_insert_with(|| serde_json::json!({}));
-        let feed = feeds
-            .as_object_mut()
-            .expect("feeds is an object")
-            .entry("trading212".to_string())
-            .or_insert_with(|| serde_json::json!({}));
-        let feed = feed.as_object_mut().expect("trading212 is an object");
-        if let Some(enabled) = update.enabled {
-            feed.insert("enabled".to_string(), serde_json::json!(enabled));
-        }
-        if let Some(environment) = update.environment {
-            feed.insert("environment".to_string(), serde_json::json!(environment));
-        }
-        if let Some(days) = update.lookback_days {
-            feed.insert("lookback_days".to_string(), serde_json::json!(days));
-        }
-        if update.clear_credentials.unwrap_or(false) {
-            feed.remove("api_key");
-            feed.remove("api_secret");
-        } else {
-            if let Some(key) = update.api_key.filter(|key| !key.trim().is_empty()) {
-                feed.insert("api_key".to_string(), serde_json::json!(key.trim()));
-            }
-            if let Some(secret) = update.api_secret.filter(|secret| !secret.trim().is_empty()) {
-                feed.insert("api_secret".to_string(), serde_json::json!(secret.trim()));
-            }
-        }
-    })
-    .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "restartRequired": true,
-    })))
-}
-
-fn update_overlay(
-    update: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
-) -> anyhow::Result<()> {
-    let path = config::overlay_config_path();
-    let mut root = if path.exists() {
-        let text = std::fs::read_to_string(&path)?;
-        match serde_json::from_str::<serde_json::Value>(&text)? {
-            serde_json::Value::Object(map) => map,
-            _ => anyhow::bail!("{} must contain a JSON object", path.display()),
-        }
-    } else {
-        serde_json::Map::new()
-    };
-    update(&mut root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    // Write-then-rename so a crash cannot leave a half-written config that the
-    // next server start would reject. The file holds provider credentials, so
-    // it is created owner-only rather than left at the umask's default.
-    let temp = path.with_extension("json.tmp");
-    std::fs::write(&temp, serde_json::to_vec_pretty(&root)?)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))?;
-    }
-    std::fs::rename(&temp, &path)?;
-    Ok(())
 }
 
 #[cfg(test)]

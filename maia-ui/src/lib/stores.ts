@@ -331,18 +331,6 @@ export const fxRatesAtom = atom<ListState<any> & { base: string; date: string }>
   date: new Date().toISOString().slice(0, 10),
 });
 
-export const settingsAtom = atom<{
-  configJson: string;
-  configFields: Record<string, string>;
-  status: Status;
-  message: string;
-}>({
-  configJson: "",
-  configFields: {},
-  status: "idle",
-  message: "",
-});
-
 export const templatesAtom = atom<{
   items: any[];
   status: Status;

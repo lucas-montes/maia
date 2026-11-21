@@ -257,6 +257,7 @@ impl Parser for FirstradeSource {
             source_path: ctx.source_path.clone(),
             rows_read,
             rows_skipped,
+            extracted_by: pdf.and_then(|extract| extract.extracted_by.clone()),
             lines,
             warnings,
         }])
@@ -293,6 +294,8 @@ pub struct FirstradeStatement {
     /// review can show what went missing.
     pub rows_read: usize,
     pub rows_skipped: usize,
+    /// The model that read a PDF's activity; `None` for a CSV.
+    pub extracted_by: Option<String>,
     pub lines: Vec<StatementLineDraft>,
     pub warnings: Vec<String>,
 }
@@ -338,6 +341,7 @@ impl FirstradeStatement {
                 "rowsSkipped": self.rows_skipped,
                 "periodStart": self.period_start,
                 "periodEnd": self.period_end,
+                "extractedBy": self.extracted_by,
             }),
             warnings: self.warnings,
             lines: self.lines,
@@ -976,6 +980,7 @@ mod tests {
             period_end: Some("2023-03-31".into()),
             opening_cash: Some(100.0),
             closing_cash: Some(100.0 + 1568.70 + 49.64 + 11160.91 - 0.32),
+            extracted_by: None,
             transactions: vec![
                 PdfTransaction {
                     symbol: Some("baba".into()),

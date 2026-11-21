@@ -13,6 +13,7 @@ function effect(over: Partial<ReceiptEffect>): ReceiptEffect {
     before: {},
     after: {},
     source: "auto",
+    model: null,
     createdAt: 1,
     undoneAt: null,
     targetLabel: "lidl",
@@ -57,6 +58,7 @@ describe("open items", () => {
   const page: MatchingPage = {
     receiptId: "r1",
     read: true,
+    readBy: null,
     store: null,
     storeSource: null,
     recommendations: [],

@@ -136,14 +136,6 @@ pub const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1
 const REQUEST_TIMEOUT_SECS: u64 = 90;
 
 impl Model {
-    pub fn new(api_key: String) -> Self {
-        Self::with_model(api_key, DEFAULT_MODEL.to_string())
-    }
-
-    pub fn with_model(api_key: String, name: String) -> Self {
-        Self::with_base_url(api_key, name, DEFAULT_BASE_URL.to_string())
-    }
-
     pub fn with_base_url(api_key: String, name: String, base_url: String) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
         let client = reqwest::Client::builder()
@@ -158,7 +150,7 @@ impl Model {
         }
     }
 
-pub fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         &self.name
     }
 

@@ -38,6 +38,8 @@ pub struct Effect {
     pub before: Value,
     pub after: Value,
     pub source: String,
+    /// The model an accepted AI proposal came from; `None` for anything else.
+    pub model: Option<String>,
     pub created_at: i64,
     pub undone_at: Option<i64>,
 }
@@ -76,7 +78,23 @@ pub fn record(conn: &Connection, effect: NewEffect<'_>, now: i64) -> rusqlite::R
     Ok(id)
 }
 
-const COLUMNS: &str = "id, receipt_id, kind, target_table, target_id, line, before_json, after_json, source, created_at, undone_at";
+const COLUMNS: &str = "id, receipt_id, kind, target_table, target_id, line, before_json, after_json, source, created_at, undone_at, model";
+
+/// Files the AI effects one accept just recorded under the model that
+/// proposed them.
+///
+/// The accept endpoints hand a `source` down through every matcher that
+/// records an effect; the model is only known at the endpoint, so instead of
+/// threading it through each of those writers it is stamped on afterwards —
+/// in the same transaction, on the rows this receipt recorded at this `now`
+/// with `source = "ai"` and no model yet.
+pub fn tag_model(conn: &Connection, receipt_id: &str, now: i64, model: &str) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE receipt_effects SET model = ?1
+          WHERE receipt_id = ?2 AND created_at = ?3 AND source = 'ai' AND model IS NULL",
+        params![model, receipt_id, now],
+    )
+}
 
 fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Effect> {
     let parse = |s: Option<String>| {
@@ -95,6 +113,7 @@ fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Effect> {
         source: r.get(8)?,
         created_at: r.get(9)?,
         undone_at: r.get(10)?,
+        model: r.get(11)?,
     })
 }
 
@@ -424,4 +443,54 @@ pub fn changed(before: &Value, after: &Value) -> (Value, Value) {
 /// An empty JSON object, for effects with nothing before.
 pub fn none() -> Value {
     json!({})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn effect<'a>(source: &'a str, target: &'a str) -> NewEffect<'a> {
+        NewEffect {
+            receipt_id: "r1",
+            kind: STORE_RESOLVED,
+            target_table: "stores",
+            target_id: target,
+            line: None,
+            before: none(),
+            after: json!({}),
+            source,
+        }
+    }
+
+    /// Only the AI rows this accept recorded are filed under the model: not
+    /// a manual row beside them, and not an AI row from an earlier accept.
+    #[test]
+    fn tag_model_files_only_this_accepts_ai_effects() {
+        let pool = crate::db::init_memory().unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO receipts (id, local_path, parsed, created_at, updated_at) VALUES ('r1', '', 0, 1, 1)",
+            [],
+        )
+        .unwrap();
+        record(&conn, effect("ai", "earlier"), 100).unwrap();
+        record(&conn, effect("ai", "now-ai"), 200).unwrap();
+        record(&conn, effect("manual", "now-manual"), 200).unwrap();
+
+        assert_eq!(tag_model(&conn, "r1", 200, "gemini-flash (gemini-2.5-flash)").unwrap(), 1);
+
+        let models: Vec<(String, Option<String>)> = for_receipt(&conn, "r1")
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.target_id, e.model))
+            .collect();
+        assert_eq!(
+            models,
+            [
+                ("earlier".to_string(), None),
+                ("now-ai".to_string(), Some("gemini-flash (gemini-2.5-flash)".to_string())),
+                ("now-manual".to_string(), None),
+            ]
+        );
+    }
 }

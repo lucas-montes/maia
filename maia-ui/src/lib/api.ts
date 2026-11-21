@@ -335,14 +335,71 @@ export interface StatementFeedStatus {
   lastError: string | null;
 }
 
-export interface StatementFeedSettings {
-  trading212: {
-    enabled: boolean;
-    environment: string;
-    lookbackDays: number;
-    apiKeySet: boolean;
-    apiSecretSet: boolean;
-  };
+/** One saved model, as the Nix module's `services.maia.models.<id>` takes it. */
+export interface ModelSettings {
+  provider: "gemini" | "openai";
+  baseUrl?: string | null;
+  model: string;
+  vision?: boolean;
+}
+
+export type TaskName = "receiptOcr" | "receiptMatching" | "statementExtraction";
+
+/** The editable settings, in the module's option vocabulary. Every key is
+ *  optional in the Nix settings file: an absent key is the module default. */
+export interface NixSettings {
+  port?: number;
+  openFirewall?: boolean | null;
+  baseCurrency?: string;
+  mediaDir?: string;
+  notesDir?: string | null;
+  archiveDir?: string;
+  seedDir?: string | null;
+  statementsRoot?: string | null;
+  statementsIntakeDir?: string | null;
+  trading212?: { enable?: boolean; environment?: "live" | "demo" | string; lookbackDays?: number };
+  models?: Record<string, ModelSettings>;
+  tasks?: Partial<Record<TaskName, string[]>>;
+}
+
+/** What `read_settings` returns. */
+export interface SettingsData {
+  /** The JSON file the host's flake imports; null when the module has none. */
+  settingsFile: string | null;
+  settingsFileTracked: boolean;
+  rebuildCommand: string | null;
+  overlayFile: string;
+  /** What is running: the rendered /etc/maia/config.json. */
+  effective: NixSettings & { dataDir?: string | null; database?: string };
+  /** What the settings file says; applies on the next rebuild. */
+  pending: NixSettings | null;
+  pendingError: string | null;
+  secrets: SecretFlags;
+}
+
+/** Which secrets are set. Values never cross the bridge. */
+export interface SecretFlags {
+  syncApiKey: boolean;
+  syncApiKeyFromNix: boolean;
+  models: Record<string, boolean>;
+  trading212Key: boolean;
+  trading212Secret: boolean;
+}
+
+/** Absent keeps, `null` clears, a string replaces. */
+export interface SecretsPatch {
+  syncApiKey?: string | null;
+  models?: Record<string, string | null>;
+  trading212Key?: string | null;
+  trading212Secret?: string | null;
+}
+
+export interface ModelProbe {
+  id: string;
+  provider: string;
+  baseUrl?: string | null;
+  model: string;
+  apiKey?: string;
 }
 
 export interface SavedUrl {
@@ -639,9 +696,15 @@ export interface ScenarioProjection {
 // ---- Envelope-style commands ----
 
 export const api = {
-  readConfig: () => invoke<Envelope<string>>("read_config"),
+  readSettings: () => invoke<Envelope<SettingsData>>("read_settings"),
 
-  saveConfig: (json: string) => invoke<Envelope<void>>("save_config", { json }),
+  saveNixSettings: (patch: NixSettings | Record<string, unknown>) =>
+    invoke<Envelope<NixSettings>>("save_nix_settings", { patch }),
+
+  saveSecrets: (patch: SecretsPatch) => invoke<Envelope<SecretFlags>>("save_secrets", { patch }),
+
+  testModel: (probe: ModelProbe) =>
+    invoke<Envelope<{ ok: boolean; latencyMs: number; error?: string }>>("test_model", { probe }),
 
   listNotes: () => invoke<Envelope<Note[]>>("list_notes"),
 
@@ -1018,12 +1081,6 @@ export const api = {
   listStatementFeeds: () =>
     invoke<Envelope<{ items: StatementFeedStatus[] }>>("list_statement_feeds"),
 
-  getStatementFeedSettings: () =>
-    invoke<Envelope<StatementFeedSettings>>("get_statement_feed_settings"),
-
-  saveStatementFeedSettings: (settings: unknown) =>
-    invoke<Envelope<unknown>>("save_statement_feed_settings", { settings }),
-
   syncStatementFeed: (provider: string) =>
     invoke<Envelope<unknown>>("sync_statement_feed", { provider }),
 };
@@ -1118,6 +1175,8 @@ export interface ReceiptEffect {
   before: Record<string, unknown>;
   after: Record<string, unknown>;
   source: string;
+  /** The model an accepted AI proposal came from, `"<id> (<model>)"`. */
+  model: string | null;
   createdAt: number;
   undoneAt: number | null;
   targetLabel: string | null;
@@ -1127,6 +1186,8 @@ export interface ReceiptEffect {
 export interface MatchingPage {
   receiptId: string;
   read: boolean;
+  /** Which saved model read the receipt image. */
+  readBy: string | null;
   store: StoreDetails | null;
   storeSource: string | null;
   recommendations: StoreRecommendation[];

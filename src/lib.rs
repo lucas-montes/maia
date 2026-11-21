@@ -1,5 +1,7 @@
 pub mod auth;
 pub mod config;
+/// Re-exported so the desktop app builds models with the same crate version.
+pub use ai;
 pub mod db;
 pub mod error;
 pub mod finance_scenarios;
@@ -2020,6 +2022,161 @@ mod tests {
             }
             other => panic!("expected ModelError::Api, got {other:?}"),
         }
+        handle.abort();
+    }
+
+    /// An OpenAI-compatible stub that answers each request with the next of
+    /// [replies] (the last one repeats) and records every request body.
+    async fn stub_openai(
+        replies: Vec<(axum::http::StatusCode, serde_json::Value)>,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        type Seen = std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+        type Replies = std::sync::Arc<Vec<(axum::http::StatusCode, serde_json::Value)>>;
+        async fn handler(
+            axum::extract::State((replies, seen)): axum::extract::State<(Replies, Seen)>,
+            uri: axum::http::Uri,
+            axum::Json(body): axum::Json<serde_json::Value>,
+        ) -> impl axum::response::IntoResponse {
+            assert_eq!(uri.path(), "/v1/chat/completions");
+            let n = {
+                let mut seen = seen.lock().unwrap();
+                seen.push(body);
+                seen.len() - 1
+            };
+            let (status, body) = replies[n.min(replies.len() - 1)].clone();
+            (status, axum::Json(body))
+        }
+        let seen: Seen = Default::default();
+        let app = axum::Router::new()
+            .fallback(axum::routing::post(handler))
+            .with_state((std::sync::Arc::new(replies), seen.clone()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://127.0.0.1:{port}/v1"), seen, handle)
+    }
+
+    fn chat_reply(content: &str) -> serde_json::Value {
+        serde_json::json!({ "choices": [{ "message": { "role": "assistant", "content": content } }] })
+    }
+
+    fn openai_spec(id: &str, base_url: String) -> ai::ModelSpec {
+        ai::ModelSpec {
+            id: id.into(),
+            provider: ai::Provider::OpenAi,
+            base_url: Some(base_url),
+            model: "qwen2.5vl:7b".into(),
+            api_key: String::new(),
+            vision: true,
+        }
+    }
+
+    /// The first model rejects the key; the chain moves on, the second reads
+    /// the receipt, and the result says which one did and why the first failed.
+    #[tokio::test]
+    async fn a_model_chain_falls_back_and_reports_who_answered() {
+        use crate::receipt_ocr::ParsedReceipt;
+
+        let (gemini_url, gemini) = stub_gemini(
+            axum::http::StatusCode::BAD_REQUEST,
+            serde_json::json!({"error": {"message": "API key not valid."}}),
+        )
+        .await;
+        let receipt = serde_json::json!({
+            "merchant": "Lidl", "date": "2026-11-01 10:00:00", "total": 3.5, "currency": "EUR",
+            "items": [{"name": "Bread", "price": 3.5, "currency": "EUR"}], "discounts": []
+        });
+        let (openai_url, seen, openai) =
+            stub_openai(vec![(axum::http::StatusCode::OK, chat_reply(&receipt.to_string()))]).await;
+
+        let chain = ai::ModelChain::new(vec![
+            ai::Model::from_spec(&ai::ModelSpec {
+                id: "gemini-flash".into(),
+                provider: ai::Provider::Gemini,
+                base_url: Some(gemini_url),
+                model: "gemini-2.5-flash".into(),
+                api_key: "bad".into(),
+                vision: true,
+            }),
+            ai::Model::from_spec(&openai_spec("local", openai_url)),
+        ]);
+        let generated = chain
+            .extract_image_bytes::<ParsedReceipt>(b"\xff\xd8\xff".to_vec(), "image/png")
+            .await
+            .expect("the second model answers");
+
+        assert_eq!(generated.value.merchant, "Lidl");
+        assert_eq!(generated.model.to_string(), "local (qwen2.5vl:7b)");
+        assert_eq!(generated.attempts.len(), 1);
+        assert_eq!(generated.attempts[0].model.id, "gemini-flash");
+        assert!(generated.attempts[0].error.contains("API key not valid"), "{:?}", generated.attempts);
+
+        let request = &seen.lock().unwrap()[0];
+        assert_eq!(request["model"], "qwen2.5vl:7b");
+        assert_eq!(request["response_format"]["type"], "json_schema");
+        let schema = request["response_format"]["json_schema"]["schema"].to_string();
+        assert!(!schema.contains("propertyOrdering"), "Gemini's keyword is stripped: {schema}");
+        let image = request["messages"][0]["content"][1]["image_url"]["url"].as_str().unwrap();
+        assert!(image.starts_with("data:image/png;base64,"), "{image}");
+        gemini.abort();
+        openai.abort();
+    }
+
+    /// A server without `json_schema` support answers 400; the backend asks
+    /// again in `json_object` mode with the schema in the prompt, and accepts
+    /// an answer wrapped in a Markdown fence.
+    #[tokio::test]
+    async fn an_openai_endpoint_without_json_schema_is_retried_in_json_mode() {
+        let (url, seen, handle) = stub_openai(vec![
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                serde_json::json!({"error": {"message": "response_format json_schema is not supported"}}),
+            ),
+            (axum::http::StatusCode::OK, chat_reply("```json\n{\"ok\": true}\n```")),
+        ])
+        .await;
+        let chain = ai::ModelChain::new(vec![ai::Model::from_spec(&openai_spec("local", url))]);
+        let generated = chain
+            .generate_json(
+                "You check things.",
+                "Is it fine?",
+                &serde_json::json!({"type": "object", "properties": {"ok": {"type": "boolean"}}, "propertyOrdering": ["ok"]}),
+            )
+            .await
+            .expect("the retry answers");
+        assert_eq!(generated.value, serde_json::json!({"ok": true}));
+        assert!(generated.attempts.is_empty(), "a retry inside one model is not a fallback");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1]["response_format"]["type"], "json_object");
+        let system = seen[1]["messages"][0]["content"].as_str().unwrap();
+        assert!(system.starts_with("You check things."), "{system}");
+        assert!(system.contains("\"boolean\""), "the schema is in the prompt: {system}");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn a_chain_where_every_model_fails_names_each_failure() {
+        let (url, _seen, handle) = stub_openai(vec![(axum::http::StatusCode::OK, chat_reply("not json"))]).await;
+        let chain = ai::ModelChain::new(vec![
+            ai::Model::from_spec(&openai_spec("a", url.clone())),
+            ai::Model::from_spec(&openai_spec("b", url)),
+        ]);
+        let err = chain
+            .generate_json("s", "p", &serde_json::json!({"type": "object"}))
+            .await
+            .expect_err("nobody answered with JSON");
+        let ai::ChainError::AllFailed(attempts) = &err else { panic!("{err:?}") };
+        assert_eq!(attempts.iter().map(|a| a.model.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert!(err.to_string().contains("a (qwen2.5vl:7b): the model gave no usable answer"), "{err}");
+        assert!(matches!(ai::ModelChain::default().generate_json("s", "p", &serde_json::json!({})).await, Err(ai::ChainError::Empty)));
         handle.abort();
     }
 
