@@ -77,7 +77,7 @@ The app shell consists of:
 
 ### Settings
 
-> **Superseded 2026-11-20** by `context/plans/settings-nix-and-models.md`: Settings now edits the Nix settings file and the secrets overlay; it no longer edits `maia.json`.
+> **Superseded 2026-11-20** by `context/plans/settings-nix-and-models.md`: Settings shows the Nix values read-only and edits only the secrets overlay; it no longer edits `maia.json`.
 
 - Form-based editor for `maia.json` config with labeled fields for each key: `database`, `receipts_path`, `nutriments_path`, `bank_statements_path`, `investments_statements_path`, `model_api`, `receipts.archived_dir`
 - Loads current config from disk on view mount via Tauri command and populates form fields

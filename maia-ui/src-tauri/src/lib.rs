@@ -4632,7 +4632,6 @@ pub fn run() {
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             settings::read_settings,
-            settings::save_nix_settings,
             settings::save_secrets,
             settings::test_model,
             get_sync_port,

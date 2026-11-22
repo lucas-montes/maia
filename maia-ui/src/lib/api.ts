@@ -345,8 +345,8 @@ export interface ModelSettings {
 
 export type TaskName = "receiptOcr" | "receiptMatching" | "statementExtraction";
 
-/** The editable settings, in the module's option vocabulary. Every key is
- *  optional in the Nix settings file: an absent key is the module default. */
+/** The running non-secret settings, in the module's option vocabulary. They
+ *  are set in the NixOS configuration, never from the app. */
 export interface NixSettings {
   port?: number;
   openFirewall?: boolean | null;
@@ -364,16 +364,9 @@ export interface NixSettings {
 
 /** What `read_settings` returns. */
 export interface SettingsData {
-  /** The JSON file the host's flake imports; null when the module has none. */
-  settingsFile: string | null;
-  settingsFileTracked: boolean;
-  rebuildCommand: string | null;
   overlayFile: string;
   /** What is running: the rendered /etc/maia/config.json. */
   effective: NixSettings & { dataDir?: string | null; database?: string };
-  /** What the settings file says; applies on the next rebuild. */
-  pending: NixSettings | null;
-  pendingError: string | null;
   secrets: SecretFlags;
 }
 
@@ -697,9 +690,6 @@ export interface ScenarioProjection {
 
 export const api = {
   readSettings: () => invoke<Envelope<SettingsData>>("read_settings"),
-
-  saveNixSettings: (patch: NixSettings | Record<string, unknown>) =>
-    invoke<Envelope<NixSettings>>("save_nix_settings", { patch }),
 
   saveSecrets: (patch: SecretsPatch) => invoke<Envelope<SecretFlags>>("save_secrets", { patch }),
 

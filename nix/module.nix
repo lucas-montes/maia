@@ -107,12 +107,6 @@
       # overlay is rather than guessing from HOME.
       overlay_file = overlayFile;
     }
-    // optionalAttrs (cfg.settingsFile != null) {
-      # Read by the desktop Settings screen, which edits that file and shows
-      # the rebuild command for this host.
-      nix_settings_file = cfg.settingsFile;
-      nixos_host = config.networking.hostName;
-    }
     // optionalAttrs (cfg.seedDir != null) {
       seed_dir = cfg.seedDir;
     };
@@ -266,21 +260,6 @@ in {
         right default: seeding copies thousands of media files and runs before the
         listener binds, so it would exceed the systemd start timeout on a first
         boot. Import an existing database instead.
-      '';
-    };
-
-    settingsFile = mkOption {
-      type = types.nullOr types.str;
-      default = null;
-      example = "/home/lucas/.dotfiles/services/maia-settings.json";
-      description = ''
-        Absolute path of the JSON file this host's configuration imports into
-        `services.maia` (`builtins.fromJSON (builtins.readFile ./that.json)`).
-        The desktop Settings screen edits it and shows the rebuild command.
-
-        No default: it must sit inside the flake that configures this host,
-        and be tracked by git, because a pure flake cannot read anything else.
-        While null, Settings shows these values read-only.
       '';
     };
 

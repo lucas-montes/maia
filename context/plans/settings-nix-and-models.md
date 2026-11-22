@@ -6,6 +6,12 @@ against a stub OpenAI-compatible endpoint. Nothing has run against a real Gemini
 Ollama model. `~/.dotfiles` has not been changed: it pins maia from GitHub, so it has to change in
 step with the push (see **Rollout**).
 
+> **Revised 2026-11-22:** the editable Nix settings file is gone. The user asked to drop the idea
+> of overriding the config from the app: `services.maia.settingsFile`, `save_nix_settings`, the
+> pending-rebuild badges and the rebuild banner were removed. Settings shows every non-secret
+> value read-only, as running, and saves only secrets. The sections below that describe editing
+> the settings file are history.
+
 > The user asked for a rework of the desktop Settings page. The decisions of 2026-11-19/20 come
 > from their answers:
 > - **One scrolling page, split into sections**, with a side nav and **one Save per section**.
@@ -176,19 +182,14 @@ step with the push (see **Rollout**).
 ## Rollout (order matters)
 
 1. Commit and push maia.
-2. **Before rebuilding**, save the sync key in Settings → Server (Generate works, then update the
-   phone) and the model keys in Settings → Models. Otherwise the new module renders no
-   `api_key`, the server falls back to `fitfat-sync-key`, and the phone is locked out.
-3. In `~/.dotfiles`, add `services/maia-settings.json` with `mediaDir` = the checkout's
-   `exercise_media` plus models and tasks, and `git add` it. Change `services/maia.nix` to:
-   ```nix
-   services.maia = (builtins.fromJSON (builtins.readFile ./maia-settings.json)) // {
-     enable = true; desktop.enable = true;
-     settingsFile = "/home/lucas/.dotfiles/services/maia-settings.json";
-   };
-   ```
-   Drop `apiKey` and `sourceDir`.
-4. `nix flake update maia`, rebuild, restart the app.
+2. **Before rebuilding**, put the sync key in the overlay: save it in Settings → Server, or copy
+   the current `api_key` from `/etc/maia/config.json` into `~/.config/maia/config.json` so the
+   phone keeps working. Otherwise the new module renders no `api_key`, the server falls back to
+   `fitfat-sync-key`, and the phone is locked out.
+3. In `~/.dotfiles/services/maia.nix`, drop `apiKey` and `sourceDir` and set `mediaDir` to the
+   checkout's `exercise_media`, plus `models` and `tasks` if wanted.
+4. `nix flake update maia`, rebuild, restart the app, then add the model keys in Settings →
+   Models.
 
 ## Known gaps
 

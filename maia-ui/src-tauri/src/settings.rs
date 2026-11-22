@@ -1,18 +1,13 @@
 //! The Settings screen's backend.
 //!
-//! Two stores, split by what a value is:
-//!
-//! - **Everything that is not a secret** belongs to Nix. The host's flake
-//!   imports a JSON file into `services.maia` (`settingsFile` in the module),
-//!   and these commands edit that file. Nothing applies until the user runs
-//!   the rebuild command we hand back, so the screen compares the file
-//!   ("pending") against the rendered `/etc/maia/config.json` ("effective").
+//! - **Everything that is not a secret** is set in the host's NixOS
+//!   configuration (`services.maia`) and only shown here, read from the
+//!   rendered `/etc/maia/config.json`.
 //! - **Secrets** (the sync key, model keys, Trading 212 credentials) never go
 //!   through Nix. They live in the per-user overlay, are written here, and are
 //!   only ever reported back as "set" or "not set".
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -38,10 +33,6 @@ impl SettingsResult {
 
 fn deployment() -> Result<Object, String> {
     maia::Config::read_deployment(None).map_err(|e| e.to_string())
-}
-
-fn settings_file(deployment: &Object) -> Option<PathBuf> {
-    text(deployment.get("nix_settings_file")).map(PathBuf::from)
 }
 
 fn overlay_path(deployment: &Object) -> PathBuf {
@@ -72,8 +63,8 @@ fn read_json_object(path: &Path) -> Result<Object, String> {
     }
 }
 
-/// The effective configuration, in the vocabulary of the module's options, so
-/// the screen can compare it key by key with the pending file.
+/// The running configuration, in the vocabulary of the module's options, so
+/// the screen can name the option that sets each value.
 fn effective(deployment: &Object) -> Value {
     let cfg = maia::Config::from_values(deployment.clone(), Object::new());
     let statements_root = cfg
@@ -149,32 +140,6 @@ fn secrets(overlay: &Object, deployment: &Object) -> Value {
     })
 }
 
-/// `sudo nixos-rebuild switch --flake <repo>#<host>` for the repository that
-/// holds [file], and whether git tracks it (a pure flake ignores it if not).
-fn rebuild_hint(file: &Path, host: Option<&str>) -> (String, bool) {
-    let dir = file.parent().unwrap_or(Path::new("."));
-    let git = |args: &[&str]| {
-        Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    };
-    let root = git(&["rev-parse", "--show-toplevel"]).unwrap_or_else(|| dir.display().to_string());
-    let tracked = file
-        .file_name()
-        .and_then(|name| git(&["ls-files", "--error-unmatch", &name.to_string_lossy()]))
-        .is_some();
-    let host = host
-        .map(str::to_owned)
-        .or_else(|| std::fs::read_to_string("/etc/hostname").ok().map(|h| h.trim().to_string()))
-        .unwrap_or_else(|| "$(hostname)".into());
-    (format!("sudo nixos-rebuild switch --flake {root}#{host}"), tracked)
-}
-
 #[tauri::command]
 pub fn read_settings() -> SettingsResult {
     let deployment = match deployment() {
@@ -182,228 +147,11 @@ pub fn read_settings() -> SettingsResult {
         Err(e) => return SettingsResult::err(e),
     };
     let overlay = read_json_object(&overlay_path(&deployment)).unwrap_or_default();
-    let file = settings_file(&deployment);
-    let (pending, pending_error) = match &file {
-        Some(path) => match read_json_object(path) {
-            Ok(map) => (Value::Object(map), None),
-            Err(e) => (Value::Null, Some(e)),
-        },
-        None => (Value::Null, None),
-    };
-    let (rebuild_command, tracked) = file
-        .as_deref()
-        .map(|f| rebuild_hint(f, text(deployment.get("nixos_host")).as_deref()))
-        .map(|(cmd, tracked)| (Some(cmd), tracked))
-        .unwrap_or((None, false));
     SettingsResult::ok(json!({
-        "settingsFile": file.as_ref().map(|p| p.display().to_string()),
-        "settingsFileTracked": tracked,
-        "rebuildCommand": rebuild_command,
         "overlayFile": overlay_path(&deployment).display().to_string(),
         "effective": effective(&deployment),
-        "pending": pending,
-        "pendingError": pending_error,
         "secrets": secrets(&overlay, &deployment),
     }))
-}
-
-// ---- Nix settings ----
-
-const MODEL_PROVIDERS: &[&str] = &["gemini", "openai"];
-const PATH_KEYS: &[&str] = &["mediaDir", "notesDir", "archiveDir"];
-const OPTIONAL_PATH_KEYS: &[&str] = &["statementsRoot", "statementsIntakeDir", "seedDir"];
-const TASK_KEYS: &[&str] = &["receiptOcr", "receiptMatching", "statementExtraction"];
-
-fn absolute_path(key: &str, value: &Value) -> Result<(), String> {
-    match value.as_str() {
-        Some(p) if p.starts_with('/') && !p.contains('\n') => Ok(()),
-        _ => Err(format!("{key} must be an absolute path")),
-    }
-}
-
-fn valid_model_id(id: &str) -> bool {
-    let mut chars = id.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-}
-
-/// Checks one top-level key of a patch the way the module's option types
-/// would, so a bad value is refused here instead of failing the rebuild.
-/// `null` always passes: it removes the key, putting the module default back.
-fn validate_key(key: &str, value: &Value) -> Result<(), String> {
-    if value.is_null() {
-        return Ok(());
-    }
-    match key {
-        "port" => match value.as_u64() {
-            Some(1..=65535) => Ok(()),
-            _ => Err("port must be between 1 and 65535".into()),
-        },
-        "openFirewall" => value.as_bool().map(|_| ()).ok_or("openFirewall must be true or false".into()),
-        "baseCurrency" => match value.as_str() {
-            Some(c) if c.len() == 3 && c.chars().all(|ch| ch.is_ascii_alphabetic()) => Ok(()),
-            _ => Err("baseCurrency must be a three-letter code such as EUR".into()),
-        },
-        k if PATH_KEYS.contains(&k) || OPTIONAL_PATH_KEYS.contains(&k) => absolute_path(k, value),
-        "trading212" => {
-            let feed = value.as_object().ok_or("trading212 must be an object")?;
-            for (k, v) in feed {
-                match (k.as_str(), v) {
-                    (_, Value::Null) => {}
-                    ("enable", Value::Bool(_)) => {}
-                    ("environment", Value::String(e)) if e == "live" || e == "demo" => {}
-                    ("lookbackDays", v) if v.as_i64().is_some_and(|d| (1..=3650).contains(&d)) => {}
-                    ("enable", _) => return Err("trading212.enable must be true or false".into()),
-                    ("environment", _) => return Err("trading212.environment must be live or demo".into()),
-                    ("lookbackDays", _) => return Err("trading212.lookbackDays must be between 1 and 3650".into()),
-                    (other, _) => return Err(format!("trading212.{other} is not a setting")),
-                }
-            }
-            Ok(())
-        }
-        "models" => {
-            let models = value.as_object().ok_or("models must be an object")?;
-            for (id, model) in models {
-                if !valid_model_id(id) {
-                    return Err(format!("model id `{id}`: letters, digits, '-', '_' and '.' only"));
-                }
-                let model = model.as_object().ok_or(format!("model `{id}` must be an object"))?;
-                for (k, v) in model {
-                    match (k.as_str(), v) {
-                        ("provider", Value::String(p)) if MODEL_PROVIDERS.contains(&p.as_str()) => {}
-                        ("provider", _) => return Err(format!("model `{id}`: provider must be gemini or openai")),
-                        ("baseUrl", Value::String(u)) if u.starts_with("http://") || u.starts_with("https://") => {}
-                        ("baseUrl", Value::Null) => {}
-                        ("baseUrl", _) => return Err(format!("model `{id}`: base URL must start with http:// or https://")),
-                        ("model", Value::String(m)) if !m.trim().is_empty() => {}
-                        ("model", _) => return Err(format!("model `{id}`: the model name is required")),
-                        ("vision", Value::Bool(_)) => {}
-                        ("vision", _) => return Err(format!("model `{id}`: vision must be true or false")),
-                        (other, _) => return Err(format!("model `{id}`: `{other}` is not a setting")),
-                    }
-                }
-                if !model.contains_key("model") {
-                    return Err(format!("model `{id}`: the model name is required"));
-                }
-            }
-            Ok(())
-        }
-        "tasks" => {
-            let tasks = value.as_object().ok_or("tasks must be an object")?;
-            for (k, v) in tasks {
-                if !TASK_KEYS.contains(&k.as_str()) {
-                    return Err(format!("tasks.{k} is not a task"));
-                }
-                let ok = v.is_null()
-                    || v.as_array().is_some_and(|ids| ids.iter().all(|id| id.as_str().is_some_and(valid_model_id)));
-                if !ok {
-                    return Err(format!("tasks.{k} must be a list of model ids"));
-                }
-            }
-            Ok(())
-        }
-        other => Err(format!("`{other}` is not editable from Settings")),
-    }
-}
-
-/// Applies [patch] to [current]. Objects one level down (`trading212`,
-/// `tasks`) merge key by key; `models` is replaced whole so a deleted model
-/// goes away; `null` anywhere removes the key.
-fn apply_patch(mut current: Object, patch: Object) -> Object {
-    for (key, value) in patch {
-        match (key.as_str(), value) {
-            (_, Value::Null) => {
-                current.remove(&key);
-            }
-            ("trading212" | "tasks", Value::Object(incoming)) => {
-                let mut merged = current
-                    .get(&key)
-                    .and_then(Value::as_object)
-                    .cloned()
-                    .unwrap_or_default();
-                for (k, v) in incoming {
-                    if v.is_null() {
-                        merged.remove(&k);
-                    } else {
-                        merged.insert(k, v);
-                    }
-                }
-                if merged.is_empty() {
-                    current.remove(&key);
-                } else {
-                    current.insert(key, Value::Object(merged));
-                }
-            }
-            (_, value) => {
-                current.insert(key, value);
-            }
-        }
-    }
-    current
-}
-
-/// What the module would refuse about the file as a whole: tasks naming
-/// models that do not exist, and OCR naming a model that cannot see.
-fn validate_whole(settings: &Object) -> Result<(), String> {
-    let models = settings.get("models").and_then(Value::as_object);
-    let tasks = settings.get("tasks").and_then(Value::as_object);
-    for task in TASK_KEYS {
-        let ids = tasks
-            .and_then(|t| t.get(*task))
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        for id in ids.iter().filter_map(Value::as_str) {
-            let Some(model) = models.and_then(|m| m.get(id)) else {
-                return Err(format!("tasks.{task} names `{id}`, which is not a saved model"));
-            };
-            if *task == "receiptOcr" && model.get("vision").and_then(Value::as_bool) != Some(true) {
-                return Err(format!("`{id}` cannot read images, so it cannot serve receipt OCR"));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn write_atomically(path: &Path, value: &Object) -> std::io::Result<()> {
-    let mut body = serde_json::to_string_pretty(&Value::Object(value.clone()))?;
-    body.push('\n');
-    let temp = path.with_extension("json.tmp");
-    std::fs::write(&temp, body)?;
-    std::fs::rename(&temp, path)?;
-    Ok(())
-}
-
-fn save_nix_settings_at(path: &Path, patch: Object) -> Result<Object, String> {
-    for (key, value) in &patch {
-        validate_key(key, value)?;
-    }
-    let current = read_json_object(path)?;
-    let next = apply_patch(current, patch);
-    validate_whole(&next)?;
-    write_atomically(path, &next).map_err(|e| format!("writing {}: {e}", path.display()))?;
-    Ok(next)
-}
-
-/// Edits the Nix settings file. Returns the file as written.
-#[tauri::command]
-pub fn save_nix_settings(patch: Value) -> SettingsResult {
-    let Value::Object(patch) = patch else {
-        return SettingsResult::err("settings must be a JSON object");
-    };
-    let deployment = match deployment() {
-        Ok(d) => d,
-        Err(e) => return SettingsResult::err(e),
-    };
-    let Some(path) = settings_file(&deployment) else {
-        return SettingsResult::err(
-            "no settings file: set services.maia.settingsFile in your NixOS configuration and rebuild",
-        );
-    };
-    match save_nix_settings_at(&path, patch) {
-        Ok(written) => SettingsResult::ok(Value::Object(written)),
-        Err(e) => SettingsResult::err(e),
-    }
 }
 
 // ---- Secrets ----
@@ -507,9 +255,9 @@ pub struct ModelProbe {
     pub api_key: Option<String>,
 }
 
-/// Sends one tiny structured request to a model as the form describes it,
-/// which need not be rebuilt yet, and reports how long it took or why it
-/// failed.
+/// Sends one tiny structured request to a configured model,
+/// with a key typed but not saved yet if there is one, and reports how long
+/// it took or why it failed.
 #[tauri::command]
 pub async fn test_model(probe: ModelProbe) -> SettingsResult {
     let Some(provider) = maia::ai::Provider::parse(&probe.provider) else {
@@ -557,77 +305,6 @@ mod tests {
 
     fn obj(value: Value) -> Object {
         value.as_object().unwrap().clone()
-    }
-
-    fn temp_file(name: &str, body: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("maia-settings-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, body).unwrap();
-        path
-    }
-
-    #[test]
-    fn values_are_checked_like_the_module_types() {
-        assert!(validate_key("port", &json!(3030)).is_ok());
-        assert!(validate_key("port", &json!(0)).is_err());
-        assert!(validate_key("port", &json!(70000)).is_err());
-        assert!(validate_key("baseCurrency", &json!("usd")).is_ok());
-        assert!(validate_key("baseCurrency", &json!("EURO")).is_err());
-        assert!(validate_key("mediaDir", &json!("relative/dir")).is_err());
-        assert!(validate_key("statementsIntakeDir", &json!("/home/lucas/Downloads")).is_ok());
-        assert!(validate_key("trading212", &json!({ "environment": "staging" })).is_err());
-        assert!(validate_key("trading212", &json!({ "lookbackDays": 4000 })).is_err());
-        assert!(validate_key("models", &json!({ "bad id": { "model": "x" } })).is_err());
-        assert!(validate_key("models", &json!({ "ok": { "provider": "openai", "baseUrl": "ftp://x", "model": "m" } })).is_err());
-        assert!(validate_key("models", &json!({ "ok": { "provider": "openai" } })).is_err(), "model is required");
-        assert!(validate_key("tasks", &json!({ "receiptOcr": ["a", "b"] })).is_ok());
-        assert!(validate_key("tasks", &json!({ "somethingElse": [] })).is_err());
-        assert!(validate_key("dataDir", &json!("/srv")).is_err(), "the state directory is not editable here");
-        assert!(validate_key("apiKey", &json!("x")).is_err(), "a secret never goes to Nix");
-        assert!(validate_key("port", &Value::Null).is_ok(), "null resets to the default");
-    }
-
-    #[test]
-    fn a_save_merges_into_the_file_and_keeps_what_it_did_not_touch() {
-        let path = temp_file(
-            "maia-settings.json",
-            r#"{ "port": 3030, "custom": "kept", "trading212": { "enable": true, "lookbackDays": 90 },
-                 "models": { "old": { "model": "x" } }, "tasks": { "receiptOcr": [], "receiptMatching": ["old"] } }"#,
-        );
-        let written = save_nix_settings_at(
-            &path,
-            obj(json!({
-                "port": 4040,
-                "trading212": { "lookbackDays": 30 },
-                "models": { "flash": { "provider": "gemini", "model": "gemini-2.5-flash", "vision": true } },
-                "tasks": { "receiptMatching": ["flash"], "receiptOcr": ["flash"] },
-                "baseCurrency": null
-            })),
-        )
-        .unwrap();
-        let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(on_disk, Value::Object(written));
-        assert_eq!(on_disk["port"], 4040);
-        assert_eq!(on_disk["custom"], "kept");
-        assert_eq!(on_disk["trading212"], json!({ "enable": true, "lookbackDays": 30 }));
-        assert!(on_disk["models"].get("old").is_none(), "models are replaced whole, so a removal sticks");
-        assert_eq!(on_disk["tasks"]["receiptMatching"], json!(["flash"]));
-        assert!(std::fs::read_to_string(&path).unwrap().ends_with("}\n"));
-    }
-
-    #[test]
-    fn a_save_is_refused_when_a_task_names_a_missing_or_blind_model() {
-        let path = temp_file("s.json", r#"{ "models": { "text": { "provider": "openai", "model": "m" } } }"#);
-        let missing = save_nix_settings_at(&path, obj(json!({ "tasks": { "receiptMatching": ["nope"] } })));
-        assert!(missing.unwrap_err().contains("not a saved model"));
-        let blind = save_nix_settings_at(&path, obj(json!({ "tasks": { "receiptOcr": ["text"] } })));
-        assert!(blind.unwrap_err().contains("cannot read images"));
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            r#"{ "models": { "text": { "provider": "openai", "model": "m" } } }"#,
-            "a refused save leaves the file alone"
-        );
     }
 
     #[test]
