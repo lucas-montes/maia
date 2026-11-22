@@ -1,8 +1,9 @@
 # FX rates from the server, and Firstrade PDF statements
 
-**Status:** finished 2026-11-20 (server `787c54b`, mobile `53a7b03`), not deployed. The model step
-of the PDF reader has never run on a real statement, because no `model_api` key is configured on
-the deployed box. Until one is set, every Firstrade PDF lands in `failed/` with "needs a model key".
+**Status:** done (marked 2026-11-22; server `787c54b`, mobile `53a7b03`) and being tested. The
+model step of the PDF reader had not yet run on a real statement when this was written: it needs a
+model key, set in Settings → Models since `settings-nix-and-models`. Until one is set, every
+Firstrade PDF lands in `failed/` with "needs a model key".
 
 > **Superseded config (2026-11-20, `settings-nix-and-models`):** `model_api`/`model_name` are replaced by
 > `services.maia.models` + `tasks.statementExtraction`, with the key set in Settings → Models.

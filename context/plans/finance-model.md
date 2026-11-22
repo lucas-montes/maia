@@ -1,6 +1,6 @@
 # Finance model: accounts as a tree, trades as movements, statements re-derived
 
-**Status:** finished 2026-11-17, deployed — statement entry-status derivation (v12), the account tree (v13), trades (v14) and opening positions (v15) are live (database at v17; 935 entries imported, 117 trades booked, 3 account roots, 0 pending / 0 error). One manual step open on the live box: seed the INTC opening position (209 shares and the average cost) so the three INTC sales get a cost basis. Documented in `context/statements/entry-lifecycle.md`, `context/statements/account-tree.md` and `context/statements/trades.md`.
+**Status:** done (marked 2026-11-22), deployed — statement entry-status derivation (v12), the account tree (v13), trades (v14) and opening positions (v15) are live (database at v17; 935 entries imported, 117 trades booked, 3 account roots, 0 pending / 0 error). The last manual step, seeding the INTC opening position (209 shares and the average cost) so the three INTC sales get a cost basis, is being tested on the live box. Documented in `context/statements/entry-lifecycle.md`, `context/statements/account-tree.md` and `context/statements/trades.md`.
 
 > Server + desktop only; mobile later. Replaces the 2026-11-11 long version of this plan and
 > `statements-reimport-after-discard.md`.

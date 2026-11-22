@@ -1,10 +1,10 @@
 # Settings through Nix, secrets in the overlay, and several models per task
 
-**Status:** implemented 2026-11-20, not committed and not deployed. Every test suite passes:
-355 server, 30 desktop, 3 `ai`, 81 `maia-ui` vitest. The real server was checked end to end
-against a stub OpenAI-compatible endpoint. Nothing has run against a real Gemini, OpenRouter or
-Ollama model. `~/.dotfiles` has not been changed: it pins maia from GitHub, so it has to change in
-step with the push (see **Rollout**).
+**Status:** done (marked 2026-11-22), committed (`0a5d67f`, revised in `2c4080d`) and being
+tested. Every test suite passed at implementation: 355 server, 30 desktop, 3 `ai`, 81 `maia-ui`
+vitest, and the real server was checked end to end against a stub OpenAI-compatible endpoint. The
+checks against real Gemini, OpenRouter and Ollama models and the `~/.dotfiles` rollout (see
+**Rollout**) are what is being tested now.
 
 > **Revised 2026-11-22:** the editable Nix settings file is gone. The user asked to drop the idea
 > of overriding the config from the app: `services.maia.settingsFile`, `save_nix_settings`, the
