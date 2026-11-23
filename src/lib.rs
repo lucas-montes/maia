@@ -1835,7 +1835,7 @@ mod tests {
         /// filename. Anchored to the manifest because `cargo test` runs with the
         /// crate directory as CWD, not the workspace root.
         const RECEIPT_IMAGE: &str = "testdata/receipt.jpg";
-        const MODEL: &str = "gemini-2.5-flash";
+        const MODEL: &str = ai::DEFAULT_GEMINI_MODEL;
 
         let key = ["GEMINI_API_KEY", "MAIA_TEST_GEMINI_KEY"]
             .into_iter()
@@ -1926,8 +1926,8 @@ mod tests {
             let (status, body) = state;
             (status, axum::Json(body))
         }
-        // The client appends `/{model}:generateContent` to the base URL, so match on
-        // a fallback rather than hard-coding that path.
+        // The client appends `/interactions` to the base URL; a fallback keeps
+        // the stub indifferent to the exact path.
         let app = axum::Router::new()
             .fallback(axum::routing::post(handler))
             .with_state((status, body));
@@ -1956,11 +1956,15 @@ mod tests {
         let (base_url, handle) = stub_gemini(
             axum::http::StatusCode::OK,
             serde_json::json!({
-                "candidates": [{
-                    "content": {"role": "model", "parts": [{"text": inner.to_string()}]},
-                    "finishReason": "STOP"
-                }],
-                "modelVersion": "gemini-2.5-flash"
+                "id": "v1_stub",
+                "object": "interaction",
+                "model": "gemini-3.8-flash",
+                "status": "completed",
+                "steps": [
+                    {"type": "thought", "signature": "sig"},
+                    {"type": "model_output", "content": [{"type": "text", "text": inner.to_string()}]}
+                ],
+                "usage": {"total_input_tokens": 10, "total_output_tokens": 20, "total_tokens": 30}
             }),
         )
         .await;
@@ -1998,8 +2002,7 @@ mod tests {
         use crate::receipt_ocr::ParsedReceipt;
 
         // Gemini answers a bad key with a non-2xx and an `error.message`
-        // envelope. Decoding that as a success used to surface as
-        // "missing field `candidates`", hiding the real cause.
+        // envelope. Decoding that as a success would hide the real cause.
         let (base_url, handle) = stub_gemini(
             axum::http::StatusCode::BAD_REQUEST,
             serde_json::json!({"error": {"code": 400, "message": "API key not valid. Please pass a valid API key.", "status": "INVALID_ARGUMENT"}}),

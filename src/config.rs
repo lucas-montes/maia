@@ -681,7 +681,7 @@ fn read_models(
         let key = text(overlay.get("model_api"))
             .or_else(|| text(deployment.get("model_api")))
             .unwrap_or_default();
-        let name = text(deployment.get("model_name")).unwrap_or_else(|| "gemini-2.5-flash".into());
+        let name = text(deployment.get("model_name")).unwrap_or_else(|| ai::DEFAULT_GEMINI_MODEL.into());
         cfg.set_single_model(key, name);
         return;
     };

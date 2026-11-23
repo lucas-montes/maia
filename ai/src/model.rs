@@ -95,7 +95,7 @@ pub trait Mllm: Llm + Vllm {}
 /// Which wire protocol a model speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
-    /// Google's `generateContent` API.
+    /// Google's Interactions API (`POST /v1beta/interactions`).
     Gemini,
     /// `POST /chat/completions`: OpenAI, OpenRouter, Ollama, llama.cpp, vLLM.
     OpenAi,
@@ -196,27 +196,17 @@ impl Vllm for Model {
         let image_base64 = general_purpose::STANDARD.encode(&bytes);
 
         match &self.backend {
-            Backend::Gemini(model) => {
-                let content = google::Content::new(
+            Backend::Gemini(model) => model
+                .generate_json(
                     None,
                     vec![
-                        google::Part::Text(google::TextPart::new(RECEIPT_INSTRUCTION.to_string())),
-                        google::Part::InlineData {
-                            inline_data: google::InlineData::new(mime.to_string(), image_base64),
-                        },
+                        google::Content::Text { text: RECEIPT_INSTRUCTION.to_string() },
+                        google::Content::Image { data: image_base64, mime_type: mime.to_string() },
                     ],
-                );
-                let generation_config = Some(google::GenerationConfig::new(
-                    Some("application/json".to_string()),
-                    Some(T::to_schema()),
-                ));
-                let request = google::GeminiRequest::new(None, vec![content], generation_config);
-                model
-                    .generate_content(&request)
-                    .await
-                    .map(|r| r.inner_to_struct())
-                    .map_err(ModelError::from)
-            }
+                    T::to_schema(),
+                )
+                .await
+                .map_err(ModelError::from),
             Backend::OpenAi(model) => {
                 let value = model
                     .generate_json(
@@ -229,7 +219,7 @@ impl Vllm for Model {
                     )
                     .await?;
                 // A JSON object that does not fit the struct is "no usable
-                // answer", the same as Gemini's `inner_to_struct` treats it.
+                // answer", the same as the Gemini backend treats it.
                 Ok(value.and_then(|v| serde_json::from_value(v).ok()))
             }
         }
@@ -304,26 +294,10 @@ impl Model {
         schema: serde_json::Value,
     ) -> Result<Option<serde_json::Value>, ModelError> {
         match &self.backend {
-            Backend::Gemini(model) => {
-                let content = google::Content::new(
-                    Some("user".to_string()),
-                    vec![google::Part::Text(google::TextPart::new(prompt))],
-                );
-                let generation_config = Some(google::GenerationConfig::new(
-                    Some("application/json".to_string()),
-                    Some(schema),
-                ));
-                let request = google::GeminiRequest::new(
-                    Some(google::SystemInstruction::new(system)),
-                    vec![content],
-                    generation_config,
-                );
-                model
-                    .generate_content(&request)
-                    .await
-                    .map(|r| r.inner_to_struct())
-                    .map_err(ModelError::from)
-            }
+            Backend::Gemini(model) => model
+                .generate_json(Some(system), vec![google::Content::Text { text: prompt }], schema)
+                .await
+                .map_err(ModelError::from),
             Backend::OpenAi(model) => model
                 .generate_json(
                     Some(system),

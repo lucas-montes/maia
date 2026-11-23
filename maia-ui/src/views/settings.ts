@@ -37,14 +37,16 @@ const TASKS: { id: TaskName; label: string; hint: string }[] = [
 ];
 
 const PROVIDER_LABELS: { provider: ModelSettings["provider"]; baseUrl: string; label: string }[] = [
-  { provider: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/models", label: "Gemini" },
+  { provider: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", label: "Gemini" },
   { provider: "openai", baseUrl: "https://api.openai.com/v1", label: "OpenAI" },
   { provider: "openai", baseUrl: "https://openrouter.ai/api/v1", label: "OpenRouter" },
   { provider: "openai", baseUrl: "http://localhost:11434/v1", label: "Ollama (local)" },
 ];
 
 function providerLabel(model: ModelSettings): string {
-  const url = (model.baseUrl ?? "").replace(/\/+$/, "");
+  // Gemini configs saved before the Interactions API point at `…/v1beta/models`.
+  let url = (model.baseUrl ?? "").replace(/\/+$/, "");
+  if (model.provider === "gemini") url = url.replace(/\/models$/, "");
   return PROVIDER_LABELS.find((p) => p.provider === model.provider && p.baseUrl === url)?.label ?? "OpenAI-compatible";
 }
 

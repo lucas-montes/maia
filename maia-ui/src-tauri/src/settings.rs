@@ -353,7 +353,7 @@ mod tests {
         assert_eq!(e["dataDir"], "/var/lib/maia");
         assert_eq!(e["statementsRoot"], "/home/u/.local/share/maia/statements");
         assert_eq!(e["statementsIntakeDir"], "/home/u/in");
-        assert_eq!(e["models"]["flash"]["baseUrl"], "https://generativelanguage.googleapis.com/v1beta/models");
+        assert_eq!(e["models"]["flash"]["baseUrl"], "https://generativelanguage.googleapis.com/v1beta");
         assert_eq!(e["tasks"]["receiptOcr"], json!(["flash"]));
     }
 }
