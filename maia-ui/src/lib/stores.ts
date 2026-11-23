@@ -5,6 +5,7 @@ import type {
   Exercise,
   FinanceBaseline,
   FinanceScenario,
+  FxRateFilter,
   Goal,
   Note,
   Receipt,
@@ -54,7 +55,6 @@ export type ViewId =
   | "transactions"
   | "statements"
   | "fxRates"
-  | "insights"
   | "simulations";
 
 export const routeAtom = atom<ViewId>("dashboard");
@@ -325,10 +325,10 @@ export const simulationsAtom = atom<
   editingCategoryOverrides: [],
 });
 
-export const fxRatesAtom = atom<ListState<any> & { base: string; date: string }>({
-  ...emptyList<any>(),
-  base: "USD",
-  date: new Date().toISOString().slice(0, 10),
+/** The FX rates page's filters, kept here so they survive leaving the page.
+ *  The rows themselves are paged and live in the view. */
+export const fxRatesAtom = atom<{ filters: Required<Pick<FxRateFilter, "code" | "from" | "to" | "source">> }>({
+  filters: { code: "", from: "", to: "", source: "" },
 });
 
 export const templatesAtom = atom<{

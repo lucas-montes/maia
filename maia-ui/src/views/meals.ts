@@ -57,7 +57,7 @@ export function mount(root: HTMLElement): () => void {
         <!-- Fixed-height wrapper: with "maintainAspectRatio: false", Chart.js
              sizes the canvas to its containing block, so an auto-height parent
              produces a can-grow-forever feedback loop. Same pattern as
-             every chart panel in insights.ts. -->
+             every chart panel in insightCharts.ts. -->
         <div class="relative h-48"><canvas data-slot="rollup-chart"></canvas></div>
         <div class="mt-1 text-xs text-ink-500" data-slot="rollup-note"></div>
       </div>

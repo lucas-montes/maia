@@ -2,14 +2,23 @@ import { api } from "../lib/api";
 import { countsAtom } from "../lib/stores";
 import { setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
+import { mountInsightCharts } from "./insightCharts";
 
-/** Overview: daisyUI `stats` block like the dashboard template, plus quick
-    action cards using `list list-row`. */
+/** Overview: daisyUI `stats` block, the insights charts, then quick action
+    cards using `list list-row`. */
 export function mount(root: HTMLElement): () => void {
   root.innerHTML = `
-    <div class="flex min-h-0 flex-1 flex-col gap-4" data-slot="content"></div>
+    <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-auto">
+      <div data-slot="stats"></div>
+      <div data-slot="charts"></div>
+      <div data-slot="actions"></div>
+    </div>
   `;
-  const content = root.querySelector("[data-slot='content']") as HTMLElement;
+  const statsEl = root.querySelector("[data-slot='stats']") as HTMLElement;
+  const actionsEl = root.querySelector("[data-slot='actions']") as HTMLElement;
+  // The charts own their DOM and re-render themselves; the counts re-render
+  // below must never touch them, or every count update would reset them.
+  const disposeCharts = mountInsightCharts(root.querySelector("[data-slot='charts']") as HTMLElement);
 
   const stat = (title: string, value: number | string, desc: string) => `
     <div class="stat">
@@ -18,10 +27,10 @@ export function mount(root: HTMLElement): () => void {
       <div class="stat-desc">${desc}</div>
     </div>`;
 
-  const render = (): void => {
+  const renderStats = (): void => {
     const c = countsAtom.get();
     setHtml(
-      content,
+      statsEl,
       `
       <section class="stats stats-vertical bg-base-200 border border-base-300 xl:stats-horizontal w-full">
         ${stat("Tasks", c ? c.tasks : "–", "items to track")}
@@ -29,8 +38,13 @@ export function mount(root: HTMLElement): () => void {
         ${stat("Notes", c ? c.notes : "–", "knowledge entries")}
         ${stat("Goals", c ? c.goals : "–", "active objectives")}
         ${stat("URLs", c ? c.urls : "–", "saved links")}
-      </section>
+      </section>`,
+    );
+  };
 
+  setHtml(
+    actionsEl,
+    `
       <section class="card bg-base-200 border border-base-300">
         <div class="card-body">
           <div class="flex justify-between">
@@ -64,17 +78,19 @@ export function mount(root: HTMLElement): () => void {
           </ul>
         </div>
       </section>`,
-    );
-    refreshIcons(content);
-  };
+  );
+  refreshIcons(actionsEl);
 
-  render();
-  const unsub = countsAtom.subscribe(render);
+  renderStats();
+  const unsub = countsAtom.subscribe(renderStats);
   api
     .getCounts()
     .then((res) => {
       if (res.success && res.data) countsAtom.set(res.data);
     })
     .catch(() => {});
-  return unsub;
+  return () => {
+    unsub();
+    disposeCharts();
+  };
 }

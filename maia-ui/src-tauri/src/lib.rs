@@ -1780,45 +1780,141 @@ fn list_transactions(state: tauri::State<AppState>) -> CommandResult<Vec<serde_j
         error: None,
     }
 }
+/// One page of the FX rates history. Rates only ever exist against the
+/// deployment's base currency (the server fetches into it), so the base is not
+/// a filter. Every field is optional; a missing date bound leaves that side
+/// of the range open.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FxRateFilter {
+    code: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    /// "manual" or "auto"; anything else means both.
+    source: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+const FX_PAGE_DEFAULT: i64 = 100;
+const FX_PAGE_MAX: i64 = 500;
+
+/// Returns `(rows, has_more)`, newest date first. Asks for one row past the
+/// page to learn whether another page exists without a separate COUNT.
+fn query_fx_rates(
+    conn: &Connection,
+    base: &str,
+    f: &FxRateFilter,
+) -> rusqlite::Result<(Vec<serde_json::Value>, bool)> {
+    let mut sql = String::from(
+        "SELECT code, base_code, rate_date, rate_to_base, updated_at, manual FROM fx_rates \
+         WHERE base_code = ? AND deleted_at IS NULL",
+    );
+    let mut args: Vec<rusqlite::types::Value> = vec![base.to_string().into()];
+    let present = |o: &Option<String>| {
+        o.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(code) = present(&f.code) {
+        sql.push_str(" AND code = ?");
+        args.push(code.to_uppercase().into());
+    }
+    if let Some(from) = present(&f.from) {
+        sql.push_str(" AND rate_date >= ?");
+        args.push(from.into());
+    }
+    if let Some(to) = present(&f.to) {
+        sql.push_str(" AND rate_date <= ?");
+        args.push(to.into());
+    }
+    match f.source.as_deref() {
+        Some("manual") => sql.push_str(" AND manual = 1"),
+        Some("auto") => sql.push_str(" AND manual = 0"),
+        _ => {}
+    }
+    let limit = f.limit.unwrap_or(FX_PAGE_DEFAULT).clamp(1, FX_PAGE_MAX);
+    let offset = f.offset.unwrap_or(0).max(0);
+    sql.push_str(" ORDER BY rate_date DESC, code ASC LIMIT ? OFFSET ?");
+    args.push((limit + 1).into());
+    args.push(offset.into());
+
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows: Vec<serde_json::Value> = stmt
+        .query_map(rusqlite::params_from_iter(args), |r| {
+            Ok(serde_json::json!({
+                "code": r.get::<_, String>(0)?,
+                "baseCode": r.get::<_, String>(1)?,
+                "rateDate": r.get::<_, String>(2)?,
+                "rateToBase": r.get::<_, f64>(3)?,
+                "updatedAt": r.get::<_, i64>(4)?,
+                "manual": r.get::<_, i64>(5)? != 0,
+            }))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let has_more = rows.len() as i64 > limit;
+    rows.truncate(limit as usize);
+    Ok((rows, has_more))
+}
+
+/// The currencies that have rates against `base`, with how many rows each,
+/// for the rates page's currency filter.
+fn query_fx_rate_codes(conn: &Connection, base: &str) -> rusqlite::Result<Vec<serde_json::Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT code, COUNT(*), MAX(rate_date) FROM fx_rates \
+         WHERE base_code = ?1 AND deleted_at IS NULL GROUP BY code ORDER BY code",
+    )?;
+    let rows = stmt
+        .query_map(params![base], |r| {
+            Ok(serde_json::json!({
+                "code": r.get::<_, String>(0)?,
+                "count": r.get::<_, i64>(1)?,
+                "latestDate": r.get::<_, String>(2)?,
+            }))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+fn fx_error<T: Serialize>(e: impl std::fmt::Display) -> CommandResult<T> {
+    CommandResult { success: false, data: None, error: Some(format!("{e}")) }
+}
+
 #[tauri::command]
 fn list_fx_rates(
     state: tauri::State<AppState>,
-    base: Option<String>,
-    date: Option<String>,
-) -> CommandResult<Vec<serde_json::Value>> {
+    filter: Option<FxRateFilter>,
+) -> CommandResult<serde_json::Value> {
     let conn = match state.db.lock() {
         Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                data: None,
-                error: Some(format!("{e}")),
-            };
-        }
+        Err(e) => return fx_error(e),
     };
-    let b = base.unwrap_or_else(|| "USD".to_string());
-    let d = date.unwrap_or_else(|| "".to_string());
-    let mut sql =
-        "SELECT code, base_code, rate_date, rate_to_base, updated_at, manual FROM fx_rates"
-            .to_string();
-    let mut wh: Vec<String> = Vec::new();
-    if !d.is_empty() {
-        wh.push(format!("rate_date='{}'", d.replace('\'', "''")));
+    let base = base_currency();
+    match query_fx_rates(&conn, &base, &filter.unwrap_or_default()) {
+        Ok((items, has_more)) => CommandResult {
+            success: true,
+            data: Some(serde_json::json!({ "items": items, "hasMore": has_more, "base": base })),
+            error: None,
+        },
+        Err(e) => fx_error(e),
     }
-    if !b.is_empty() {
-        wh.push(format!("base_code='{}'", b.replace('\'', "''")));
-    }
-    if !wh.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&wh.join(" AND "));
-    }
-    sql.push_str(" ORDER BY updated_at DESC LIMIT 200");
-    let mut stmt = conn.prepare(&sql).unwrap();
-    let rows: Vec<serde_json::Value> = stmt.query_map([], |r| Ok(serde_json::json!({"code":r.get::<_,String>(0)?,"baseCode":r.get::<_,String>(1)?,"rateDate":r.get::<_,String>(2)?,"rateToBase":r.get::<_,f64>(3)?,"updatedAt":r.get::<_,i64>(4)?,"manual":r.get::<_,i64>(5)?!=0}))).unwrap().filter_map(|r|r.ok()).collect();
-    CommandResult {
-        success: true,
-        data: Some(rows),
-        error: None,
+}
+
+#[tauri::command]
+fn list_fx_rate_codes(state: tauri::State<AppState>) -> CommandResult<serde_json::Value> {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => return fx_error(e),
+    };
+    let base = base_currency();
+    match query_fx_rate_codes(&conn, &base) {
+        Ok(codes) => CommandResult {
+            success: true,
+            data: Some(serde_json::json!({ "codes": codes, "base": base })),
+            error: None,
+        },
+        Err(e) => fx_error(e),
     }
 }
 
@@ -4683,6 +4779,7 @@ pub fn run() {
             save_account,
             set_account_identity,
             list_fx_rates,
+            list_fx_rate_codes,
             exercise_progression,
             exercise_volume,
             nutrition_calories,
@@ -4973,6 +5070,77 @@ mod tests {
         assert!(task_detail(&conn, "nope").is_none());
     }
     use super::*;
+
+    // ---- FX rates: filtered, paged history ----
+
+    fn fx_rate(conn: &Connection, code: &str, base: &str, date: &str, manual: bool, deleted: bool) {
+        conn.execute(
+            "INSERT INTO fx_rates (code, base_code, rate_date, rate_to_base, updated_at, manual, deleted_at)
+             VALUES (?1, ?2, ?3, 1.1, 1000, ?4, ?5)",
+            params![code, base, date, manual as i64, deleted.then_some(2000i64)],
+        )
+        .unwrap();
+    }
+
+    fn fx_dates(rows: &[serde_json::Value]) -> Vec<String> {
+        rows.iter()
+            .map(|r| format!("{}@{}", r["code"].as_str().unwrap(), r["rateDate"].as_str().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn fx_rates_filter_by_code_range_and_source() {
+        let pool = maia::db::init_memory().unwrap();
+        let conn = pool.get().unwrap();
+        fx_rate(&conn, "USD", "EUR", "2026-01-05", false, false);
+        fx_rate(&conn, "USD", "EUR", "2026-01-06", true, false);
+        fx_rate(&conn, "USD", "EUR", "2026-01-07", false, true); // deleted
+        fx_rate(&conn, "GBP", "EUR", "2026-01-06", false, false);
+        fx_rate(&conn, "EUR", "USD", "2026-01-06", false, false); // other base
+
+        let all = query_fx_rates(&conn, "EUR", &FxRateFilter::default()).unwrap();
+        assert_eq!(fx_dates(&all.0), ["GBP@2026-01-06", "USD@2026-01-06", "USD@2026-01-05"]);
+        assert!(!all.1);
+
+        let usd = FxRateFilter { code: Some("usd".into()), ..Default::default() };
+        assert_eq!(fx_dates(&query_fx_rates(&conn, "EUR", &usd).unwrap().0), ["USD@2026-01-06", "USD@2026-01-05"]);
+
+        let range = FxRateFilter { from: Some("2026-01-06".into()), to: Some("2026-01-06".into()), ..Default::default() };
+        assert_eq!(fx_dates(&query_fx_rates(&conn, "EUR", &range).unwrap().0), ["GBP@2026-01-06", "USD@2026-01-06"]);
+
+        let open_end = FxRateFilter { to: Some("2026-01-05".into()), ..Default::default() };
+        assert_eq!(fx_dates(&query_fx_rates(&conn, "EUR", &open_end).unwrap().0), ["USD@2026-01-05"]);
+
+        let manual = FxRateFilter { source: Some("manual".into()), ..Default::default() };
+        assert_eq!(fx_dates(&query_fx_rates(&conn, "EUR", &manual).unwrap().0), ["USD@2026-01-06"]);
+        let auto = FxRateFilter { source: Some("auto".into()), ..Default::default() };
+        assert_eq!(query_fx_rates(&conn, "EUR", &auto).unwrap().0.len(), 2);
+
+        let codes = query_fx_rate_codes(&conn, "EUR").unwrap();
+        assert_eq!(codes.len(), 2);
+        assert_eq!(codes[1]["code"], "USD");
+        assert_eq!(codes[1]["count"], 2, "the deleted row does not count");
+        assert_eq!(codes[1]["latestDate"], "2026-01-06");
+    }
+
+    #[test]
+    fn fx_rates_page_through_with_has_more() {
+        let pool = maia::db::init_memory().unwrap();
+        let conn = pool.get().unwrap();
+        for day in 1..=5 {
+            fx_rate(&conn, "USD", "EUR", &format!("2026-02-0{day}"), false, false);
+        }
+        let page = |offset| FxRateFilter { limit: Some(2), offset: Some(offset), ..Default::default() };
+        let (p1, more1) = query_fx_rates(&conn, "EUR", &page(0)).unwrap();
+        assert_eq!(fx_dates(&p1), ["USD@2026-02-05", "USD@2026-02-04"]);
+        assert!(more1);
+        let (p3, more3) = query_fx_rates(&conn, "EUR", &page(4)).unwrap();
+        assert_eq!(fx_dates(&p3), ["USD@2026-02-01"]);
+        assert!(!more3);
+        let (exact, more_exact) = query_fx_rates(&conn, "EUR", &page(3)).unwrap();
+        assert_eq!(exact.len(), 2);
+        assert!(!more_exact, "a full last page has nothing after it");
+    }
 
     // ---- Insights: bucketing and running balance ----
 

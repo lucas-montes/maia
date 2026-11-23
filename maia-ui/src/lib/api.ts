@@ -16,6 +16,38 @@ export interface Envelope<T> {
   error?: string;
 }
 
+/** Filters for `list_fx_rates`; empty strings mean "no filter". */
+export interface FxRateFilter {
+  code?: string;
+  from?: string;
+  to?: string;
+  source?: "" | "manual" | "auto";
+  limit?: number;
+  offset?: number;
+}
+
+/** One row of the desktop `list_fx_rates` command. */
+export interface FxRate {
+  code: string;
+  baseCode: string;
+  rateDate: string;
+  rateToBase: number;
+  updatedAt: number;
+  manual: boolean;
+}
+
+export interface FxRatePage {
+  items: FxRate[];
+  hasMore: boolean;
+  base: string;
+}
+
+export interface FxRateCode {
+  code: string;
+  count: number;
+  latestDate: string;
+}
+
 /** One row of the desktop `list_accounts` command. */
 export interface FinanceAccount {
   id: string;
@@ -896,7 +928,12 @@ export const api = {
    *  `500 EUR → 500 base (rate 1)` for entries that never needed converting. */
   getBaseCurrency: () => invoke<Envelope<string>>("get_base_currency"),
 
-  listFxRates: (args: { base: string; date: string }) => invoke<unknown>("list_fx_rates", args),
+  /** One page of FX rate history against the deployment's base currency. */
+  listFxRates: (filter: FxRateFilter) => invoke<Envelope<FxRatePage>>("list_fx_rates", { filter }),
+
+  /** Currencies that have rates, with row counts, for the rates filter. */
+  listFxRateCodes: () =>
+    invoke<Envelope<{ codes: FxRateCode[]; base: string }>>("list_fx_rate_codes"),
 
   createFxRate: (args: { code: string; baseCode: string; rateDate: string; rateToBase: number }) =>
     invoke<unknown>("create_fx_rate", args),

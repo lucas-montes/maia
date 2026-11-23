@@ -12,7 +12,6 @@ interface NavItem {
 
 const TOP_LEVEL: NavItem[] = [
   { view: "dashboard", label: "Dashboard", icon: "gauge" },
-  { view: "insights", label: "Insights", icon: "line-chart" },
 ];
 
 const GROUPS: { name: string; icon: string; items: NavItem[] }[] = [
@@ -70,7 +69,7 @@ const GROUPS: { name: string; icon: string; items: NavItem[] }[] = [
     icon: "smartphone",
     items: [
       { view: "tags", label: "Tags", icon: "tag" },
-      { view: "fxRates", label: "FxRates", icon: "coins" },
+      { view: "fxRates", label: "FX rates", icon: "coins" },
       { view: "sync", label: "Sync", icon: "smartphone" },
       { view: "settings", label: "Settings", icon: "settings" },
     ],

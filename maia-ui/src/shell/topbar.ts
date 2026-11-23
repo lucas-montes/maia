@@ -22,7 +22,7 @@ const VIEW_TITLES: Record<string, string> = {
   accounts: "Accounts",
   transactions: "Transactions",
   tags: "Tags",
-  fxRates: "FxRates",
+  fxRates: "FX rates",
   sync: "Sync",
   settings: "Settings",
 };

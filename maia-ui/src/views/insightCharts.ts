@@ -3,10 +3,11 @@ import { api } from "../lib/api";
 import { escapeHtml, setHtml } from "../lib/dom";
 import { refreshIcons } from "../lib/icons";
 import { isEnvelopeFailure, unwrapList } from "../lib/api";
-import { panelClose, panelOpen, statusBanner } from "./shared";
+import { statusBanner } from "./shared";
 
 /**
- * Insights — charts across training, nutrition and finance.
+ * Insights charts across training, nutrition and finance, shown on the
+ * Dashboard (`dashboard.ts` mounts them via `mountInsightCharts`).
  *
  * Every chart here follows the `bodyMetrics.ts` pattern: a `<canvas>`, a
  * `Chart` instance held in a closure variable, and a `renderX()` that updates
@@ -104,10 +105,11 @@ function pivotCategoryTotals(rows: { bucket: string; category: string; total: nu
   return { buckets, series };
 }
 
-export function mount(root: HTMLElement): () => void {
+/** Renders the six charts into `root` (a fresh element owned by the caller,
+ *  so listeners attached to it go away with it) and returns their cleanup. */
+export function mountInsightCharts(root: HTMLElement): () => void {
   root.innerHTML = `
-    ${panelOpen("Insights", "Charts across training, nutrition, and finance", "panel-fit")}
-      <div class="min-h-0 flex-1 overflow-auto space-y-6" data-slot="sections">
+      <div class="grid grid-cols-1 gap-4 xl:grid-cols-2" data-slot="sections">
         <section class="card bg-base-200 border border-base-300">
           <div class="card-body gap-3">
             <div class="flex flex-wrap items-center justify-between gap-2">
@@ -179,11 +181,10 @@ export function mount(root: HTMLElement): () => void {
               </div>
             </div>
             <div data-slot="balance-status"></div>
-            <div class="h-56"><canvas data-slot="balance-chart"></canvas></div>
+            <div class="h-64"><canvas data-slot="balance-chart"></canvas></div>
           </div>
         </section>
       </div>
-    ${panelClose}
   `;
 
   const exerciseInput = root.querySelector<HTMLInputElement>("#insight-exercise")!;
