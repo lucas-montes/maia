@@ -9,6 +9,7 @@ pub mod fx;
 pub mod handlers;
 pub mod logs;
 pub mod matching;
+pub mod met;
 pub mod notes_mirror;
 pub mod notifier;
 pub mod openapi;
@@ -2390,6 +2391,70 @@ mod tests {
             .unwrap();
         assert_eq!(body["items"].as_array().unwrap().len(), 1);
         assert_eq!(body["items"][0]["exercises"].as_array().unwrap().len(), 1);
+        handle.abort();
+    }
+
+    /// A user-created exercise's MET is the user's to set and change; a
+    /// catalogue row's MET is curated, so a push may only fill it when missing.
+    #[tokio::test]
+    async fn push_exercises_met_follows_the_owner() {
+        let pool = crate::db::init_memory().unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO exercises (id, name, exercise_type, body_part, is_canonical, created_at, updated_at, met)
+                 VALUES ('walking', 'Walking', 'cardio', 'Cardio', 1, 1, 1, 3.5)",
+                [],
+            )
+            .unwrap();
+        }
+        let (port, handle) = crate::server::start_test_server_with_db(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let push = |body: serde_json::Value| {
+            let client = client.clone();
+            async move {
+                let resp = client
+                    .post(format!("http://127.0.0.1:{port}/exercises"))
+                    .header("Authorization", "Bearer test-key")
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), 200);
+            }
+        };
+        let met = |id: &str| -> Option<f64> {
+            pool.get()
+                .unwrap()
+                .query_row("SELECT met FROM exercises WHERE id=?1", [id], |r| r.get(0))
+                .unwrap()
+        };
+        let skate = |met: serde_json::Value| {
+            serde_json::json!({"exercises": [{
+                "id": "skate", "name": "Skating", "exerciseType": "cardio",
+                "isCanonical": true, "createdAt": 1000, "met": met
+            }]})
+        };
+
+        push(skate(serde_json::json!(7.0))).await;
+        assert_eq!(met("skate"), Some(7.0));
+        // Re-rated on the phone: the new value replaces the old one.
+        push(skate(serde_json::json!(7.5))).await;
+        assert_eq!(met("skate"), Some(7.5));
+        // A phone that predates MET sends nothing; that must not wipe it.
+        push(serde_json::json!({"exercises": [{
+            "id": "skate", "name": "Skating", "exerciseType": "cardio", "createdAt": 1000
+        }]}))
+        .await;
+        assert_eq!(met("skate"), Some(7.5));
+
+        // A catalogue row keeps its curated value.
+        push(serde_json::json!({"exercises": [{
+            "id": "walking", "name": "Walking", "exerciseType": "cardio",
+            "bodyPart": "Cardio", "createdAt": 1, "met": 9.0
+        }]}))
+        .await;
+        assert_eq!(met("walking"), Some(3.5));
         handle.abort();
     }
 

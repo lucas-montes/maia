@@ -65,6 +65,7 @@ pub fn seed_exercises_to(
         let faqs = v.get("faqs").and_then(|x| x.as_str()).map(|s| s.to_string());
         let keywords = v.get("keywords").map(|x| x.to_string());
         let exercise_type = exercise_type_for_body_part(body_part.as_deref());
+        let met = crate::met::met_for(&stem, body_part.as_deref(), equipment.as_deref());
         let has_image = images_dir.join(format!("{stem}.png")).exists()
             || images_dir.join(format!("{stem}.jpg")).exists();
         let has_video = videos_dir.join(format!("{stem}.mp4")).exists();
@@ -97,8 +98,8 @@ pub fn seed_exercises_to(
             }
         }
         let _ = conn.execute(
-            "INSERT INTO exercises (id, name, exercise_type, body_part, equipment, primary_muscle, secondary_muscle, instructions, tips, faqs, keywords, image_path, video_path, is_canonical, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,?14,?15) ON CONFLICT(id) DO UPDATE SET name=excluded.name, exercise_type=excluded.exercise_type, body_part=excluded.body_part, equipment=excluded.equipment, primary_muscle=excluded.primary_muscle, secondary_muscle=excluded.secondary_muscle, instructions=excluded.instructions, tips=excluded.tips, faqs=excluded.faqs, keywords=excluded.keywords, image_path=excluded.image_path, video_path=excluded.video_path, updated_at=excluded.updated_at",
-            params![stem, name, exercise_type, body_part, equipment, primary, secondary, instructions, tips, faqs, keywords, image_path, video_path, now, now],
+            "INSERT INTO exercises (id, name, exercise_type, body_part, equipment, primary_muscle, secondary_muscle, instructions, tips, faqs, keywords, image_path, video_path, is_canonical, created_at, updated_at, met) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,?14,?15,?16) ON CONFLICT(id) DO UPDATE SET name=excluded.name, exercise_type=excluded.exercise_type, body_part=excluded.body_part, equipment=excluded.equipment, primary_muscle=excluded.primary_muscle, secondary_muscle=excluded.secondary_muscle, instructions=excluded.instructions, tips=excluded.tips, faqs=excluded.faqs, keywords=excluded.keywords, image_path=excluded.image_path, video_path=excluded.video_path, updated_at=excluded.updated_at, met=excluded.met",
+            params![stem, name, exercise_type, body_part, equipment, primary, secondary, instructions, tips, faqs, keywords, image_path, video_path, now, now, met],
         );
         count += 1;
     }

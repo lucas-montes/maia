@@ -304,7 +304,33 @@ pub const MIGRATIONS: &[(i64, Step)] = &[
     // the model that read it, `receipt_effects` the model an accepted AI
     // proposal came from. Both `"<id> (<provider model>)"`. Server-only.
     (18, Step::Guarded(add_model_provenance)),
+    // Energy cost of each exercise (MET), so a workout can be turned into
+    // calories burned. Catalogue rows are filled from `met::met_for`;
+    // user-created rows (no `body_part`) stay NULL. The filled rows get a new
+    // `updated_at` on purpose: that is the only way phones pull the value, at
+    // the cost of one catalogue re-pull.
+    (19, Step::Guarded(add_exercise_met)),
 ];
+
+/// v19: the `exercises.met` column, filled for catalogue rows that lack one.
+/// Rows that already have a value (a replay after a walk-back) are left alone.
+fn add_exercise_met(conn: &Connection) -> anyhow::Result<()> {
+    if !column_exists(conn, "exercises", "met")? {
+        conn.execute_batch("ALTER TABLE exercises ADD COLUMN met REAL")?;
+    }
+    let rows: Vec<(String, Option<String>, Option<String>)> = conn
+        .prepare("SELECT id, body_part, equipment FROM exercises WHERE met IS NULL")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    let now = server_time_ms();
+    let mut update = conn.prepare("UPDATE exercises SET met = ?1, updated_at = ?2 WHERE id = ?3")?;
+    for (id, body_part, equipment) in rows {
+        if let Some(met) = crate::met::met_for(&id, body_part.as_deref(), equipment.as_deref()) {
+            update.execute(rusqlite::params![met, now, id])?;
+        }
+    }
+    Ok(())
+}
 
 fn add_model_provenance(conn: &Connection) -> anyhow::Result<()> {
     for (table, column) in [("receipts", "parsed_model"), ("receipt_effects", "model")] {
@@ -384,7 +410,7 @@ fn add_receipt_matching(conn: &Connection) -> anyhow::Result<()> {
 ///
 /// A database newer than this means the data is newer than the binary, which is
 /// what a Nix rollback looks like. `migrate` refuses rather than serving.
-pub const LATEST_VERSION: i64 = 18;
+pub const LATEST_VERSION: i64 = 19;
 
 /// The v1 schema, exactly as it shipped.
 ///
@@ -1461,6 +1487,46 @@ mod tests {
         );
     }
 
+    /// v19 fills `met` for catalogue rows and bumps them so phones pull the
+    /// value; user-created rows (no body part) and rows that already have a
+    /// value are left alone.
+    #[test]
+    fn migration_v19_fills_exercise_met_for_catalogue_rows() {
+        let conn = legacy_db();
+        super::migrate(&conn).unwrap();
+        for (id, body_part, equipment, met) in [
+            ("walking", Some("Cardio"), Some("Body weight"), None),
+            ("bench", Some("Chest"), Some("Barbell"), None),
+            ("custom", None, None, None),
+            ("rated", Some("Chest"), Some("Barbell"), Some(5.5)),
+        ] {
+            conn.execute(
+                "INSERT INTO exercises (id, name, exercise_type, body_part, equipment, created_at, updated_at, met)
+                 VALUES (?1, ?1, 'cardio', ?2, ?3, 1, 1000, ?4)",
+                params![id, body_part, equipment, met],
+            )
+            .unwrap();
+        }
+
+        super::set_user_version(&conn, 18).unwrap();
+        super::migrate(&conn).unwrap();
+
+        let read = |id: &str| -> (Option<f64>, i64) {
+            conn.query_row(
+                "SELECT met, updated_at FROM exercises WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        let (met, updated) = read("walking");
+        assert_eq!(met, Some(3.5));
+        assert!(updated > 1000, "a filled row must be re-pulled");
+        assert_eq!(read("bench").0, Some(3.5));
+        assert_eq!(read("custom"), (None, 1000));
+        assert_eq!(read("rated"), (Some(5.5), 1000));
+    }
+
     /// v5 repairs legacy body-part exercise types without making phones
     /// re-pull the catalogue.
     #[test]
@@ -1484,7 +1550,10 @@ mod tests {
             .unwrap();
         }
 
-        // Re-run only v5 against the already-created schema.
+        // Re-run from v5 against the already-created schema. A set `met` keeps
+        // v19 (which fills it and bumps `updated_at` on purpose) out of this
+        // test of v5.
+        conn.execute("UPDATE exercises SET met = 1.0", []).unwrap();
         super::set_user_version(&conn, 4).unwrap();
         super::migrate(&conn).unwrap();
 

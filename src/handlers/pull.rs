@@ -58,6 +58,8 @@ pub struct Exercise {
     pub has_image: bool,
     #[serde(rename = "hasVideo")]
     pub has_video: bool,
+    /// Energy cost (MET); null for user-created exercises nobody rated yet.
+    pub met: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -171,7 +173,7 @@ pub async fn pull_exercises(
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, exercise_type, body_part, equipment, primary_muscle, secondary_muscle, instructions, tips, faqs, keywords, similar_to, tags, is_canonical, created_at, updated_at, image_path, video_path FROM exercises WHERE deleted_at IS NULL AND (?1 <= 0 OR updated_at > ?1) ORDER BY updated_at",
+            "SELECT id, name, exercise_type, body_part, equipment, primary_muscle, secondary_muscle, instructions, tips, faqs, keywords, similar_to, tags, is_canonical, created_at, updated_at, image_path, video_path, met FROM exercises WHERE deleted_at IS NULL AND (?1 <= 0 OR updated_at > ?1) ORDER BY updated_at",
         )
         .unwrap();
     let items = stmt
@@ -201,6 +203,7 @@ pub async fn pull_exercises(
                 updated_at: row.get(15)?,
                 has_image: image_path.is_some(),
                 has_video: video_path.is_some(),
+                met: row.get(18)?,
             })
         })
         .unwrap()
@@ -786,6 +789,7 @@ fn read_exercise_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Exercise> {
         updated_at: row.get(15)?,
         has_image: image_path.is_some(),
         has_video: video_path.is_some(),
+        met: row.get(18)?,
     })
 }
 
@@ -796,7 +800,7 @@ pub async fn get_exercise_item(
     let conn = state.db.get().unwrap();
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, exercise_type, body_part, equipment, primary_muscle, secondary_muscle, instructions, tips, faqs, keywords, similar_to, tags, is_canonical, created_at, updated_at, image_path, video_path FROM exercises WHERE id = ?1 AND deleted_at IS NULL",
+            "SELECT id, name, exercise_type, body_part, equipment, primary_muscle, secondary_muscle, instructions, tips, faqs, keywords, similar_to, tags, is_canonical, created_at, updated_at, image_path, video_path, met FROM exercises WHERE id = ?1 AND deleted_at IS NULL",
         )
         .unwrap();
     match stmt.query_row([&id], read_exercise_row) {

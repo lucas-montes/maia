@@ -1543,6 +1543,9 @@ pub struct ExercisePush {
     pub is_canonical: bool,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
+    /// Energy cost (MET). Optional: clients that predate it send nothing.
+    #[serde(default)]
+    pub met: Option<f64>,
 }
 
 fn default_true() -> bool {
@@ -1558,9 +1561,12 @@ pub async fn push_exercises(
     let tx = conn.unchecked_transaction().unwrap();
     for e in payload.exercises {
         tx.execute(
-            "INSERT INTO exercises (id, name, exercise_type, body_part, equipment, primary_muscle, secondary_muscle, instructions, tips, faqs, keywords, similar_to, tags, is_canonical, created_at, updated_at, deleted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, NULL)
-             ON CONFLICT(id) DO UPDATE SET deleted_at=NULL, updated_at=excluded.updated_at",
+            "INSERT INTO exercises (id, name, exercise_type, body_part, equipment, primary_muscle, secondary_muscle, instructions, tips, faqs, keywords, similar_to, tags, is_canonical, created_at, updated_at, deleted_at, met)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, NULL, ?17)
+             ON CONFLICT(id) DO UPDATE SET deleted_at=NULL, updated_at=excluded.updated_at,
+                 met=CASE WHEN COALESCE(exercises.body_part, '') = ''
+                          THEN COALESCE(excluded.met, exercises.met)
+                          ELSE COALESCE(exercises.met, excluded.met) END",
             rusqlite::params![
                 e.id,
                 e.name,
@@ -1577,7 +1583,8 @@ pub async fn push_exercises(
                 e.tags,
                 if e.is_canonical { 1 } else { 0 },
                 e.created_at,
-                server_time
+                server_time,
+                e.met
             ],
         )
         .unwrap();

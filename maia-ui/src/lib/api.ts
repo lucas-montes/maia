@@ -634,6 +634,8 @@ export interface Exercise {
   faqs?: string | null;
   image_path?: string | null;
   hasImage?: boolean;
+  /** Energy cost in METs; null when the exercise is not rated. */
+  met?: number | null;
 }
 
 export interface TemplateExerciseBlock {
