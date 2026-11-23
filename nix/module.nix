@@ -128,7 +128,7 @@
         type = types.str;
         default =
           if config.provider == "gemini"
-          then "https://generativelanguage.googleapis.com/v1beta/models"
+          then "https://generativelanguage.googleapis.com/v1beta"
           else "https://api.openai.com/v1";
         defaultText = "the provider's public endpoint";
         example = "http://localhost:11434/v1";
@@ -136,7 +136,7 @@
       };
       model = mkOption {
         type = types.str;
-        example = "gemini-2.5-flash";
+        example = "gemini-3.8-flash";
         description = "The provider's model id.";
       };
       vision = mkOption {
@@ -288,7 +288,7 @@ in {
       default = {};
       example = {
         gemini-flash = {
-          model = "gemini-2.5-flash";
+          model = "gemini-3.8-flash";
           vision = true;
         };
         local = {
